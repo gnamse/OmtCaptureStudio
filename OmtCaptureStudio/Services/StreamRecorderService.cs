@@ -1,17 +1,17 @@
-using System.Diagnostics;
 using System.IO;
-using System.IO.Pipes;
 using OmtCaptureStudio.Models;
+using OmtCaptureStudio.Services.Sinks;
 
 namespace OmtCaptureStudio.Services;
 
+/// <summary>
+/// Orchestrates file recording sessions, tracks timing, frame counts, and file paths,
+/// while delegating transport mechanics to an IRecordingSink seam.
+/// </summary>
 public class StreamRecorderService : IDisposable
 {
-    private Process? _ffmpegProcess;
-    private NamedPipeServerStream? _videoPipe;
-    private NamedPipeServerStream? _audioPipe;
-    private Task? _videoPipeConnectTask;
-    private Task? _audioPipeConnectTask;
+    private readonly IRecordingSink _sink;
+    private readonly bool _ownsSink;
     private bool _isRecording;
     private string? _currentRecordingPath;
     private DateTime _recordStartTime;
@@ -23,21 +23,33 @@ public class StreamRecorderService : IDisposable
     public string? CurrentRecordingPath => _currentRecordingPath;
     public TimeSpan ElapsedTime => _isRecording ? DateTime.Now - _recordStartTime : TimeSpan.Zero;
     public long FramesWritten => _framesWritten;
+    public long AudioBytesWritten => _audioBytesWritten;
 
     public event Action<string>? RecordingStarted;
     public event Action<string, TimeSpan, long>? RecordingStopped;
     public event Action<string>? RecordingError;
 
     /// <summary>
-    /// Starts recording the incoming OMT stream to the specified path.
+    /// Default constructor utilizing production FFmpeg named pipe sink.
     /// </summary>
-    public bool StartRecording(
-        RecordingConfig config, 
-        int width, 
-        int height, 
-        double frameRate, 
-        int sampleRate, 
-        int channels)
+    public StreamRecorderService()
+        : this(new FfmpegPipeSink(), ownsSink: true)
+    {
+    }
+
+    /// <summary>
+    /// Constructor supporting dependency injection of custom or test recording sinks.
+    /// </summary>
+    public StreamRecorderService(IRecordingSink sink, bool ownsSink = false)
+    {
+        _sink = sink ?? throw new ArgumentNullException(nameof(sink));
+        _ownsSink = ownsSink;
+    }
+
+    /// <summary>
+    /// Starts recording the incoming OMT stream using the specified StreamFormat.
+    /// </summary>
+    public bool StartRecording(RecordingConfig config, StreamFormat format)
     {
         lock (_recordLock)
         {
@@ -45,7 +57,7 @@ public class StreamRecorderService : IDisposable
 
             try
             {
-                if (width <= 0 || height <= 0)
+                if (format.Width <= 0 || format.Height <= 0)
                 {
                     RecordingError?.Invoke("Cannot record: Invalid video dimensions.");
                     return false;
@@ -67,69 +79,12 @@ public class StreamRecorderService : IDisposable
                 string filename = $"{config.FilenamePrefix}_{timestamp}{ext}";
                 _currentRecordingPath = Path.Combine(config.OutputDirectory, filename);
 
-                string pipeSuffix = Guid.NewGuid().ToString("N").Substring(0, 8);
-                string videoPipeName = $"omt_video_{pipeSuffix}";
-                string audioPipeName = $"omt_audio_{pipeSuffix}";
-
-                // Create asynchronous named pipes for high throughput
-                _videoPipe = new NamedPipeServerStream(
-                    videoPipeName,
-                    PipeDirection.Out,
-                    1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous,
-                    1024 * 1024 * 32, // 32 MB buffer
-                    1024 * 1024 * 32);
-
-                _audioPipe = new NamedPipeServerStream(
-                    audioPipeName,
-                    PipeDirection.Out,
-                    1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous,
-                    1024 * 1024 * 4,  // 4 MB buffer
-                    1024 * 1024 * 4);
-
-                _videoPipeConnectTask = _videoPipe.WaitForConnectionAsync();
-                _audioPipeConnectTask = _audioPipe.WaitForConnectionAsync();
-
-                int fps = (int)Math.Round(frameRate > 0 ? frameRate : 60);
-
-                // Build FFmpeg command
-                string vCodecArgs = GetVideoCodecArguments(config.EncoderChoice, config.Quality);
-                string aCodecArgs = config.ContainerFormat == OutputContainerFormat.MOV && config.EncoderChoice == VideoEncoderChoice.ProRes
-                    ? "-c:a pcm_s24le"
-                    : "-c:a aac -b:a 320k";
-
-                string args = $"-y " +
-                    $"-f rawvideo -vcodec rawvideo -pix_fmt bgra -s {width}x{height} -r {fps} -i \\\\.\\pipe\\{videoPipeName} " +
-                    $"-f f32le -ar {sampleRate} -ac {channels} -i \\\\.\\pipe\\{audioPipeName} " +
-                    $"{vCodecArgs} {aCodecArgs} \"{_currentRecordingPath}\"";
-
-                _ffmpegProcess = new Process
+                bool initialized = _sink.Initialize(config, format, _currentRecordingPath);
+                if (!initialized)
                 {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = "ffmpeg",
-                        Arguments = args,
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        RedirectStandardError = true,
-                        RedirectStandardOutput = true
-                    },
-                    EnableRaisingEvents = true
-                };
-
-                _ffmpegProcess.ErrorDataReceived += (s, e) =>
-                {
-                    if (!string.IsNullOrWhiteSpace(e.Data))
-                    {
-                        Debug.WriteLine($"[FFmpeg] {e.Data}");
-                    }
-                };
-
-                _ffmpegProcess.Start();
-                _ffmpegProcess.BeginErrorReadLine();
+                    RecordingError?.Invoke("Failed to initialize recording sink.");
+                    return false;
+                }
 
                 _recordStartTime = DateTime.Now;
                 _framesWritten = 0;
@@ -141,7 +96,6 @@ public class StreamRecorderService : IDisposable
             }
             catch (Exception ex)
             {
-                CleanupPipesAndProcess();
                 RecordingError?.Invoke($"Failed to start recording: {ex.Message}");
                 return false;
             }
@@ -149,51 +103,63 @@ public class StreamRecorderService : IDisposable
     }
 
     /// <summary>
-    /// Writes a decoded BGRA video frame to the recording pipe.
+    /// Overload for backwards compatibility with raw scalar stream parameters.
     /// </summary>
-    public unsafe void WriteVideoFrame(IntPtr pData, int dataLength)
+    public bool StartRecording(
+        RecordingConfig config, 
+        int width, 
+        int height, 
+        double frameRate, 
+        int sampleRate, 
+        int channels)
     {
-        if (!_isRecording || _videoPipe == null || pData == IntPtr.Zero || dataLength <= 0) return;
-
-        try
+        var format = new StreamFormat
         {
-            if (_videoPipeConnectTask != null && !_videoPipeConnectTask.IsCompleted) return;
-            if (!_videoPipe.IsConnected) return;
+            Width = width,
+            Height = height,
+            FrameRate = frameRate,
+            SampleRate = sampleRate,
+            Channels = channels
+        };
 
-            byte* ptr = (byte*)pData.ToPointer();
-            var readOnlySpan = new ReadOnlySpan<byte>(ptr, dataLength);
-            _videoPipe.Write(readOnlySpan);
-            _framesWritten++;
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[Video Write Error] {ex.Message}");
-        }
+        return StartRecording(config, format);
     }
 
     /// <summary>
-    /// Writes interleaved 32-bit float audio bytes to the recording pipe.
+    /// Writes a decoded BGRA video frame to the recording sink.
+    /// </summary>
+    public void WriteVideoFrame(IntPtr pData, int dataLength)
+    {
+        if (!_isRecording || pData == IntPtr.Zero || dataLength <= 0) return;
+
+        _sink.WriteVideo(pData, dataLength);
+        Interlocked.Increment(ref _framesWritten);
+    }
+
+    /// <summary>
+    /// Writes interleaved 32-bit float audio bytes to the recording sink.
     /// </summary>
     public void WriteAudioData(byte[] interleavedBytes)
     {
-        if (!_isRecording || _audioPipe == null || interleavedBytes == null || interleavedBytes.Length == 0) return;
-
-        try
+        if (interleavedBytes != null)
         {
-            if (_audioPipeConnectTask != null && !_audioPipeConnectTask.IsCompleted) return;
-            if (!_audioPipe.IsConnected) return;
-
-            _audioPipe.Write(interleavedBytes, 0, interleavedBytes.Length);
-            _audioBytesWritten += interleavedBytes.Length;
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[Audio Write Error] {ex.Message}");
+            WriteAudioData(interleavedBytes, 0, interleavedBytes.Length);
         }
     }
 
     /// <summary>
-    /// Stops recording gracefully, allowing FFmpeg to finalize container headers.
+    /// Writes interleaved 32-bit float audio bytes with offset and count to the recording sink.
+    /// </summary>
+    public void WriteAudioData(byte[] buffer, int offset, int count)
+    {
+        if (!_isRecording || buffer == null || count <= 0) return;
+
+        _sink.WriteAudio(buffer, offset, count);
+        Interlocked.Add(ref _audioBytesWritten, count);
+    }
+
+    /// <summary>
+    /// Stops recording gracefully, finalizing the output container.
     /// </summary>
     public void StopRecording()
     {
@@ -204,79 +170,26 @@ public class StreamRecorderService : IDisposable
 
             string path = _currentRecordingPath ?? string.Empty;
             TimeSpan duration = DateTime.Now - _recordStartTime;
-            long fileSize = 0;
 
             try
             {
-                // Flashing and closing pipes signals EOF to FFmpeg
-                try { _videoPipe?.Flush(); _videoPipe?.Close(); } catch { }
-                try { _audioPipe?.Flush(); _audioPipe?.Close(); } catch { }
-
-                if (_ffmpegProcess != null && !_ffmpegProcess.HasExited)
-                {
-                    // Allow up to 5 seconds for FFmpeg to finish writing moov/mkv headers
-                    if (!_ffmpegProcess.WaitForExit(5000))
-                    {
-                        _ffmpegProcess.Kill();
-                    }
-                }
-
-                if (File.Exists(path))
-                {
-                    fileSize = new FileInfo(path).Length;
-                }
-
+                _sink.FinalizeSink(out long fileSize);
                 RecordingStopped?.Invoke(path, duration, fileSize);
             }
             catch (Exception ex)
             {
                 RecordingError?.Invoke($"Error finalizing recording: {ex.Message}");
             }
-            finally
-            {
-                CleanupPipesAndProcess();
-            }
         }
-    }
-
-    private void CleanupPipesAndProcess()
-    {
-        try { _videoPipe?.Dispose(); } catch { }
-        try { _audioPipe?.Dispose(); } catch { }
-        try { _ffmpegProcess?.Dispose(); } catch { }
-
-        _videoPipe = null;
-        _audioPipe = null;
-        _ffmpegProcess = null;
-        _videoPipeConnectTask = null;
-        _audioPipeConnectTask = null;
-        _isRecording = false;
-    }
-
-    private static string GetVideoCodecArguments(VideoEncoderChoice encoder, QualityPreset quality)
-    {
-        int crf = quality switch
-        {
-            QualityPreset.Ultra => 16,
-            QualityPreset.High => 20,
-            QualityPreset.Medium => 24,
-            QualityPreset.Low => 28,
-            _ => 20
-        };
-
-        return encoder switch
-        {
-            VideoEncoderChoice.NvidiaNvenc => $"-c:v h264_nvenc -preset p4 -cq {crf} -pix_fmt yuv420p",
-            VideoEncoderChoice.IntelQuickSync => $"-c:v h264_qsv -global_quality {crf} -pix_fmt yuv420p",
-            VideoEncoderChoice.AmdAmf => $"-c:v h264_amf -quality quality -pix_fmt yuv420p",
-            VideoEncoderChoice.ProRes => "-c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le",
-            VideoEncoderChoice.CpuX264 => $"-c:v libx264 -preset veryfast -crf {crf} -pix_fmt yuv420p",
-            _ => $"-c:v libx264 -preset veryfast -crf {crf} -pix_fmt yuv420p" // Safe default fallback
-        };
     }
 
     public void Dispose()
     {
         StopRecording();
+        if (_ownsSink)
+        {
+            _sink.Dispose();
+        }
+        GC.SuppressFinalize(this);
     }
 }

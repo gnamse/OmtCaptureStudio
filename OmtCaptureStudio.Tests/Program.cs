@@ -3,6 +3,8 @@ using System.IO;
 using System.Runtime.InteropServices;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
+using OmtCaptureStudio.Services.Sinks;
+using OmtCaptureStudio.Services.Sources;
 
 namespace OmtCaptureStudio.Tests;
 
@@ -71,6 +73,52 @@ class Program
         Console.WriteLine(" -> All source parsing & display formatting tests passed cleanly!");
         Console.ResetColor();
 
+        Console.WriteLine("\n[Step 0.5] Verifying In-Memory Seams (SyntheticPatternSource + NullRecordingSink)...");
+        var nullSink = new NullRecordingSink();
+        using (var testRecorder = new StreamRecorderService(nullSink))
+        using (var testAudio = new AudioEngine())
+        using (var testSession = new CaptureSession(testAudio, testRecorder))
+        {
+            long syntheticVideoCount = 0;
+            testSession.VideoFrameAvailable += (p, len, w, h, s, fps, ts) => Interlocked.Increment(ref syntheticVideoCount);
+
+            testSession.Connect(new SyntheticPatternSource());
+
+            int seamWait = 0;
+            while (syntheticVideoCount < 5 && seamWait < 20)
+            {
+                Thread.Sleep(50);
+                seamWait++;
+            }
+
+            if (syntheticVideoCount == 0)
+            {
+                throw new Exception("SyntheticPatternSource failed to deliver frames in-memory!");
+            }
+
+            Console.WriteLine($" -> SyntheticPatternSource delivered {syntheticVideoCount} frames in-memory with zero network sockets!");
+
+            var testConfig = new RecordingConfig
+            {
+                OutputDirectory = Path.GetTempPath(),
+                FilenamePrefix = "Seam_Test"
+            };
+
+            bool seamRecordStarted = testSession.StartRecording(testConfig);
+            if (!seamRecordStarted)
+            {
+                throw new Exception("Failed to start recording via NullRecordingSink!");
+            }
+
+            Thread.Sleep(300);
+            testSession.StopRecording();
+
+            Console.WriteLine($" -> NullRecordingSink captured {nullSink.VideoFramesReceived} video frames, {nullSink.AudioBytesReceived} audio bytes in memory (0 disk I/O, 0 FFmpeg processes)!");
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine(" -> Architectural seams successfully verified!");
+            Console.ResetColor();
+        }
+
         string testSource = "OMT_Automated_Test_Source";
         string outputDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "TestOutput");
         if (Directory.Exists(outputDir))
@@ -109,50 +157,33 @@ class Program
             connectTarget = addrs.FirstOrDefault(a => a.Contains(testSource, StringComparison.OrdinalIgnoreCase)) ?? addrs[0];
         }
 
-        Console.WriteLine($"\n[Step 3] Initializing OmtReceiverService & Connecting to target: {connectTarget}...");
-        using var receiver = new OmtReceiverService();
-        using var audioProcessor = new AudioProcessor();
-        using var recorder = new StreamRecorderService();
+        Console.WriteLine($"\n[Step 3] Initializing Headless CaptureSession & Connecting to target: {connectTarget}...");
+        using var session = new CaptureSession();
 
         long videoFrameCount = 0;
         long audioFrameCount = 0;
-        int receivedWidth = 0;
-        int receivedHeight = 0;
-        double receivedFps = 0;
-        int receivedSampleRate = 0;
-        int receivedChannels = 0;
+        StreamFormat? detectedFormat = null;
+        AudioLevelData? lastAudioLevels = null;
 
-        receiver.VideoFrameReceived += (pData, length, w, h, stride, fps, ts) =>
+        session.VideoFrameAvailable += (pData, length, w, h, stride, fps, ts) =>
         {
             Interlocked.Increment(ref videoFrameCount);
-            receivedWidth = w;
-            receivedHeight = h;
-            receivedFps = fps;
-
-            if (recorder.IsRecording)
-            {
-                recorder.WriteVideoFrame(pData, length);
-            }
         };
 
-        receiver.AudioFrameReceived += (pPlanarData, channels, samples, rate, ts) =>
+        session.AudioLevelsUpdated += levels =>
         {
             Interlocked.Increment(ref audioFrameCount);
-            receivedChannels = channels;
-            receivedSampleRate = rate;
-
-            var levels = audioProcessor.ComputeLevels(pPlanarData, channels, samples);
-            byte[] interleaved = audioProcessor.InterleaveFloatAudio(pPlanarData, channels, samples);
-
-            if (recorder.IsRecording)
-            {
-                recorder.WriteAudioData(interleaved);
-            }
+            lastAudioLevels = levels;
         };
 
-        receiver.Connect(connectTarget);
+        session.FormatChanged += fmt =>
+        {
+            detectedFormat = fmt;
+        };
 
-        Console.WriteLine(" -> Waiting for connection and first video and audio frames...");
+        session.Connect(connectTarget);
+
+        Console.WriteLine(" -> Waiting for connection and first video and audio frames via CaptureSession...");
         int waitAttempts = 0;
         while ((videoFrameCount < 5 || audioFrameCount < 5) && waitAttempts < 60)
         {
@@ -160,7 +191,7 @@ class Program
             waitAttempts++;
             if (waitAttempts % 10 == 0)
             {
-                Console.WriteLine($" [Poll {waitAttempts}] Sender Connections: {generator.IsRunning}, Receiver IsConnected: {receiver.IsConnected}, VideoFrames={videoFrameCount}, AudioFrames={audioFrameCount}");
+                Console.WriteLine($" [Poll {waitAttempts}] Sender Running: {generator.IsRunning}, Session Connected: {session.IsConnected}, VideoFrames={videoFrameCount}, AudioFrames={audioFrameCount}");
             }
         }
 
@@ -173,9 +204,11 @@ class Program
             return;
         }
 
-        Console.WriteLine($" -> Stream detected: {receivedWidth}x{receivedHeight} @ {receivedFps:F2} fps, {receivedChannels}ch {receivedSampleRate}Hz");
+        var activeFormat = session.CurrentFormat;
+        Console.WriteLine($" -> Stream detected: {activeFormat.VideoSpecsText}, {activeFormat.AudioSpecsText}");
+        Console.WriteLine($" -> Audio levels computed: {lastAudioLevels?.Channels.Length ?? 0} channels, Peak Ch0: {lastAudioLevels?.Channels[0].PeakDb:F1} dBFS");
 
-        Console.WriteLine("\n[Step 4] Starting Stream Recording via Named Pipe to FFmpeg...");
+        Console.WriteLine("\n[Step 4] Starting Stream Recording via CaptureSession.StartRecording()...");
         var config = new RecordingConfig
         {
             ContainerFormat = OutputContainerFormat.MP4,
@@ -185,31 +218,24 @@ class Program
             FilenamePrefix = "Test_Record"
         };
 
-        bool started = recorder.StartRecording(
-            config,
-            receivedWidth,
-            receivedHeight,
-            receivedFps,
-            receivedSampleRate,
-            receivedChannels
-        );
+        bool started = session.StartRecording(config);
 
         if (!started)
         {
             Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine("[FAILED] Could not start recording!");
+            Console.WriteLine("[FAILED] Could not start recording via CaptureSession!");
             Console.ResetColor();
             return;
         }
 
-        Console.WriteLine($" -> Recording active. Writing frames to {recorder.CurrentRecordingPath} for 3 seconds...");
+        Console.WriteLine($" -> Recording active. Writing frames to {session.CurrentRecordingPath} for 3 seconds...");
         Thread.Sleep(3000);
 
-        Console.WriteLine("\n[Step 5] Stopping Recording & Finalizing MP4 Container...");
-        recorder.StopRecording();
+        Console.WriteLine("\n[Step 5] Stopping Recording & Finalizing MP4 Container via CaptureSession.StopRecording()...");
+        string? recordedFile = session.CurrentRecordingPath;
+        session.StopRecording();
         Thread.Sleep(500);
 
-        string? recordedFile = recorder.CurrentRecordingPath;
         if (string.IsNullOrEmpty(recordedFile) || !File.Exists(recordedFile))
         {
             Console.ForegroundColor = ConsoleColor.Red;

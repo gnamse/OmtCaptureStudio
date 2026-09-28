@@ -7,36 +7,25 @@ using System.Windows.Threading;
 using Microsoft.Win32;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
+using OmtCaptureStudio.Services.Sources;
 
 namespace OmtCaptureStudio;
 
 public partial class MainWindow : Window
 {
+    private readonly CaptureSession _session;
     private readonly OmtDiscoveryService _discoveryService;
-    private readonly OmtReceiverService _receiverService;
-    private readonly AudioProcessor _audioProcessor;
-    private readonly StreamRecorderService _recorderService;
-    private readonly OmtTestPatternGenerator _testGenerator;
 
     private WriteableBitmap? _videoBitmap;
     private readonly DispatcherTimer _recordUiTimer;
-    private int _currentWidth;
-    private int _currentHeight;
-    private double _currentFps = 60.0;
-    private int _currentSampleRate = 48000;
-    private int _currentChannels = 2;
-    private readonly object _bitmapLock = new();
     private bool _isUpdatingSources;
 
     public MainWindow()
     {
         InitializeComponent();
 
+        _session = new CaptureSession();
         _discoveryService = new OmtDiscoveryService();
-        _receiverService = new OmtReceiverService();
-        _audioProcessor = new AudioProcessor();
-        _recorderService = new StreamRecorderService();
-        _testGenerator = new OmtTestPatternGenerator();
 
         _recordUiTimer = new DispatcherTimer
         {
@@ -75,25 +64,25 @@ public partial class MainWindow : Window
 
     private void HookEvents()
     {
-        // Discovery
+        // Network Source Discovery
         _discoveryService.SourcesUpdated += OnSourcesUpdated;
 
-        // Receiver
-        _receiverService.VideoFrameReceived += OnVideoFrameReceived;
-        _receiverService.AudioFrameReceived += OnAudioFrameReceived;
-        _receiverService.TelemetryUpdated += OnTelemetryUpdated;
-        _receiverService.ConnectionStatusChanged += OnConnectionStatusChanged;
-        _receiverService.ErrorOccurred += OnReceiverError;
+        // Capture Engine Events
+        _session.VideoFrameAvailable += OnVideoFrameAvailable;
+        _session.AudioLevelsUpdated += OnAudioLevelsUpdated;
+        _session.TelemetryUpdated += OnTelemetryUpdated;
+        _session.StatusChanged += OnStatusChanged;
+        _session.ErrorOccurred += OnSessionError;
 
-        // Recorder
-        _recorderService.RecordingStarted += OnRecordingStarted;
-        _recorderService.RecordingStopped += OnRecordingStopped;
-        _recorderService.RecordingError += OnRecordingError;
+        // Recording Lifecycle Events
+        _session.RecordingStarted += OnRecordingStarted;
+        _session.RecordingStopped += OnRecordingStopped;
+        _session.RecordingError += OnRecordingError;
 
         // VU Meter local audio monitor toggle
         VuMeter.MonitoringToggled += enabled =>
         {
-            _audioProcessor.IsMonitoringEnabled = enabled;
+            _session.IsAudioMonitoringEnabled = enabled;
         };
     }
 
@@ -151,7 +140,6 @@ public partial class MainWindow : Window
         if (CmbSources.SelectedItem is OmtSourceInfo info)
         {
             CmbSources.ToolTip = $"{info.DisplayName}\nAddress: {info.Address}";
-            // Do not overwrite manual URL if updating programmatically or if user is typing in manual URL
             if (!_isUpdatingSources && !TxtManualUrl.IsFocused)
             {
                 TxtManualUrl.Text = info.Address;
@@ -171,9 +159,9 @@ public partial class MainWindow : Window
 
     private void BtnConnect_Click(object sender, RoutedEventArgs e)
     {
-        if (_receiverService.IsConnected || BtnConnect.Content.ToString() == "Disconnect")
+        if (_session.IsConnected || BtnConnect.Content.ToString() == "Disconnect")
         {
-            _receiverService.Disconnect();
+            _session.Disconnect();
             BtnConnect.Content = "Connect";
             BtnConnect.Background = new SolidColorBrush(Color.FromRgb(16, 185, 129));
             BtnConnect.Foreground = new SolidColorBrush(Colors.Black);
@@ -199,7 +187,7 @@ public partial class MainWindow : Window
                 TxtSourceName.Text = url;
             }
 
-            _receiverService.Connect(url);
+            _session.Connect(url);
             BtnConnect.Content = "Disconnect";
             BtnConnect.Background = new SolidColorBrush(Color.FromRgb(239, 68, 68));
             BtnConnect.Foreground = new SolidColorBrush(Colors.White);
@@ -212,36 +200,26 @@ public partial class MainWindow : Window
 
         if (isStarting)
         {
-            _testGenerator.Start();
             BtnTestSignal.Background = new SolidColorBrush(Color.FromRgb(99, 102, 241));
             BtnTestSignal.Foreground = new SolidColorBrush(Colors.White);
-            TxtStatus.Text = "Local test pattern generator started. Connecting...";
+            TxtSourceName.Text = "Local Test Pattern (SMPTE)";
+            TxtStatus.Text = "Connected to internal synthetic test generator.";
 
-            // Auto connect to the local test pattern source
-            Task.Delay(500).ContinueWith(_ =>
-            {
-                Dispatcher.Invoke(() =>
-                {
-                    string target = _testGenerator.Address ?? _testGenerator.Url ?? _testGenerator.SourceName;
-                    TxtManualUrl.Text = target;
-                    TxtSourceName.Text = target;
-                    _receiverService.Connect(target);
-                    BtnConnect.Content = "Disconnect";
-                    BtnConnect.Background = new SolidColorBrush(Color.FromRgb(239, 68, 68));
-                    BtnConnect.Foreground = new SolidColorBrush(Colors.White);
-                });
-            });
+            _session.Connect(new SyntheticPatternSource());
+
+            BtnConnect.Content = "Disconnect";
+            BtnConnect.Background = new SolidColorBrush(Color.FromRgb(239, 68, 68));
+            BtnConnect.Foreground = new SolidColorBrush(Colors.White);
         }
         else
         {
-            _testGenerator.Stop();
             BtnTestSignal.Background = new SolidColorBrush(Color.FromRgb(39, 39, 42));
             BtnTestSignal.Foreground = new SolidColorBrush(Color.FromRgb(244, 244, 245));
-            TxtStatus.Text = "Test pattern generator stopped.";
+            TxtStatus.Text = "Test pattern stopped.";
 
-            if (_receiverService.IsConnected)
+            if (_session.IsConnected)
             {
-                _receiverService.Disconnect();
+                _session.Disconnect();
                 BtnConnect.Content = "Connect";
                 BtnConnect.Background = new SolidColorBrush(Color.FromRgb(16, 185, 129));
                 BtnConnect.Foreground = new SolidColorBrush(Colors.Black);
@@ -249,7 +227,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void OnConnectionStatusChanged(string status)
+    private void OnStatusChanged(string status)
     {
         Dispatcher.InvokeAsync(() =>
         {
@@ -257,7 +235,7 @@ public partial class MainWindow : Window
         });
     }
 
-    private void OnReceiverError(string error)
+    private void OnSessionError(string error)
     {
         Dispatcher.InvokeAsync(() =>
         {
@@ -269,19 +247,9 @@ public partial class MainWindow : Window
 
     #region Video & Audio Processing Handlers
 
-    private void OnVideoFrameReceived(IntPtr pData, int dataLength, int width, int height, int stride, double fps, long timestamp)
+    private void OnVideoFrameAvailable(IntPtr pData, int dataLength, int width, int height, int stride, double fps, long timestamp)
     {
-        _currentWidth = width;
-        _currentHeight = height;
-        _currentFps = fps;
-
-        // 1. Forward frame to Recorder if recording is active
-        if (_recorderService.IsRecording)
-        {
-            _recorderService.WriteVideoFrame(pData, dataLength);
-        }
-
-        // 2. Render to GUI Video Preview
+        // Render to GUI Video Preview on UI Thread
         Dispatcher.InvokeAsync(() =>
         {
             try
@@ -312,26 +280,12 @@ public partial class MainWindow : Window
         }, DispatcherPriority.Render);
     }
 
-    private void OnAudioFrameReceived(IntPtr pPlanarData, int channels, int samplesPerChannel, int sampleRate, long timestamp)
+    private void OnAudioLevelsUpdated(AudioLevelData levels)
     {
-        _currentChannels = channels;
-        _currentSampleRate = sampleRate;
-
-        // 1. Calculate VU meter levels
-        var levelData = _audioProcessor.ComputeLevels(pPlanarData, channels, samplesPerChannel);
-        VuMeter.UpdateLevels(levelData);
-
-        // 2. Interleave planar audio
-        byte[] interleavedBytes = _audioProcessor.InterleaveFloatAudio(pPlanarData, channels, samplesPerChannel);
-
-        // 3. Audio monitoring
-        _audioProcessor.FeedMonitoringAudio(interleavedBytes, sampleRate, channels);
-
-        // 4. Forward to recording pipe
-        if (_recorderService.IsRecording)
+        Dispatcher.InvokeAsync(() =>
         {
-            _recorderService.WriteAudioData(interleavedBytes);
-        }
+            VuMeter.UpdateLevels(levels);
+        });
     }
 
     private void OnTelemetryUpdated(StreamTelemetry t)
@@ -350,13 +304,13 @@ public partial class MainWindow : Window
 
     private void BtnRecord_Click(object sender, RoutedEventArgs e)
     {
-        if (_recorderService.IsRecording)
+        if (_session.IsRecording)
         {
-            _recorderService.StopRecording();
+            _session.StopRecording();
         }
         else
         {
-            if (!_receiverService.IsConnected || _currentWidth <= 0 || _currentHeight <= 0)
+            if (!_session.IsConnected || !_session.CurrentFormat.HasVideo)
             {
                 MessageBox.Show("Please connect to an active OMT stream before recording.", "OMT Capture Studio", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
@@ -370,14 +324,7 @@ public partial class MainWindow : Window
                 OutputDirectory = TxtOutputDir.Text.Trim()
             };
 
-            bool started = _recorderService.StartRecording(
-                config,
-                _currentWidth,
-                _currentHeight,
-                _currentFps,
-                _currentSampleRate,
-                _currentChannels
-            );
+            bool started = _session.StartRecording(config);
 
             if (!started)
             {
@@ -424,12 +371,12 @@ public partial class MainWindow : Window
 
     private void RecordUiTimer_Tick(object? sender, EventArgs e)
     {
-        if (_recorderService.IsRecording)
+        if (_session.IsRecording)
         {
-            var elapsed = _recorderService.ElapsedTime;
+            var elapsed = _session.RecordingElapsedTime;
             TxtRecordDuration.Text = elapsed.ToString(@"hh\:mm\:ss");
 
-            long frames = _recorderService.FramesWritten;
+            long frames = _session.RecordingFramesWritten;
             TxtRecordStats.Text = $"Writing... {frames:N0} frames";
         }
     }
@@ -480,15 +427,8 @@ public partial class MainWindow : Window
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
-        if (_recorderService.IsRecording)
-        {
-            _recorderService.StopRecording();
-        }
-
         _discoveryService.Dispose();
-        _receiverService.Dispose();
-        _audioProcessor.Dispose();
-        _testGenerator.Dispose();
+        _session.Dispose();
 
         base.OnClosing(e);
     }
