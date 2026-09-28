@@ -8,6 +8,7 @@
         Title="OMT Capture Studio - Open Media Transport Recorder" 
         Height="800" Width="1240" MinHeight="650" MinWidth="950"
         Background="#0F0F12" Foreground="#F4F4F5"
+        Icon="Resources/app.ico"
         WindowStartupLocation="CenterScreen">
 
     <Window.Resources>
