@@ -34,4 +34,8 @@ $RECYCLE.BIN/
 # OMT SDK and published bundles
 OMT_SDK/
 Publish_AOT/
+Releases/
 *.zip
+*.sha256
+*.bat
+*.ps1
