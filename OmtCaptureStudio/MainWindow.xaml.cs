@@ -171,7 +171,7 @@ public partial class MainWindow : Window
 
     private void BtnConnect_Click(object sender, RoutedEventArgs e)
     {
-        if (_receiverService.IsConnected)
+        if (_receiverService.IsConnected || BtnConnect.Content.ToString() == "Disconnect")
         {
             _receiverService.Disconnect();
             BtnConnect.Content = "Connect";
