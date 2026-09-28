@@ -15,8 +15,8 @@ public static class Program
     [STAThread]
     public static void Main(string[] args)
     {
-        // Ensure Windows searches the application root directory for native libomt.dll and libvmx.dll
-        SetDllDirectory(AppContext.BaseDirectory);
+        // Ensure all native C++ runtimes and codecs are ready (extracts from single-exe if needed)
+        NativePayloadBootstrapper.Initialize();
 
         BuildAvaloniaApp()
             .StartWithClassicDesktopLifetime(args);

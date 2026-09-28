@@ -35,6 +35,7 @@ $RECYCLE.BIN/
 OMT_SDK/
 Publish_AOT/
 Releases/
+NativePayload/
 *.zip
 *.sha256
 *.bat

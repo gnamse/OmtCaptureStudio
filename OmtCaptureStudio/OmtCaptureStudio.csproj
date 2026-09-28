@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <AvaloniaResource Include="Resources\**" />
+    <EmbeddedResource Include="NativePayload\win-x64\*" LogicalName="NativePayload.%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>
