@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="OmtCaptureStudio.Tests/OmtCaptureStudio.Tests.csproj" />
+  <Project Path="OmtCaptureStudio/OmtCaptureStudio.csproj" />
+</Solution>

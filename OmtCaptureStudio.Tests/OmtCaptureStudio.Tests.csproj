@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\OmtCaptureStudio\OmtCaptureStudio.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="libomtnet">
+      <HintPath>..\OmtCaptureStudio\libs\libomtnet.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="..\OmtCaptureStudio\libs\libomt.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>libomt.dll</Link>
+      <Visible>false</Visible>
+    </None>
+    <None Update="..\OmtCaptureStudio\libs\libvmx.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>libvmx.dll</Link>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+</Project>

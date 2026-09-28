@@ -1,0 +1,37 @@
+# Build outputs & caches
+.zig-cache/
+bin/
+obj/
+
+# Native build artifacts
+src/native/target/
+
+# Teamwork agent workspaces (ephemeral)
+.agents/
+
+# Diagnostic dumps & logs
+diag*.txt
+*.log
+
+# Visual Studio & IDEs
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Windows OS files
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/
+.zig-cache
+/lessons
+/learning-records
+/reference
+# OMT SDK and published bundles
+OMT_SDK/
+Publish_AOT/
+*.zip
