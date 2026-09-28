@@ -20,18 +20,18 @@ class Program
         SetDllDirectory(AppDomain.CurrentDomain.BaseDirectory);
 
         Console.WriteLine("\n[Step 0] Verifying OMT Source Info Parsing & Display Formatting...");
-        var test1 = OmtSourceInfo.Parse("WINDOWS-LL3KVGQ (vMix - Output 1)");
-        if (test1.Name != "vMix - Output 1" || test1.Host != "WINDOWS-LL3KVGQ" || test1.DisplayName != "vMix - Output 1 (WINDOWS-LL3KVGQ)")
+        var test1 = OmtSourceInfo.Parse("PC (vMix - Output 1)");
+        if (test1.Name != "vMix - Output 1" || test1.Host != "PC" || test1.DisplayName != "vMix - Output 1 (PC)")
         {
             throw new Exception($"Test1 failed: Name='{test1.Name}', Host='{test1.Host}', Display='{test1.DisplayName}'");
         }
-        if (test1.Address != "WINDOWS-LL3KVGQ (vMix - Output 1)")
+        if (test1.Address != "PC (vMix - Output 1)")
         {
             throw new Exception($"Test1 address failed: Address='{test1.Address}'");
         }
 
-        var test2 = OmtSourceInfo.Parse("vMix - Output 1 @ WINDOWS-LL3KVGQ");
-        if (test2.Name != "vMix - Output 1" || test2.Host != "WINDOWS-LL3KVGQ" || test2.DisplayName != "vMix - Output 1 (WINDOWS-LL3KVGQ)")
+        var test2 = OmtSourceInfo.Parse("vMix - Output 1 @ PC");
+        if (test2.Name != "vMix - Output 1" || test2.Host != "PC" || test2.DisplayName != "vMix - Output 1 (PC)")
         {
             throw new Exception($"Test2 failed: Name='{test2.Name}', Host='{test2.Host}', Display='{test2.DisplayName}'");
         }
@@ -43,14 +43,14 @@ class Program
         }
 
         // Test redundant double-wrapping edge cases from user screenshot
-        var test4 = OmtSourceInfo.Parse("WINDOWS-LL3KVGQ (vMix - Output 1) (WINDOWS-LL3KVGQ (vMix - Output 1))");
-        if (test4.Name != "vMix - Output 1" || test4.Host != "WINDOWS-LL3KVGQ" || test4.DisplayName != "vMix - Output 1 (WINDOWS-LL3KVGQ)")
+        var test4 = OmtSourceInfo.Parse("PC (vMix - Output 1) (PC (vMix - Output 1))");
+        if (test4.Name != "vMix - Output 1" || test4.Host != "PC" || test4.DisplayName != "vMix - Output 1 (PC)")
         {
             throw new Exception($"Test4 failed (redundant duplicate): Name='{test4.Name}', Host='{test4.Host}', Display='{test4.DisplayName}'");
         }
 
-        var test5 = OmtSourceInfo.Parse("WINDOWS-LL3KVGQ (Audio Headset Microphone) (WINDOWS-LL3KVGQ (Audio Headset Microphone))");
-        if (test5.Name != "Audio Headset Microphone" || test5.Host != "WINDOWS-LL3KVGQ" || test5.DisplayName != "Audio Headset Microphone (WINDOWS-LL3KVGQ)")
+        var test5 = OmtSourceInfo.Parse("PC (Audio Headset Microphone) (PC (Audio Headset Microphone))");
+        if (test5.Name != "Audio Headset Microphone" || test5.Host != "PC" || test5.DisplayName != "Audio Headset Microphone (PC)")
         {
             throw new Exception($"Test5 failed: Name='{test5.Name}', Host='{test5.Host}', Display='{test5.DisplayName}'");
         }
