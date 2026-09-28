@@ -1,10 +1,13 @@
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Windows;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
-using Microsoft.Win32;
+using System.Linq;
+using Avalonia.Controls;
+using Avalonia.Interactivity;
+using Avalonia.Media;
+using Avalonia.Platform.Storage;
+using Avalonia.Threading;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
 using OmtCaptureStudio.Services.Sources;
@@ -15,8 +18,6 @@ public partial class MainWindow : Window
 {
     private readonly CaptureSession _session;
     private readonly OmtDiscoveryService _discoveryService;
-
-    private WriteableBitmap? _videoBitmap;
     private readonly DispatcherTimer _recordUiTimer;
     private bool _isUpdatingSources;
 
@@ -35,6 +36,12 @@ public partial class MainWindow : Window
 
         SetupUiDefaults();
         HookEvents();
+
+        Closing += (s, e) =>
+        {
+            _discoveryService.Dispose();
+            _session.Dispose();
+        };
 
         _discoveryService.Start();
     }
@@ -60,6 +67,9 @@ public partial class MainWindow : Window
             try { Directory.CreateDirectory(defaultVideos); } catch { }
         }
         TxtOutputDir.Text = defaultVideos;
+
+        // Initial selection changed handler
+        CmbSources.SelectionChanged += CmbSources_SelectionChanged;
     }
 
     private void HookEvents()
@@ -90,12 +100,10 @@ public partial class MainWindow : Window
 
     private void OnSourcesUpdated(List<OmtSourceInfo> sources)
     {
-        Dispatcher.InvokeAsync(() =>
+        Dispatcher.UIThread.Post(() =>
         {
-            // If the user currently has the dropdown open, don't interrupt them
             if (CmbSources.IsDropDownOpen) return;
 
-            // Check if items are identical to avoid unnecessary rebinding
             if (CmbSources.ItemsSource is List<OmtSourceInfo> currentList &&
                 currentList.Count == sources.Count &&
                 currentList.Select(s => s.Address).SequenceEqual(sources.Select(s => s.Address)))
@@ -135,11 +143,11 @@ public partial class MainWindow : Window
         });
     }
 
-    private void CmbSources_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    private void CmbSources_SelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (CmbSources.SelectedItem is OmtSourceInfo info)
         {
-            CmbSources.ToolTip = $"{info.DisplayName}\nAddress: {info.Address}";
+            ToolTip.SetTip(CmbSources, $"{info.DisplayName}\nAddress: {info.Address}");
             if (!_isUpdatingSources && !TxtManualUrl.IsFocused)
             {
                 TxtManualUrl.Text = info.Address;
@@ -147,34 +155,40 @@ public partial class MainWindow : Window
         }
         else
         {
-            CmbSources.ToolTip = null;
+            ToolTip.SetTip(CmbSources, null);
         }
     }
 
-    private void BtnRefreshSources_Click(object sender, RoutedEventArgs e)
+    private void BtnRefreshSources_Click(object? sender, RoutedEventArgs e)
     {
         _discoveryService.RefreshNow();
         TxtStatus.Text = "Scanning network for OMT sources...";
     }
 
-    private void BtnConnect_Click(object sender, RoutedEventArgs e)
+    private void BtnConnect_Click(object? sender, RoutedEventArgs e)
     {
-        if (_session.IsConnected || BtnConnect.Content.ToString() == "Disconnect")
+        if (_session.IsConnected || BtnConnect.Content?.ToString() == "Disconnect")
         {
             _session.Disconnect();
+            VideoViewport.Clear();
             BtnConnect.Content = "Connect";
             BtnConnect.Background = new SolidColorBrush(Color.FromRgb(16, 185, 129));
-            BtnConnect.Foreground = new SolidColorBrush(Colors.Black);
-            NoSignalOverlay.Visibility = Visibility.Visible;
+            BtnConnect.Foreground = new SolidColorBrush(Color.FromRgb(0, 0, 0));
+            NoSignalOverlay.IsVisible = true;
             LiveIndicator.Fill = new SolidColorBrush(Color.FromRgb(113, 113, 122));
             TxtLiveStatus.Text = "OFFLINE";
+            TxtVideoSpecs.Text = "-- x -- @ -- fps";
+
+            BtnTestSignal.IsChecked = false;
+            BtnTestSignal.Background = new SolidColorBrush(Color.FromRgb(39, 39, 42));
+            BtnTestSignal.Foreground = new SolidColorBrush(Color.FromRgb(244, 244, 245));
         }
         else
         {
-            string url = TxtManualUrl.Text.Trim();
+            string url = TxtManualUrl.Text?.Trim() ?? "";
             if (string.IsNullOrWhiteSpace(url))
             {
-                MessageBox.Show("Please select a source or enter a valid OMT URL.", "OMT Capture Studio", MessageBoxButton.OK, MessageBoxImage.Warning);
+                TxtStatus.Text = "Please select a source or enter a valid OMT URL.";
                 return;
             }
 
@@ -190,18 +204,23 @@ public partial class MainWindow : Window
             _session.Connect(url);
             BtnConnect.Content = "Disconnect";
             BtnConnect.Background = new SolidColorBrush(Color.FromRgb(239, 68, 68));
-            BtnConnect.Foreground = new SolidColorBrush(Colors.White);
+            BtnConnect.Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255));
         }
     }
 
-    private void BtnTestSignal_Click(object sender, RoutedEventArgs e)
+    private void BtnTestSignal_Click(object? sender, RoutedEventArgs e)
     {
-        bool isStarting = BtnTestSignal.IsChecked ?? false;
+        bool isStarting = BtnTestSignal.IsChecked == true;
 
         if (isStarting)
         {
+            if (_session.IsConnected)
+            {
+                _session.Disconnect();
+            }
+
             BtnTestSignal.Background = new SolidColorBrush(Color.FromRgb(99, 102, 241));
-            BtnTestSignal.Foreground = new SolidColorBrush(Colors.White);
+            BtnTestSignal.Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255));
             TxtSourceName.Text = "Local Test Pattern (SMPTE)";
             TxtStatus.Text = "Connected to internal synthetic test generator.";
 
@@ -209,7 +228,7 @@ public partial class MainWindow : Window
 
             BtnConnect.Content = "Disconnect";
             BtnConnect.Background = new SolidColorBrush(Color.FromRgb(239, 68, 68));
-            BtnConnect.Foreground = new SolidColorBrush(Colors.White);
+            BtnConnect.Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255));
         }
         else
         {
@@ -220,16 +239,21 @@ public partial class MainWindow : Window
             if (_session.IsConnected)
             {
                 _session.Disconnect();
+                VideoViewport.Clear();
                 BtnConnect.Content = "Connect";
                 BtnConnect.Background = new SolidColorBrush(Color.FromRgb(16, 185, 129));
-                BtnConnect.Foreground = new SolidColorBrush(Colors.Black);
+                BtnConnect.Foreground = new SolidColorBrush(Color.FromRgb(0, 0, 0));
+                NoSignalOverlay.IsVisible = true;
+                LiveIndicator.Fill = new SolidColorBrush(Color.FromRgb(113, 113, 122));
+                TxtLiveStatus.Text = "OFFLINE";
+                TxtVideoSpecs.Text = "-- x -- @ -- fps";
             }
         }
     }
 
     private void OnStatusChanged(string status)
     {
-        Dispatcher.InvokeAsync(() =>
+        Dispatcher.UIThread.Post(() =>
         {
             TxtStatus.Text = status;
         });
@@ -237,7 +261,7 @@ public partial class MainWindow : Window
 
     private void OnSessionError(string error)
     {
-        Dispatcher.InvokeAsync(() =>
+        Dispatcher.UIThread.Post(() =>
         {
             TxtStatus.Text = $"Error: {error}";
         });
@@ -249,48 +273,31 @@ public partial class MainWindow : Window
 
     private void OnVideoFrameAvailable(IntPtr pData, int dataLength, int width, int height, int stride, double fps, long timestamp)
     {
-        // Render to GUI Video Preview on UI Thread
-        Dispatcher.InvokeAsync(() =>
+        // 1. Submit raw video buffer to the hardware/Skia viewport control
+        VideoViewport.UpdateFrame(pData, dataLength, width, height, stride);
+
+        // 2. Update HUD overlay on UI thread
+        Dispatcher.UIThread.Post(() =>
         {
-            try
+            if (NoSignalOverlay.IsVisible)
             {
-                if (_videoBitmap == null || _videoBitmap.PixelWidth != width || _videoBitmap.PixelHeight != height)
-                {
-                    _videoBitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgra32, null);
-                    VideoPreviewImage.Source = _videoBitmap;
-                }
-
-                _videoBitmap.Lock();
-                _videoBitmap.WritePixels(new Int32Rect(0, 0, width, height), pData, dataLength, stride);
-                _videoBitmap.Unlock();
-
-                if (NoSignalOverlay.Visibility != Visibility.Collapsed)
-                {
-                    NoSignalOverlay.Visibility = Visibility.Collapsed;
-                    LiveIndicator.Fill = new SolidColorBrush(Color.FromRgb(34, 197, 94));
-                    TxtLiveStatus.Text = "LIVE";
-                }
-
-                TxtVideoSpecs.Text = $"{width}x{height} @ {fps:F2} fps";
+                NoSignalOverlay.IsVisible = false;
+                LiveIndicator.Fill = new SolidColorBrush(Color.FromRgb(34, 197, 94));
+                TxtLiveStatus.Text = "LIVE";
             }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[Render Error] {ex.Message}");
-            }
+
+            TxtVideoSpecs.Text = $"{width}x{height} @ {fps:F2} fps";
         }, DispatcherPriority.Render);
     }
 
     private void OnAudioLevelsUpdated(AudioLevelData levels)
     {
-        Dispatcher.InvokeAsync(() =>
-        {
-            VuMeter.UpdateLevels(levels);
-        });
+        VuMeter.UpdateLevels(levels);
     }
 
     private void OnTelemetryUpdated(StreamTelemetry t)
     {
-        Dispatcher.InvokeAsync(() =>
+        Dispatcher.UIThread.Post(() =>
         {
             TxtAudioTelemetry.Text = $"Audio: {t.AudioFormatText}";
             TxtBitrate.Text = $"Bitrate: {t.BitrateMbps:F1} Mbps";
@@ -302,7 +309,7 @@ public partial class MainWindow : Window
 
     #region Recording Controls
 
-    private void BtnRecord_Click(object sender, RoutedEventArgs e)
+    private void BtnRecord_Click(object? sender, RoutedEventArgs e)
     {
         if (_session.IsRecording)
         {
@@ -312,7 +319,7 @@ public partial class MainWindow : Window
         {
             if (!_session.IsConnected || !_session.CurrentFormat.HasVideo)
             {
-                MessageBox.Show("Please connect to an active OMT stream before recording.", "OMT Capture Studio", MessageBoxButton.OK, MessageBoxImage.Information);
+                TxtStatus.Text = "Please connect to an active OMT stream before recording.";
                 return;
             }
 
@@ -321,21 +328,20 @@ public partial class MainWindow : Window
                 ContainerFormat = CmbContainer.SelectedItem is OutputContainerFormat cf ? cf : OutputContainerFormat.MP4,
                 EncoderChoice = CmbEncoder.SelectedItem is VideoEncoderChoice ec ? ec : VideoEncoderChoice.AutoHardware,
                 Quality = CmbQuality.SelectedItem is QualityPreset qp ? qp : QualityPreset.High,
-                OutputDirectory = TxtOutputDir.Text.Trim()
+                OutputDirectory = TxtOutputDir.Text?.Trim() ?? ""
             };
 
             bool started = _session.StartRecording(config);
-
             if (!started)
             {
-                MessageBox.Show("Failed to initiate recording. Ensure FFmpeg is available and destination folder is writable.", "Recording Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                TxtStatus.Text = "Failed to initiate recording. Ensure FFmpeg is available and destination folder is writable.";
             }
         }
     }
 
     private void OnRecordingStarted(string filePath)
     {
-        Dispatcher.InvokeAsync(() =>
+        Dispatcher.UIThread.Post(() =>
         {
             BtnRecord.Content = "■ STOP RECORDING";
             BtnRecord.Background = new SolidColorBrush(Color.FromRgb(185, 28, 28));
@@ -346,7 +352,7 @@ public partial class MainWindow : Window
 
     private void OnRecordingStopped(string filePath, TimeSpan duration, long fileSize)
     {
-        Dispatcher.InvokeAsync(() =>
+        Dispatcher.UIThread.Post(() =>
         {
             _recordUiTimer.Stop();
             BtnRecord.Content = "● START RECORDING";
@@ -362,10 +368,9 @@ public partial class MainWindow : Window
 
     private void OnRecordingError(string error)
     {
-        Dispatcher.InvokeAsync(() =>
+        Dispatcher.UIThread.Post(() =>
         {
             TxtStatus.Text = $"Recording Error: {error}";
-            MessageBox.Show(error, "Recording Error", MessageBoxButton.OK, MessageBoxImage.Error);
         });
     }
 
@@ -381,34 +386,52 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BtnBrowseDir_Click(object sender, RoutedEventArgs e)
+    private async void BtnBrowseDir_Click(object? sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFolderDialog
+        var options = new FolderPickerOpenOptions
         {
             Title = "Select Destination Folder for Recordings",
-            InitialDirectory = TxtOutputDir.Text
+            AllowMultiple = false
         };
 
-        if (dialog.ShowDialog() == true)
+        if (!string.IsNullOrWhiteSpace(TxtOutputDir.Text) && Directory.Exists(TxtOutputDir.Text))
         {
-            TxtOutputDir.Text = dialog.FolderName;
-        }
-    }
-
-    private void BtnOpenDir_Click(object sender, RoutedEventArgs e)
-    {
-        string dir = TxtOutputDir.Text.Trim();
-        if (Directory.Exists(dir))
-        {
-            Process.Start(new ProcessStartInfo
+            var folder = await StorageProvider.TryGetFolderFromPathAsync(TxtOutputDir.Text);
+            if (folder != null)
             {
-                FileName = dir,
-                UseShellExecute = true
-            });
+                options.SuggestedStartLocation = folder;
+            }
+        }
+
+        var result = await StorageProvider.OpenFolderPickerAsync(options);
+        if (result != null && result.Count > 0)
+        {
+            TxtOutputDir.Text = result[0].Path.LocalPath;
         }
     }
 
-    private void CmbContainer_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    private void BtnOpenDir_Click(object? sender, RoutedEventArgs e)
+    {
+        string dir = TxtOutputDir.Text?.Trim() ?? "";
+        if (!string.IsNullOrWhiteSpace(dir))
+        {
+            if (!Directory.Exists(dir))
+            {
+                try { Directory.CreateDirectory(dir); } catch { }
+            }
+
+            if (Directory.Exists(dir))
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = dir,
+                    UseShellExecute = true
+                });
+            }
+        }
+    }
+
+    private void CmbContainer_SelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (CmbContainer.SelectedItem is OutputContainerFormat fmt && CmbEncoder != null)
         {
@@ -424,12 +447,4 @@ public partial class MainWindow : Window
     }
 
     #endregion
-
-    protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
-    {
-        _discoveryService.Dispose();
-        _session.Dispose();
-
-        base.OnClosing(e);
-    }
 }

@@ -1,0 +1,222 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:controls="clr-namespace:OmtCaptureStudio.Controls"
+        xmlns:models="clr-namespace:OmtCaptureStudio.Models"
+        mc:Ignorable="d"
+        x:Class="OmtCaptureStudio.MainWindow"
+        Title="OMT Capture Studio - Open Media Transport Recorder"
+        Height="800" Width="1240" MinHeight="650" MinWidth="950"
+        Background="#0F0F12" Foreground="#F4F4F5"
+        Icon="avares://OmtCaptureStudio/Resources/app.ico"
+        WindowStartupLocation="CenterScreen">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/> <!-- Top Bar / Source Picker -->
+            <RowDefinition Height="*"/>    <!-- Center Viewport & VU Meter -->
+            <RowDefinition Height="Auto"/> <!-- Recording Bar -->
+            <RowDefinition Height="Auto"/> <!-- Dedicated Status Bar -->
+        </Grid.RowDefinitions>
+
+        <!-- 1. TOP BAR: Source Discovery & Connection -->
+        <Border Grid.Row="0" Background="#18181B" BorderBrush="#27272A" BorderThickness="0,0,0,1" Padding="14,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/> <!-- App Title / Brand -->
+                    <ColumnDefinition Width="*"/>    <!-- Responsive Source & URL Controls -->
+                    <ColumnDefinition Width="Auto"/> <!-- Test Signal Action -->
+                </Grid.ColumnDefinitions>
+
+                <!-- App Branding -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,18,0">
+                    <Border Background="#6366F1" CornerRadius="4" Padding="6,3" Margin="0,0,8,0">
+                        <TextBlock Text="OMT" Foreground="#FFFFFF" FontWeight="Black" FontSize="13"/>
+                    </Border>
+                    <TextBlock Text="CAPTURE STUDIO" Foreground="#F4F4F5" FontWeight="Bold" FontSize="14" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Responsive Stream Controls -->
+                <Grid Grid.Column="1" VerticalAlignment="Center" Margin="0,0,10,0">
+                    <Grid.ColumnDefinitions>
+                        <!-- Source group -->
+                        <ColumnDefinition Width="Auto"/> <!-- Label -->
+                        <ColumnDefinition Width="3*" MinWidth="150" MaxWidth="420"/> <!-- Source ComboBox -->
+                        <ColumnDefinition Width="Auto"/> <!-- Refresh Button -->
+                        <ColumnDefinition Width="Auto"/> <!-- Separator -->
+                        <!-- Manual URL group -->
+                        <ColumnDefinition Width="Auto"/> <!-- Label -->
+                        <ColumnDefinition Width="2*" MinWidth="130" MaxWidth="320"/> <!-- Manual URL TextBox -->
+                        <ColumnDefinition Width="Auto"/> <!-- Connect Button -->
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Source Picker -->
+                    <TextBlock Grid.Column="0" Text="Source:" Foreground="#A1A1AA" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <ComboBox x:Name="CmbSources" Grid.Column="1" Margin="0,0,6,0" HorizontalAlignment="Stretch">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="models:OmtSourceInfo">
+                                <TextBlock Text="{Binding DisplayName}" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                    <Button x:Name="BtnRefreshSources" Grid.Column="2" Content="↻ Refresh" Padding="8,4" Margin="0,0,10,0"
+                            ToolTip.Tip="Refresh discovered OMT sources" Click="BtnRefreshSources_Click"/>
+
+                    <!-- Divider -->
+                    <Rectangle Grid.Column="3" Width="1" Height="18" Fill="#27272A" Margin="0,0,10,0" VerticalAlignment="Center"/>
+
+                    <!-- Manual URL & Connect -->
+                    <TextBlock Grid.Column="4" Text="Manual URL:" Foreground="#A1A1AA" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <TextBox x:Name="TxtManualUrl" Grid.Column="5" Margin="0,0,6,0" Text="omt://127.0.0.1:5000" VerticalContentAlignment="Center"/>
+                    <Button x:Name="BtnConnect" Grid.Column="6" Content="Connect" MinWidth="85" Padding="12,4" Margin="0,0,4,0"
+                            Background="#10B981" Foreground="#000000" FontWeight="Bold" Click="BtnConnect_Click"/>
+                </Grid>
+
+                <!-- Test Signal Generator -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                    <ToggleButton x:Name="BtnTestSignal" Content="Test Signal" Padding="12,6"
+                                  Background="#27272A" Foreground="#F4F4F5" BorderBrush="#4F46E5"
+                                  BorderThickness="1" Click="BtnTestSignal_Click"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- 2. CENTER AREA: Viewport + Audio VU Meter -->
+        <Grid Grid.Row="1" Background="#09090B">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>   <!-- Video Viewport -->
+                <ColumnDefinition Width="130"/> <!-- VU Meter Column -->
+            </Grid.ColumnDefinitions>
+
+            <!-- Video Viewport Container -->
+            <Border Grid.Column="0" Background="#09090B" BorderBrush="#27272A" BorderThickness="0,0,1,0" ClipToBounds="True">
+                <Grid>
+                    <!-- Actual Video Rendering Surface -->
+                    <controls:VideoViewportControl x:Name="VideoViewport" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+
+                    <!-- No Signal / Placeholder Overlay -->
+                    <Border x:Name="NoSignalOverlay" Background="#0C0A09" Opacity="0.95" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <TextBlock Text="NO SIGNAL" Foreground="#71717A" FontSize="28" FontWeight="Black" HorizontalAlignment="Center" Margin="0,0,0,8"/>
+                            <TextBlock Text="Select an OMT source from the toolbar and click Connect, or start the Test Signal" 
+                                       Foreground="#52525B" FontSize="12" HorizontalAlignment="Center"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Video Viewport HUD Overlay (Top-Left) -->
+                    <Border Background="#CC18181B" CornerRadius="4" Padding="8,4" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="12">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse x:Name="LiveIndicator" Width="8" Height="8" Fill="#71717A" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <TextBlock x:Name="TxtLiveStatus" Text="OFFLINE" Foreground="#E4E4E7" FontSize="11" FontWeight="Bold" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="TxtSourceName" Text="" Foreground="#A1A1AA" FontSize="11" Margin="8,0,0,0"
+                                       MaxWidth="380" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Video Viewport HUD Overlay (Top-Right: Resolution & FPS) -->
+                    <Border Background="#CC18181B" CornerRadius="4" Padding="8,4" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="12">
+                        <TextBlock x:Name="TxtVideoSpecs" Text="-- x -- @ -- fps" Foreground="#E4E4E7" FontSize="11" FontFamily="Consolas, monospace" VerticalAlignment="Center"/>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <!-- VU Meter Control (Right Side) -->
+            <controls:VuMeterControl x:Name="VuMeter" Grid.Column="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+        </Grid>
+
+        <!-- 3. BOTTOM RECORDING BAR -->
+        <Border Grid.Row="2" Background="#18181B" BorderBrush="#27272A" BorderThickness="0,1,0,0" Padding="16,10" MinHeight="90">
+            <Grid VerticalAlignment="Center">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/> <!-- Left: Container, Encoder, Quality -->
+                    <ColumnDefinition Width="*" MinWidth="180"/>    <!-- Center: Save Folder -->
+                    <ColumnDefinition Width="Auto"/> <!-- Right: Duration, Stats, Record Button -->
+                </Grid.ColumnDefinitions>
+
+                <!-- Left: Recording Configuration -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,16,0">
+                    <!-- Container -->
+                    <StackPanel Margin="0,0,10,0">
+                        <TextBlock Text="CONTAINER" Foreground="#A1A1AA" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbContainer" Width="75" SelectionChanged="CmbContainer_SelectionChanged"/>
+                    </StackPanel>
+
+                    <!-- Encoder -->
+                    <StackPanel Margin="0,0,10,0">
+                        <TextBlock Text="ENCODER" Foreground="#A1A1AA" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbEncoder" Width="140"/>
+                    </StackPanel>
+
+                    <!-- Quality -->
+                    <StackPanel Margin="0,0,4,0">
+                        <TextBlock Text="QUALITY" Foreground="#A1A1AA" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbQuality" Width="90"/>
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- Center: Output Folder Selection -->
+                <Grid Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0" Text="SAVE FOLDER" Foreground="#A1A1AA" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                    <Grid Grid.Row="1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="TxtOutputDir" Grid.Column="0" VerticalContentAlignment="Center"/>
+                        <Button x:Name="BtnBrowseDir" Grid.Column="1" Content="..." Width="34" Margin="6,0,0,0" ToolTip.Tip="Browse Save Folder" Click="BtnBrowseDir_Click"/>
+                        <Button x:Name="BtnOpenDir" Grid.Column="2" Content="Open Folder" Padding="10,4" Margin="6,0,0,0" ToolTip.Tip="Open in File Explorer" Click="BtnOpenDir_Click"/>
+                    </Grid>
+                </Grid>
+
+                <!-- Right: Record Button & Duration Counter -->
+                <Grid Grid.Column="2" VerticalAlignment="Center">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Timer & File size readout -->
+                    <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0" HorizontalAlignment="Right">
+                        <TextBlock x:Name="TxtRecordDuration" Text="00:00:00" Foreground="#F4F4F5" FontSize="20" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Right"/>
+                        <TextBlock x:Name="TxtRecordStats" Text="Ready" Foreground="#A1A1AA" FontSize="11" HorizontalAlignment="Right" Margin="0,2,0,0"
+                                   MaxWidth="180" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+
+                    <!-- Main Record Button -->
+                    <Button x:Name="BtnRecord" Grid.Column="1" Content="● START RECORDING" Width="170"
+                            Background="#DC2626" Foreground="#FFFFFF" FontSize="13" FontWeight="Bold"
+                            HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                            Click="BtnRecord_Click"/>
+                </Grid>
+            </Grid>
+        </Border>
+
+        <!-- 4. BOTTOM STATUS / TELEMETRY BAR -->
+        <Border Grid.Row="3" Background="#121215" BorderBrush="#27272A" BorderThickness="0,1,0,0" Padding="16,0" Height="32">
+            <Grid VerticalAlignment="Center">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Status message -->
+                <TextBlock x:Name="TxtStatus" Text="Ready. Discovering OMT sources on network..." Foreground="#A1A1AA" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+
+                <!-- Telemetry Readouts -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock x:Name="TxtAudioTelemetry" Text="Audio: --" Foreground="#71717A" FontSize="11" Margin="10,0"/>
+                    <TextBlock Text="|" Foreground="#3F3F46" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="TxtBitrate" Text="Bitrate: 0.0 Mbps" Foreground="#71717A" FontSize="11" Margin="10,0"/>
+                    <TextBlock Text="|" Foreground="#3F3F46" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="TxtDroppedFrames" Text="Dropped: 0" Foreground="#71717A" FontSize="11" Margin="10,0,0,0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

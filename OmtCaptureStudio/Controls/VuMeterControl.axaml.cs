@@ -1,7 +1,11 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Shapes;
+using System;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.Shapes;
+using Avalonia.Interactivity;
+using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Threading;
 using OmtCaptureStudio.Models;
 
 namespace OmtCaptureStudio.Controls;
@@ -18,6 +22,9 @@ public partial class VuMeterControl : UserControl
     public VuMeterControl()
     {
         InitializeComponent();
+
+        MeterAreaGrid.SizeChanged += (s, e) => RedrawScale();
+        BtnMonitor.IsCheckedChanged += BtnMonitor_IsCheckedChanged;
     }
 
     public static double DbToNormalized(float db)
@@ -28,15 +35,10 @@ public partial class VuMeterControl : UserControl
         return (db + 60.0) / 60.0;
     }
 
-    private void MeterAreaGrid_SizeChanged(object sender, SizeChangedEventArgs e)
-    {
-        RedrawScale();
-    }
-
     private void RedrawScale()
     {
         ScaleCanvas.Children.Clear();
-        double height = TrackLeft.ActualHeight;
+        double height = TrackLeft.Bounds.Height;
         if (height <= 20) return;
 
         // Keep the full-height gradient bars synced to actual track height
@@ -51,12 +53,6 @@ public partial class VuMeterControl : UserControl
             double norm = DbToNormalized(db);
             double y = (1.0 - norm) * height;
 
-            // Color code labels matching the calibrated broadcast zones:
-            // 0 dB: Red
-            // -6 dB: Orange/Amber
-            // -12 dB: Yellow
-            // -18 to -36 dB: Green
-            // -48 to -60 dB: Slate Gray
             Color markColor = db switch
             {
                 0f => Color.FromRgb(239, 68, 68),
@@ -66,14 +62,13 @@ public partial class VuMeterControl : UserControl
                 _ => Color.FromRgb(113, 113, 122)
             };
 
-            // Number Text Label
             var tb = new TextBlock
             {
                 Text = db == 0f ? "0" : $"{db:0}",
                 Foreground = new SolidColorBrush(markColor),
                 FontSize = 9,
-                FontFamily = new FontFamily("Consolas"),
-                FontWeight = FontWeights.SemiBold,
+                FontFamily = new FontFamily("Consolas, monospace"),
+                FontWeight = FontWeight.SemiBold,
                 Width = 24,
                 TextAlignment = TextAlignment.Right
             };
@@ -82,7 +77,6 @@ public partial class VuMeterControl : UserControl
             Canvas.SetTop(tb, Math.Max(0, Math.Min(height - 12, y - 6)));
             ScaleCanvas.Children.Add(tb);
 
-            // Tick mark line pointing directly into the meter bar track
             var tick = new Rectangle
             {
                 Width = 4,
@@ -98,7 +92,7 @@ public partial class VuMeterControl : UserControl
 
     public void UpdateLevels(AudioLevelData? levelData)
     {
-        Dispatcher.InvokeAsync(() =>
+        Dispatcher.UIThread.Post(() =>
         {
             if (levelData == null || levelData.Channels.Length == 0)
             {
@@ -106,18 +100,16 @@ public partial class VuMeterControl : UserControl
                 return;
             }
 
-            double trackHeight = TrackLeft.ActualHeight;
+            double trackHeight = TrackLeft.Bounds.Height;
             if (trackHeight <= 0) return;
 
             // Channel 0 (Left)
             var chL = levelData.Channels.Length > 0 ? levelData.Channels[0] : null;
             if (chL != null)
             {
-                // Main bar reveals calibrated gradient up to current Peak level
                 double normPeak = DbToNormalized(chL.PeakDb);
                 BarClipperLeft.Height = Math.Max(0, normPeak * trackHeight);
 
-                // Peak hold decay
                 if (chL.PeakDb > _peakHoldLeft)
                     _peakHoldLeft = chL.PeakDb;
                 else
@@ -151,7 +143,6 @@ public partial class VuMeterControl : UserControl
                 ClipRight.Background = new SolidColorBrush(isClipActive ? Color.FromRgb(239, 68, 68) : Color.FromRgb(63, 63, 70));
             }
 
-            // Numerical Peak Readout matches the bar top
             float maxCurrentPeak = Math.Max(chL?.PeakDb ?? -60f, chR?.PeakDb ?? -60f);
             TxtDbReadout.Text = maxCurrentPeak <= -59.5f ? "-inf dB" : $"{maxCurrentPeak:F1} dB";
         });
@@ -159,6 +150,8 @@ public partial class VuMeterControl : UserControl
 
     private void ResetMeters()
     {
+        _peakHoldLeft = -60f;
+        _peakHoldRight = -60f;
         BarClipperLeft.Height = 0;
         BarClipperRight.Height = 0;
         PeakLineLeft.Margin = new Thickness(0);
@@ -168,9 +161,9 @@ public partial class VuMeterControl : UserControl
         ClipRight.Background = new SolidColorBrush(Color.FromRgb(63, 63, 70));
     }
 
-    private void BtnMonitor_Click(object sender, RoutedEventArgs e)
+    private void BtnMonitor_IsCheckedChanged(object? sender, RoutedEventArgs e)
     {
-        bool isChecked = BtnMonitor.IsChecked ?? false;
+        bool isChecked = BtnMonitor.IsChecked == true;
         BtnMonitor.Background = new SolidColorBrush(isChecked ? Color.FromRgb(34, 197, 94) : Color.FromRgb(39, 39, 42));
         BtnMonitor.Foreground = new SolidColorBrush(isChecked ? Colors.Black : Color.FromRgb(228, 228, 231));
         MonitoringToggled?.Invoke(isChecked);

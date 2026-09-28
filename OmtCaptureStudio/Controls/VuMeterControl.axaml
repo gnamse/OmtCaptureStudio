@@ -1,10 +1,6 @@
-<UserControl x:Class="OmtCaptureStudio.Controls.VuMeterControl"
-             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+<UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
-             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
-             mc:Ignorable="d" 
-             d:DesignHeight="500" d:DesignWidth="130"
+             x:Class="OmtCaptureStudio.Controls.VuMeterControl"
              Background="#18181B">
     <Grid Margin="6,4">
         <Grid.RowDefinitions>
@@ -35,8 +31,8 @@
             </Border>
         </Grid>
 
-        <!-- 3. Calibrated Meter Area (Scale and Bars share exact same Grid row and height) -->
-        <Grid Grid.Row="2" x:Name="MeterAreaGrid" SizeChanged="MeterAreaGrid_SizeChanged">
+        <!-- 3. Calibrated Meter Area -->
+        <Grid Grid.Row="2" x:Name="MeterAreaGrid">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="32"/> <!-- Dynamic dB Scale & Tick Marks -->
                 <ColumnDefinition Width="*"/>  <!-- Left Channel Bar -->
@@ -44,7 +40,7 @@
                 <ColumnDefinition Width="*"/>  <!-- Right Channel Bar -->
             </Grid.ColumnDefinitions>
 
-            <!-- Dynamic dB Scale Canvas (drawn in code-behind to match actual height with pixel precision) -->
+            <!-- Dynamic dB Scale Canvas -->
             <Canvas Grid.Column="0" x:Name="ScaleCanvas" ClipToBounds="True"/>
 
             <!-- Left Channel Track -->
@@ -52,10 +48,9 @@
                 <Grid x:Name="TrackLeft" Background="#09090B">
                     <!-- Clipper reveals full-height gradient from bottom -->
                     <Border x:Name="BarClipperLeft" VerticalAlignment="Bottom" Height="0" ClipToBounds="True">
-                        <!-- Full-height calibrated gradient: Green -> Yellow -> Red -->
                         <Rectangle x:Name="GradientBarLeft" VerticalAlignment="Bottom" Height="300">
                             <Rectangle.Fill>
-                                <LinearGradientBrush StartPoint="0,1" EndPoint="0,0">
+                                <LinearGradientBrush StartPoint="0%,100%" EndPoint="0%,0%">
                                     <GradientStop Color="#10B981" Offset="0.0"/>
                                     <GradientStop Color="#22C55E" Offset="0.65"/>
                                     <GradientStop Color="#84CC16" Offset="0.70"/>
@@ -67,7 +62,6 @@
                             </Rectangle.Fill>
                         </Rectangle>
                     </Border>
-                    <!-- Peak Hold Indicator Line -->
                     <Rectangle x:Name="PeakLineLeft" Height="2" Fill="#FFFFFF" VerticalAlignment="Bottom" Margin="0" Opacity="0.95"/>
                 </Grid>
             </Border>
@@ -78,7 +72,7 @@
                     <Border x:Name="BarClipperRight" VerticalAlignment="Bottom" Height="0" ClipToBounds="True">
                         <Rectangle x:Name="GradientBarRight" VerticalAlignment="Bottom" Height="300">
                             <Rectangle.Fill>
-                                <LinearGradientBrush StartPoint="0,1" EndPoint="0,0">
+                                <LinearGradientBrush StartPoint="0%,100%" EndPoint="0%,0%">
                                     <GradientStop Color="#10B981" Offset="0.0"/>
                                     <GradientStop Color="#22C55E" Offset="0.65"/>
                                     <GradientStop Color="#84CC16" Offset="0.70"/>
@@ -108,10 +102,10 @@
 
         <!-- 5. Numerical Readout & Monitor Button -->
         <StackPanel Grid.Row="4" Margin="0,6,0,0">
-            <TextBlock x:Name="TxtDbReadout" Text="-inf dB" Foreground="#F4F4F5" FontSize="11" FontWeight="Bold" FontFamily="Consolas" HorizontalAlignment="Center"/>
+            <TextBlock x:Name="TxtDbReadout" Text="-inf dB" Foreground="#F4F4F5" FontSize="11" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Center"/>
             <ToggleButton x:Name="BtnMonitor" Content="Monitor" Height="24" Margin="0,6,0,0"
                           Background="#27272A" Foreground="#E4E4E7" FontSize="10" FontWeight="SemiBold"
-                          BorderBrush="#3F3F46" Click="BtnMonitor_Click"/>
+                          BorderBrush="#3F3F46" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"/>
         </StackPanel>
     </Grid>
 </UserControl>

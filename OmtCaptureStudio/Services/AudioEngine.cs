@@ -1,24 +1,44 @@
-using System.Buffers;
-using NAudio.Wave;
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+using Vortice.Multimedia;
+using Vortice.XAudio2;
 using OmtCaptureStudio.Models;
 
 namespace OmtCaptureStudio.Services;
 
 /// <summary>
 /// Deep audio subsystem managing planar-to-interleaved conversion, buffer pooling,
-/// real-time RMS/peak level metering, speaker monitoring, and tap routing.
+/// real-time RMS/peak level metering, speaker monitoring via Vortice.XAudio2 (Native AOT safe),
+/// and tap routing.
 /// </summary>
 public class AudioEngine : IDisposable
 {
-    private BufferedWaveProvider? _waveProvider;
-    private WasapiOut? _audioOut;
+    private IXAudio2? _xaudio2;
+    private IXAudio2MasteringVoice? _masterVoice;
+    private IXAudio2SourceVoice? _sourceVoice;
+
     private bool _isMonitoringEnabled;
     private int _currentSampleRate;
     private int _currentChannels;
     private readonly object _lock = new();
 
-    // Internal reusable buffer to prevent GC allocations (50 fps * buffer allocation)
+    // Internal reusable buffer to prevent GC allocations
     private byte[]? _reusableInterleavedBuffer;
+
+    // Ring buffer of native memory slots for low-latency XAudio2 streaming
+    private const int RingSlotCount = 16;
+    private const int RingSlotByteSize = 65536;
+    private readonly IntPtr[] _ringBuffers = new IntPtr[RingSlotCount];
+    private int _ringWriteIndex = 0;
+
+    public AudioEngine()
+    {
+        for (int i = 0; i < RingSlotCount; i++)
+        {
+            _ringBuffers[i] = Marshal.AllocHGlobal(RingSlotByteSize);
+        }
+    }
 
     public bool IsMonitoringEnabled
     {
@@ -180,17 +200,40 @@ public class AudioEngine : IDisposable
 
     private void FeedMonitoringInternal(byte[] interleavedBytes, int length, int sampleRate, int channels)
     {
-        if (_waveProvider == null || _currentSampleRate != sampleRate || _currentChannels != channels)
+        try
         {
-            StartMonitoringInternal(sampleRate, channels);
-        }
-
-        if (_waveProvider != null)
-        {
-            if (_waveProvider.BufferedBytes + length <= _waveProvider.BufferLength)
+            if (_sourceVoice == null || _currentSampleRate != sampleRate || _currentChannels != channels)
             {
-                _waveProvider.AddSamples(interleavedBytes, 0, length);
+                StartMonitoringInternal(sampleRate, channels);
             }
+
+            if (_sourceVoice != null)
+            {
+                // Drop buffer if too many are queued (> 6 chunks ~ 120ms) to prevent drift/delay
+                if (_sourceVoice.State.BuffersQueued > 6)
+                {
+                    return;
+                }
+
+                int slot = _ringWriteIndex;
+                _ringWriteIndex = (_ringWriteIndex + 1) % RingSlotCount;
+
+                IntPtr destPtr = _ringBuffers[slot];
+                if (destPtr == IntPtr.Zero) return;
+
+                int copyBytes = Math.Min(length, RingSlotByteSize);
+                Marshal.Copy(interleavedBytes, 0, destPtr, copyBytes);
+
+                var audioBuffer = new AudioBuffer(destPtr, (uint)copyBytes);
+
+                _sourceVoice.SubmitSourceBuffer(audioBuffer);
+            }
+        }
+        catch
+        {
+            // If monitoring fails (e.g. device lost or buffer submit error), shut down cleanly
+            StopMonitoringInternal();
+            _isMonitoringEnabled = false;
         }
     }
 
@@ -203,20 +246,17 @@ public class AudioEngine : IDisposable
             _currentSampleRate = sampleRate;
             _currentChannels = channels;
 
-            var waveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, channels);
-            _waveProvider = new BufferedWaveProvider(waveFormat)
-            {
-                BufferLength = waveFormat.AverageBytesPerSecond * 2,
-                DiscardOnBufferOverflow = true
-            };
+            _xaudio2 = XAudio2.XAudio2Create();
+            _masterVoice = _xaudio2.CreateMasteringVoice();
 
-            _audioOut = new WasapiOut(NAudio.CoreAudioApi.AudioClientShareMode.Shared, 50);
-            _audioOut.Init(_waveProvider);
-            _audioOut.Play();
+            var waveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, channels);
+            _sourceVoice = _xaudio2.CreateSourceVoice(waveFormat);
+            _sourceVoice.Start();
         }
         catch
         {
             StopMonitoringInternal();
+            _isMonitoringEnabled = false;
         }
     }
 
@@ -224,13 +264,27 @@ public class AudioEngine : IDisposable
     {
         try
         {
-            if (_audioOut != null)
+            if (_sourceVoice != null)
             {
-                _audioOut.Stop();
-                _audioOut.Dispose();
-                _audioOut = null;
+                _sourceVoice.Stop();
+                _sourceVoice.FlushSourceBuffers();
+                _sourceVoice.DestroyVoice();
+                _sourceVoice.Dispose();
+                _sourceVoice = null;
             }
-            _waveProvider = null;
+
+            if (_masterVoice != null)
+            {
+                _masterVoice.DestroyVoice();
+                _masterVoice.Dispose();
+                _masterVoice = null;
+            }
+
+            if (_xaudio2 != null)
+            {
+                _xaudio2.Dispose();
+                _xaudio2 = null;
+            }
         }
         catch { }
     }
@@ -241,6 +295,15 @@ public class AudioEngine : IDisposable
         {
             StopMonitoringInternal();
             _reusableInterleavedBuffer = null;
+
+            for (int i = 0; i < RingSlotCount; i++)
+            {
+                if (_ringBuffers[i] != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(_ringBuffers[i]);
+                    _ringBuffers[i] = IntPtr.Zero;
+                }
+            }
         }
         GC.SuppressFinalize(this);
     }

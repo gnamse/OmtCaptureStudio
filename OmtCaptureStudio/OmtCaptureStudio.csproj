@@ -5,16 +5,16 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UseWPF>true</UseWPF>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <PlatformTarget>x64</PlatformTarget>
     <Platforms>x64</Platforms>
     <ApplicationIcon>Resources\app.ico</ApplicationIcon>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <PublishAot>true</PublishAot>
   </PropertyGroup>
 
   <ItemGroup>
-    <Resource Include="Resources\app.ico" />
-    <Resource Include="Resources\app.png" />
+    <AvaloniaResource Include="Resources\**" />
   </ItemGroup>
 
   <ItemGroup>
@@ -37,10 +37,20 @@
       <Link>libvmx.dll</Link>
       <Visible>false</Visible>
     </None>
+    <None Update="libs\libomtnet.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>libomtnet.dll</Link>
+      <Visible>false</Visible>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="Avalonia" Version="11.1.4" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.1.4" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.1.4" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.1.4" />
+    <PackageReference Include="Vortice.XAudio2" Version="3.6.2" />
   </ItemGroup>
 
 </Project>
