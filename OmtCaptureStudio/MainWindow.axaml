@@ -37,18 +37,21 @@
                     <TextBlock Text="CAPTURE STUDIO" Foreground="#F4F4F5" FontWeight="Bold" FontSize="14" VerticalAlignment="Center"/>
                 </StackPanel>
 
-                <!-- Responsive Stream Controls -->
-                <Grid Grid.Column="1" VerticalAlignment="Center" Margin="0,0,10,0">
+                <!-- Responsive Stream & Recording Controls -->
+                <Grid Grid.Column="1" VerticalAlignment="Center" Margin="0,0,14,0">
                     <Grid.ColumnDefinitions>
                         <!-- Source group -->
                         <ColumnDefinition Width="Auto"/> <!-- Label -->
-                        <ColumnDefinition Width="3*" MinWidth="150" MaxWidth="420"/> <!-- Source ComboBox -->
+                        <ColumnDefinition Width="*" MinWidth="160" MaxWidth="380"/> <!-- Source ComboBox -->
                         <ColumnDefinition Width="Auto"/> <!-- Refresh Button -->
-                        <ColumnDefinition Width="Auto"/> <!-- Separator -->
-                        <!-- Manual URL group -->
-                        <ColumnDefinition Width="Auto"/> <!-- Label -->
-                        <ColumnDefinition Width="2*" MinWidth="130" MaxWidth="320"/> <!-- Manual URL TextBox -->
-                        <ColumnDefinition Width="Auto"/> <!-- Connect Button -->
+                        <ColumnDefinition Width="Auto"/> <!-- Connect / Disconnect Button -->
+                        
+                        <!-- Divider -->
+                        <ColumnDefinition Width="Auto"/>
+                        
+                        <!-- Recording Controls (beside Disconnect) -->
+                        <ColumnDefinition Width="Auto"/> <!-- Duration & Stats Readout -->
+                        <ColumnDefinition Width="Auto"/> <!-- Record Button -->
                     </Grid.ColumnDefinitions>
 
                     <!-- Source Picker -->
@@ -60,17 +63,28 @@
                             </DataTemplate>
                         </ComboBox.ItemTemplate>
                     </ComboBox>
-                    <Button x:Name="BtnRefreshSources" Grid.Column="2" Content="↻ Refresh" Padding="8,4" Margin="0,0,10,0"
+                    <Button x:Name="BtnRefreshSources" Grid.Column="2" Content="↻ Refresh" Padding="8,4" Margin="0,0,8,0"
                             ToolTip.Tip="Refresh discovered OMT sources" Click="BtnRefreshSources_Click"/>
 
-                    <!-- Divider -->
-                    <Rectangle Grid.Column="3" Width="1" Height="18" Fill="#27272A" Margin="0,0,10,0" VerticalAlignment="Center"/>
-
-                    <!-- Manual URL & Connect -->
-                    <TextBlock Grid.Column="4" Text="Manual URL:" Foreground="#A1A1AA" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                    <TextBox x:Name="TxtManualUrl" Grid.Column="5" Margin="0,0,6,0" Text="omt://127.0.0.1:5000" VerticalContentAlignment="Center"/>
-                    <Button x:Name="BtnConnect" Grid.Column="6" Content="Connect" MinWidth="85" Padding="12,4" Margin="0,0,4,0"
+                    <!-- Connect / Disconnect Button -->
+                    <Button x:Name="BtnConnect" Grid.Column="3" Content="Connect" MinWidth="85" Padding="12,5" Margin="0,0,14,0"
                             Background="#10B981" Foreground="#000000" FontWeight="Bold" Click="BtnConnect_Click"/>
+
+                    <!-- Divider -->
+                    <Rectangle Grid.Column="4" Width="1" Height="22" Fill="#27272A" Margin="0,0,14,0" VerticalAlignment="Center"/>
+
+                    <!-- Recording Timer & Stats -->
+                    <StackPanel Grid.Column="5" VerticalAlignment="Center" Margin="0,0,10,0" HorizontalAlignment="Right">
+                        <TextBlock x:Name="TxtRecordDuration" Text="00:00:00" Foreground="#F4F4F5" FontSize="16" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Right"/>
+                        <TextBlock x:Name="TxtRecordStats" Text="Ready" Foreground="#A1A1AA" FontSize="10" HorizontalAlignment="Right" Margin="0,1,0,0"
+                                   MaxWidth="160" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+
+                    <!-- Main Record Button -->
+                    <Button x:Name="BtnRecord" Grid.Column="6" Content="● START RECORDING" Width="160" Padding="12,6"
+                            Background="#DC2626" Foreground="#FFFFFF" FontSize="12" FontWeight="Bold"
+                            HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                            Click="BtnRecord_Click"/>
                 </Grid>
 
                 <!-- Test Signal Generator -->
@@ -125,25 +139,24 @@
             <controls:VuMeterControl x:Name="VuMeter" Grid.Column="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
         </Grid>
 
-        <!-- 3. BOTTOM RECORDING BAR -->
-        <Border Grid.Row="2" Background="#18181B" BorderBrush="#27272A" BorderThickness="0,1,0,0" Padding="16,10" MinHeight="90">
+        <!-- 3. BOTTOM RECORDING CONFIGURATION BAR -->
+        <Border Grid.Row="2" Background="#18181B" BorderBrush="#27272A" BorderThickness="0,1,0,0" Padding="16,8" MinHeight="68">
             <Grid VerticalAlignment="Center">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/> <!-- Left: Container, Encoder, Quality -->
-                    <ColumnDefinition Width="*" MinWidth="180"/>    <!-- Center: Save Folder -->
-                    <ColumnDefinition Width="Auto"/> <!-- Right: Duration, Stats, Record Button -->
+                    <ColumnDefinition Width="*"/>    <!-- Right: Save Folder -->
                 </Grid.ColumnDefinitions>
 
                 <!-- Left: Recording Configuration -->
-                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,16,0">
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,24,0">
                     <!-- Container -->
-                    <StackPanel Margin="0,0,10,0">
+                    <StackPanel Margin="0,0,12,0">
                         <TextBlock Text="CONTAINER" Foreground="#A1A1AA" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
                         <ComboBox x:Name="CmbContainer" Width="75" SelectionChanged="CmbContainer_SelectionChanged"/>
                     </StackPanel>
 
                     <!-- Encoder -->
-                    <StackPanel Margin="0,0,10,0">
+                    <StackPanel Margin="0,0,12,0">
                         <TextBlock Text="ENCODER" Foreground="#A1A1AA" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
                         <ComboBox x:Name="CmbEncoder" Width="140"/>
                     </StackPanel>
@@ -155,8 +168,8 @@
                     </StackPanel>
                 </StackPanel>
 
-                <!-- Center: Output Folder Selection -->
-                <Grid Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0">
+                <!-- Right: Output Folder Selection -->
+                <Grid Grid.Column="1" VerticalAlignment="Center">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
@@ -172,27 +185,6 @@
                         <Button x:Name="BtnBrowseDir" Grid.Column="1" Content="..." Width="34" Margin="6,0,0,0" ToolTip.Tip="Browse Save Folder" Click="BtnBrowseDir_Click"/>
                         <Button x:Name="BtnOpenDir" Grid.Column="2" Content="Open Folder" Padding="10,4" Margin="6,0,0,0" ToolTip.Tip="Open in File Explorer" Click="BtnOpenDir_Click"/>
                     </Grid>
-                </Grid>
-
-                <!-- Right: Record Button & Duration Counter -->
-                <Grid Grid.Column="2" VerticalAlignment="Center">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-
-                    <!-- Timer & File size readout -->
-                    <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0" HorizontalAlignment="Right">
-                        <TextBlock x:Name="TxtRecordDuration" Text="00:00:00" Foreground="#F4F4F5" FontSize="20" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Right"/>
-                        <TextBlock x:Name="TxtRecordStats" Text="Ready" Foreground="#A1A1AA" FontSize="11" HorizontalAlignment="Right" Margin="0,2,0,0"
-                                   MaxWidth="180" TextTrimming="CharacterEllipsis"/>
-                    </StackPanel>
-
-                    <!-- Main Record Button -->
-                    <Button x:Name="BtnRecord" Grid.Column="1" Content="● START RECORDING" Width="170"
-                            Background="#DC2626" Foreground="#FFFFFF" FontSize="13" FontWeight="Bold"
-                            HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
-                            Click="BtnRecord_Click"/>
                 </Grid>
             </Grid>
         </Border>

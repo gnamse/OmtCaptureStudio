@@ -19,7 +19,6 @@ public partial class MainWindow : Window
     private readonly CaptureSession _session;
     private readonly OmtDiscoveryService _discoveryService;
     private readonly DispatcherTimer _recordUiTimer;
-    private bool _isUpdatingSources;
 
     public MainWindow()
     {
@@ -114,31 +113,19 @@ public partial class MainWindow : Window
             var currentSelected = CmbSources.SelectedItem as OmtSourceInfo;
             string? prevAddress = currentSelected?.Address;
 
-            _isUpdatingSources = true;
-            try
-            {
-                CmbSources.ItemsSource = sources;
+            CmbSources.ItemsSource = sources;
 
-                if (!string.IsNullOrEmpty(prevAddress))
+            if (!string.IsNullOrEmpty(prevAddress))
+            {
+                var match = sources.FirstOrDefault(s => s.Address == prevAddress);
+                if (match != null)
                 {
-                    var match = sources.FirstOrDefault(s => s.Address == prevAddress);
-                    if (match != null)
-                    {
-                        CmbSources.SelectedItem = match;
-                    }
-                }
-                else if (sources.Count > 0 && CmbSources.SelectedItem == null)
-                {
-                    CmbSources.SelectedIndex = 0;
-                    if (string.IsNullOrWhiteSpace(TxtManualUrl.Text) || TxtManualUrl.Text == "omt://127.0.0.1:5000")
-                    {
-                        TxtManualUrl.Text = sources[0].Address;
-                    }
+                    CmbSources.SelectedItem = match;
                 }
             }
-            finally
+            else if (sources.Count > 0 && CmbSources.SelectedItem == null)
             {
-                _isUpdatingSources = false;
+                CmbSources.SelectedIndex = 0;
             }
         });
     }
@@ -148,10 +135,6 @@ public partial class MainWindow : Window
         if (CmbSources.SelectedItem is OmtSourceInfo info)
         {
             ToolTip.SetTip(CmbSources, $"{info.DisplayName}\nAddress: {info.Address}");
-            if (!_isUpdatingSources && !TxtManualUrl.IsFocused)
-            {
-                TxtManualUrl.Text = info.Address;
-            }
         }
         else
         {
@@ -185,23 +168,14 @@ public partial class MainWindow : Window
         }
         else
         {
-            string url = TxtManualUrl.Text?.Trim() ?? "";
-            if (string.IsNullOrWhiteSpace(url))
+            if (CmbSources.SelectedItem is not OmtSourceInfo info || string.IsNullOrWhiteSpace(info.Address))
             {
-                TxtStatus.Text = "Please select a source or enter a valid OMT URL.";
+                TxtStatus.Text = "Please select an OMT source from the dropdown.";
                 return;
             }
 
-            if (CmbSources.SelectedItem is OmtSourceInfo info && (info.Address == url || info.DisplayName == url))
-            {
-                TxtSourceName.Text = info.DisplayName;
-            }
-            else
-            {
-                TxtSourceName.Text = url;
-            }
-
-            _session.Connect(url);
+            TxtSourceName.Text = info.DisplayName;
+            _session.Connect(info.Address);
             BtnConnect.Content = "Disconnect";
             BtnConnect.Background = new SolidColorBrush(Color.FromRgb(239, 68, 68));
             BtnConnect.Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255));
