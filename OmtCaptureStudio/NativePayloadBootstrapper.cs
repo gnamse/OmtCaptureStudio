@@ -2,13 +2,16 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace OmtCaptureStudio;
 
 /// <summary>
 /// Ensures all native C++ runtimes and codecs are available locally.
-/// If running as a standalone single-file binary, extracts embedded native DLLs to LocalAppData on first run
-/// and sets the DLL search directory before any native P/Invoke or Avalonia rendering occurs.
+/// Follows the official .NET single-file extraction model:
+/// If running as a standalone single-file binary, extracts embedded native DLLs to %TEMP%\.net\OmtCaptureStudio\{hash}\
+/// and configures the DLL search directory before any native P/Invoke or Avalonia rendering occurs.
 /// </summary>
 public static class NativePayloadBootstrapper
 {
@@ -47,9 +50,9 @@ public static class NativePayloadBootstrapper
 
         if (!allExistInBase)
         {
-            // Standalone single executable mode: extract to LocalAppData
-            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            nativeDir = Path.Combine(localAppData, "OmtCaptureStudio", "runtimes", "v1.0.0.4");
+            // Official .NET Single-File convention: %TEMP%\.net\OmtCaptureStudio\{hash}\
+            string payloadHash = ComputePayloadHash();
+            nativeDir = Path.Combine(Path.GetTempPath(), ".net", "OmtCaptureStudio", payloadHash);
             EnsureExtracted(nativeDir);
         }
 
@@ -64,6 +67,37 @@ public static class NativePayloadBootstrapper
                 LoadLibrary(fullPath);
             }
         }
+    }
+
+    /// <summary>
+    /// Computes a deterministic SHA-256 hash from the assembly version and embedded resource sizes.
+    /// Changes automatically whenever code or embedded native binaries change, with zero hardcoded version strings.
+    /// </summary>
+    private static string ComputePayloadHash()
+    {
+        var assembly = Assembly.GetExecutingAssembly();
+        using var sha = SHA256.Create();
+        using var ms = new MemoryStream();
+        using var writer = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true);
+
+        // Include assembly version
+        string versionStr = assembly.GetName().Version?.ToString() ?? "1.0.0.0";
+        writer.Write(versionStr);
+
+        // Include metadata for each embedded native library
+        foreach (var lib in NativeLibraries)
+        {
+            string resourceName = $"NativePayload.{lib}";
+            using var stream = assembly.GetManifestResourceStream(resourceName);
+            writer.Write(lib);
+            writer.Write(stream?.Length ?? 0L);
+        }
+
+        writer.Flush();
+        ms.Position = 0;
+
+        byte[] hashBytes = sha.ComputeHash(ms);
+        return Convert.ToHexString(hashBytes)[..16].ToLowerInvariant();
     }
 
     private static void EnsureExtracted(string targetDir)
@@ -99,7 +133,7 @@ public static class NativePayloadBootstrapper
             }
             catch
             {
-                // In case another instance is running and has locked the file
+                // In case another instance is running concurrently and has locked the file
             }
         }
     }
