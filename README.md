@@ -43,12 +43,18 @@ Distribute **`OmtCaptureStudio.exe`** as a standalone file.
 - On machines without these libraries, `NativePayloadBootstrapper` automatically unpacks them on first run into `%TEMP%\.net\OmtCaptureStudio\{sha256-hash}\` and sets the DLL search path before engine initialization.
 - No installer or administrative rights needed.
 
-#### Option B: Release ZIP Archive (Standard Distribution)
-Run the release packaging script:
-```powershell
-.\Build-AOT.bat
-```
-This produces `Releases\OmtCaptureStudio-v<version>-win-x64.zip` containing `OmtCaptureStudio.exe` alongside the native DLLs and documentation. When extracted, the application uses the adjacent DLLs directly without unpacking to `%TEMP%`.
+#### Option B: Release Portable ZIP (Zero-Install Archive)
+Download and extract `OmtCaptureStudio-v<version>-win-x64.zip`.
+- Contains `OmtCaptureStudio.exe` alongside the native DLLs and documentation.
+- Portable execution with zero installation footprint—ideal for USB drives, OB trucks, and portable field troubleshooting.
+
+#### Option C: Windows Setup Installer (Recommended for Workstations)
+Download and run `OmtCaptureStudio-v<version>-Setup.exe`.
+- Built with Inno Setup with LZMA2 ultra-compression (~17 MB download).
+- Automatically configures Windows Start Menu and Desktop shortcuts.
+- Registers Windows Defender Firewall rules for OMT discovery (mDNS) and network streaming.
+- Checks for Microsoft Visual C++ 2015–2022 x64 Redistributable and offers one-click setup if missing.
+- Standard Windows "Apps & Features" Add/Remove support and silent enterprise deployment (`/VERYSILENT`).
 
 ---
 
