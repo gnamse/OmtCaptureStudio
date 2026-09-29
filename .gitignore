@@ -40,3 +40,5 @@ NativePayload/
 *.sha256
 *.bat
 *.ps1
+CONTEXT.md
+installer/
