@@ -70,11 +70,14 @@ public class FfmpegPipeSink : IRecordingSink
                     $"-f f32le -ar {sampleRate} -ac {channels} -i \\\\.\\pipe\\{audioPipeName} " +
                     $"{vCodecArgs} {aCodecArgs} \"{_outputPath}\"";
 
+                string localFfmpeg = Path.Combine(AppContext.BaseDirectory, "ffmpeg.exe");
+                string ffmpegBinary = File.Exists(localFfmpeg) ? localFfmpeg : "ffmpeg";
+
                 _ffmpegProcess = new Process
                 {
                     StartInfo = new ProcessStartInfo
                     {
-                        FileName = "ffmpeg",
+                        FileName = ffmpegBinary,
                         Arguments = args,
                         UseShellExecute = false,
                         CreateNoWindow = true,

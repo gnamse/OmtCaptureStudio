@@ -41,4 +41,5 @@ NativePayload/
 *.bat
 *.ps1
 CONTEXT.md
-installer/
+tools/
+ffmpeg.exe

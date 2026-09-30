@@ -31,7 +31,7 @@ A standalone broadcast-grade desktop GUI client for **Open Media Transport (OMT)
 | **.NET Runtime** | **Not Required** | Compiled Ahead-of-Time into pure native machine code. |
 | **OMT / Codec DLLs** | **Self-Contained** | Embedded directly inside the executable. Automatically self-extracted on first launch. |
 | **Visual C++ Redistributable** | **Required** | Standard Microsoft Visual C++ 2015–2022 x64 runtime (`vcruntime140.dll` / `msvcp140.dll`). Present on almost all Windows PCs, or installable via [Microsoft VC++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe). |
-| **FFmpeg (`ffmpeg.exe`)** | **Optional (Recording only)** | Stream discovery, live viewport preview, VU metering, and audio monitoring work with zero external dependencies. If recording video to disk is needed, `ffmpeg.exe` must either be in the system `PATH` or placed in the same folder as `OmtCaptureStudio.exe`. |
+| **FFmpeg (`ffmpeg.exe`)** | **Pre-Bundled in Installer** | Bundled directly with the Windows Setup Installer for instant out-of-the-box recording. For portable mode, placed in the app directory or found via system `PATH`. Stream discovery, live viewport preview, VU metering, and audio monitoring work with zero external dependencies. |
 
 ---
 
@@ -45,12 +45,13 @@ Distribute **`OmtCaptureStudio.exe`** as a standalone file.
 
 #### Option B: Release Portable ZIP (Zero-Install Archive)
 Download and extract `OmtCaptureStudio-v<version>-win-x64.zip`.
-- Contains `OmtCaptureStudio.exe` alongside the native DLLs and documentation.
+- Contains `OmtCaptureStudio.exe` alongside the native DLLs, bundled FFmpeg, and documentation.
 - Portable execution with zero installation footprint—ideal for USB drives, OB trucks, and portable field troubleshooting.
 
 #### Option C: Windows Setup Installer (Recommended for Workstations)
 Download and run `OmtCaptureStudio-v<version>-Setup.exe`.
-- Built with Inno Setup with LZMA2 ultra-compression (~17 MB download).
+- Built with Inno Setup with LZMA2 ultra-compression.
+- **Pre-bundles `ffmpeg.exe`** directly into the installation folder for zero-setup, instant recording.
 - Automatically configures Windows Start Menu and Desktop shortcuts.
 - Registers Windows Defender Firewall rules for OMT discovery (mDNS) and network streaming.
 - Checks for Microsoft Visual C++ 2015–2022 x64 Redistributable and offers one-click setup if missing.
