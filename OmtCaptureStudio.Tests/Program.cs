@@ -181,6 +181,11 @@ class Program
             detectedFormat = fmt;
         };
 
+        session.RecordingError += err =>
+        {
+            Console.WriteLine($" -> [Recorder Error Callback]: {err}");
+        };
+
         session.Connect(connectTarget);
 
         Console.WriteLine(" -> Waiting for connection and first video and audio frames via CaptureSession...");

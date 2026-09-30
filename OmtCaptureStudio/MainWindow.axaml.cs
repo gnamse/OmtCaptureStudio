@@ -163,10 +163,16 @@ public partial class MainWindow : Window
         TxtStatus.Text = "Scanning network for OMT sources...";
     }
 
-    private void BtnConnect_Click(object? sender, RoutedEventArgs e)
+    private async void BtnConnect_Click(object? sender, RoutedEventArgs e)
     {
         if (_session.IsConnected || BtnConnect.Content?.ToString() == "Disconnect")
         {
+            if (_session.IsRecording)
+            {
+                TxtStatus.Text = "Finalizing active recording before disconnecting...";
+                await _session.StopRecordingAsync();
+            }
+
             _session.Disconnect();
             VideoViewport.Clear();
             VuMeter.ResetMeters();
@@ -205,7 +211,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BtnTestSignal_Click(object? sender, RoutedEventArgs e)
+    private async void BtnTestSignal_Click(object? sender, RoutedEventArgs e)
     {
         bool isStarting = BtnTestSignal.IsChecked == true;
 
@@ -213,6 +219,11 @@ public partial class MainWindow : Window
         {
             if (_session.IsConnected)
             {
+                if (_session.IsRecording)
+                {
+                    TxtStatus.Text = "Finalizing active recording before switching source...";
+                    await _session.StopRecordingAsync();
+                }
                 _session.Disconnect();
             }
 
@@ -238,6 +249,11 @@ public partial class MainWindow : Window
 
             if (_session.IsConnected)
             {
+                if (_session.IsRecording)
+                {
+                    TxtStatus.Text = "Finalizing active recording before disconnecting...";
+                    await _session.StopRecordingAsync();
+                }
                 _session.Disconnect();
                 VideoViewport.Clear();
                 VuMeter.ResetMeters();
@@ -321,11 +337,25 @@ public partial class MainWindow : Window
 
     #region Recording Controls
 
-    private void BtnRecord_Click(object? sender, RoutedEventArgs e)
+    private async void BtnRecord_Click(object? sender, RoutedEventArgs e)
     {
         if (_session.IsRecording)
         {
-            _session.StopRecording();
+            BtnRecord.IsEnabled = false;
+            BtnRecord.Content = "Finalizing...";
+            TxtStatus.Text = "Finalizing recording and writing container...";
+            try
+            {
+                await _session.StopRecordingAsync();
+            }
+            catch (Exception ex)
+            {
+                TxtStatus.Text = $"Error stopping recording: {ex.Message}";
+            }
+            finally
+            {
+                BtnRecord.IsEnabled = true;
+            }
         }
         else
         {
@@ -355,6 +385,7 @@ public partial class MainWindow : Window
     {
         Dispatcher.UIThread.Post(() =>
         {
+            BtnRecord.IsEnabled = true;
             BtnRecord.Content = "■ STOP RECORDING";
             BtnRecord.Background = RecordStopBrush;
             AutomationProperties.SetName(BtnRecord, "Stop Recording Stream");
@@ -369,6 +400,7 @@ public partial class MainWindow : Window
         {
             RecordingCloseOverlay.IsVisible = false;
             _recordUiTimer.Stop();
+            BtnRecord.IsEnabled = true;
             BtnRecord.Content = "● START RECORDING";
             BtnRecord.Background = RecordStartBrush;
             AutomationProperties.SetName(BtnRecord, "Start Recording Stream");
@@ -385,6 +417,13 @@ public partial class MainWindow : Window
     {
         Dispatcher.UIThread.Post(() =>
         {
+            RecordingCloseOverlay.IsVisible = false;
+            _recordUiTimer.Stop();
+            BtnRecord.IsEnabled = true;
+            BtnRecord.Content = "● START RECORDING";
+            BtnRecord.Background = RecordStartBrush;
+            AutomationProperties.SetName(BtnRecord, "Start Recording Stream");
+            TxtRecordDuration.Text = "00:00:00";
             TxtStatus.Text = $"Recording Error: {error}";
         });
     }
@@ -511,7 +550,7 @@ public partial class MainWindow : Window
 
         try
         {
-            await Task.Run(() => _session.StopRecording());
+            await _session.StopRecordingAsync();
         }
         catch (Exception ex)
         {

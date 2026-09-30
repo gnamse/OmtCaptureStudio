@@ -44,6 +44,17 @@ public class StreamRecorderService : IDisposable
     {
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
         _ownsSink = ownsSink;
+        _sink.SinkError += OnSinkError;
+    }
+
+    private void OnSinkError(string error)
+    {
+        lock (_recordLock)
+        {
+            if (!_isRecording) return;
+            _isRecording = false;
+        }
+        RecordingError?.Invoke(error);
     }
 
     /// <summary>
@@ -183,9 +194,18 @@ public class StreamRecorderService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Stops recording asynchronously without blocking the calling thread.
+    /// </summary>
+    public Task StopRecordingAsync()
+    {
+        return Task.Run(() => StopRecording());
+    }
+
     public void Dispose()
     {
         StopRecording();
+        _sink.SinkError -= OnSinkError;
         if (_ownsSink)
         {
             _sink.Dispose();

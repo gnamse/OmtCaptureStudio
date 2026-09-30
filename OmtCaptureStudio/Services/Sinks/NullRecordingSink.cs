@@ -13,6 +13,7 @@ public class NullRecordingSink : IRecordingSink
     public bool IsInitialized { get; private set; }
     public StreamFormat? InitializedFormat { get; private set; }
     public string? OutputPath { get; private set; }
+    public event Action<string>? SinkError { add { } remove { } }
 
     public bool Initialize(RecordingConfig config, StreamFormat format, string outputPath)
     {

@@ -114,10 +114,10 @@ public class AudioEngine : IDisposable
             {
                 FeedMonitoringInternal(buffer, totalBytes, sampleRate, channels);
             }
-
-            // 4. Dispatch to downstream recording taps
-            AudioInterleavedAvailable?.Invoke(buffer, totalBytes);
         }
+
+        // 4. Dispatch to downstream recording taps outside lock (_lock)
+        AudioInterleavedAvailable?.Invoke(buffer, totalBytes);
     }
 
     /// <summary>

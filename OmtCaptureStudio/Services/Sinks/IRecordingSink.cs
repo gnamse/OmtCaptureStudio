@@ -27,4 +27,9 @@ public interface IRecordingSink : IDisposable
     /// Finalizes the output container, flushes buffers, and returns the total bytes written.
     /// </summary>
     void FinalizeSink(out long totalBytesWritten);
+
+    /// <summary>
+    /// Raised when an asynchronous error occurs within the recording transport sink.
+    /// </summary>
+    event Action<string>? SinkError;
 }

@@ -195,6 +195,19 @@ public class CaptureSession : IDisposable
     }
 
     /// <summary>
+    /// Disconnects the active media source asynchronously and stops recording if active.
+    /// </summary>
+    public async Task DisconnectAsync()
+    {
+        if (_recorder.IsRecording)
+        {
+            await _recorder.StopRecordingAsync();
+        }
+
+        Disconnect();
+    }
+
+    /// <summary>
     /// Starts recording using the active stream format parameters automatically.
     /// </summary>
     public bool StartRecording(RecordingConfig config)
@@ -226,6 +239,14 @@ public class CaptureSession : IDisposable
     public void StopRecording()
     {
         _recorder.StopRecording();
+    }
+
+    /// <summary>
+    /// Stops the active recording asynchronously.
+    /// </summary>
+    public Task StopRecordingAsync()
+    {
+        return _recorder.StopRecordingAsync();
     }
 
     public void Dispose()

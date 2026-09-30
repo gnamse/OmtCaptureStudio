@@ -1,8 +1,14 @@
 using System;
+using System.Buffers;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Win32;
 using OmtCaptureStudio.Models;
 
@@ -10,10 +16,37 @@ namespace OmtCaptureStudio.Services.Sinks;
 
 /// <summary>
 /// Production recording sink that pipes raw BGRA video and float PCM audio
-/// to FFmpeg through Windows Named Pipes.
+/// to FFmpeg through Windows Named Pipes using an asynchronous decoupled pipeline.
 /// </summary>
 public class FfmpegPipeSink : IRecordingSink
 {
+    private const int MaxQueuedVideoFrames = 128;
+    private const int MaxQueuedAudioChunks = 512;
+
+    private readonly struct VideoFramePacket
+    {
+        public readonly byte[] Buffer;
+        public readonly int Length;
+
+        public VideoFramePacket(byte[] buffer, int length)
+        {
+            Buffer = buffer;
+            Length = length;
+        }
+    }
+
+    private readonly struct AudioDataPacket
+    {
+        public readonly byte[] Buffer;
+        public readonly int Length;
+
+        public AudioDataPacket(byte[] buffer, int length)
+        {
+            Buffer = buffer;
+            Length = length;
+        }
+    }
+
     private Process? _ffmpegProcess;
     private NamedPipeServerStream? _videoPipe;
     private NamedPipeServerStream? _audioPipe;
@@ -21,9 +54,26 @@ public class FfmpegPipeSink : IRecordingSink
     private Task? _audioPipeConnectTask;
     private string? _outputPath;
     private bool _hasAudio;
-    private bool _audioPrimed;
     private readonly StringBuilder _ffmpegErrorLog = new();
     private readonly object _lock = new();
+
+    // Queues and synchronization for asynchronous, decoupled pipeline
+    private readonly Queue<VideoFramePacket> _videoQueue = new();
+    private readonly object _videoLock = new();
+    private readonly AutoResetEvent _videoSignal = new(false);
+    private Thread? _videoWorkerThread;
+
+    private readonly Queue<AudioDataPacket> _audioQueue = new();
+    private readonly object _audioLock = new();
+    private readonly AutoResetEvent _audioSignal = new(false);
+    private Thread? _audioWorkerThread;
+
+    private volatile bool _isWritingActive;
+    private volatile bool _disposed;
+    private long _droppedVideoFrames;
+    private long _droppedAudioChunks;
+
+    public event Action<string>? SinkError;
 
     public bool Initialize(RecordingConfig config, StreamFormat format, string outputPath)
     {
@@ -35,7 +85,6 @@ public class FfmpegPipeSink : IRecordingSink
             {
                 _outputPath = outputPath;
                 _hasAudio = format.Channels > 0 && format.SampleRate > 0;
-                _audioPrimed = false;
 
                 lock (_ffmpegErrorLog)
                 {
@@ -77,7 +126,8 @@ public class FfmpegPipeSink : IRecordingSink
                     _audioPipeConnectTask = null;
                 }
 
-                int fps = (int)Math.Round(format.FrameRate > 0 ? format.FrameRate : 60.0);
+                double fps = format.FrameRate > 0 ? format.FrameRate : 60.0;
+                string fpsStr = fps.ToString("0.###", CultureInfo.InvariantCulture);
                 string vCodecArgs = GetVideoCodecArguments(config.EncoderChoice, config.Quality);
 
                 string aInputArgs;
@@ -85,7 +135,7 @@ public class FfmpegPipeSink : IRecordingSink
 
                 if (_hasAudio)
                 {
-                    aInputArgs = $"-thread_queue_size 4096 -f f32le -ar {format.SampleRate} -ac {format.Channels} -i \\\\.\\pipe\\{audioPipeName} ";
+                    aInputArgs = $"-thread_queue_size 512 -f f32le -ar {format.SampleRate} -ac {format.Channels} -i \\\\.\\pipe\\{audioPipeName} ";
                     aCodecArgs = config.ContainerFormat == OutputContainerFormat.MOV && config.EncoderChoice == VideoEncoderChoice.ProRes
                         ? "-c:a pcm_s24le "
                         : "-c:a aac -b:a 320k ";
@@ -100,11 +150,11 @@ public class FfmpegPipeSink : IRecordingSink
                     ? "-movflags +faststart "
                     : "";
 
-                string args = $"-y " +
-                    $"-thread_queue_size 4096 " +
-                    $"-f rawvideo -vcodec rawvideo -pix_fmt bgra -s {format.Width}x{format.Height} -r {fps} -i \\\\.\\pipe\\{videoPipeName} " +
+                string args = $"-nostdin -y " +
+                    $"-thread_queue_size 128 " +
+                    $"-f rawvideo -vcodec rawvideo -pix_fmt bgra -s {format.Width}x{format.Height} -r {fpsStr} -i \\\\.\\pipe\\{videoPipeName} " +
                     aInputArgs +
-                    $"-max_interleave_delta 0 " +
+                    $"-max_interleave_delta 5000000 " +
                     $"{vCodecArgs} {aCodecArgs}{containerFlags}\"{_outputPath}\"";
 
                 string localFfmpeg = Path.Combine(AppContext.BaseDirectory, "ffmpeg.exe");
@@ -140,8 +190,47 @@ public class FfmpegPipeSink : IRecordingSink
                     }
                 };
 
+                _ffmpegProcess.Exited += (s, e) =>
+                {
+                    if (_isWritingActive && !_disposed)
+                    {
+                        _isWritingActive = false;
+                        string err = GetLastFfmpegError();
+                        SinkError?.Invoke(string.IsNullOrWhiteSpace(err)
+                            ? "FFmpeg recording process terminated unexpectedly."
+                            : $"FFmpeg process terminated unexpectedly: {err}");
+                        try { _videoSignal.Set(); } catch { }
+                        try { _audioSignal.Set(); } catch { }
+                    }
+                };
+
                 _ffmpegProcess.Start();
                 _ffmpegProcess.BeginErrorReadLine();
+
+                _isWritingActive = true;
+                _disposed = false;
+                _droppedVideoFrames = 0;
+                _droppedAudioChunks = 0;
+
+                _videoWorkerThread = new Thread(VideoWriterLoop)
+                {
+                    Name = "Ffmpeg_VideoPipeWriter",
+                    IsBackground = true,
+                    Priority = ThreadPriority.AboveNormal
+                };
+                _videoWorkerThread.Start();
+
+                if (_hasAudio)
+                {
+                    _audioWorkerThread = new Thread(AudioWriterLoop)
+                    {
+                        Name = "Ffmpeg_AudioPipeWriter",
+                        IsBackground = true,
+                        Priority = ThreadPriority.AboveNormal
+                    };
+                    _audioWorkerThread.Start();
+                }
+
                 return true;
             }
             catch (Exception ex)
@@ -153,45 +242,263 @@ public class FfmpegPipeSink : IRecordingSink
         }
     }
 
+
     public unsafe void WriteVideo(IntPtr pData, int dataLength)
     {
-        if (_videoPipe == null || pData == IntPtr.Zero || dataLength <= 0) return;
+        if (!_isWritingActive || _disposed || pData == IntPtr.Zero || dataLength <= 0) return;
 
+        byte[] rented;
         try
         {
-            if (_videoPipeConnectTask != null && !_videoPipeConnectTask.IsCompleted) return;
-            if (!_videoPipe.IsConnected) return;
-
-            byte* ptr = (byte*)pData.ToPointer();
-            var readOnlySpan = new ReadOnlySpan<byte>(ptr, dataLength);
-            _videoPipe.Write(readOnlySpan);
+            rented = ArrayPool<byte>.Shared.Rent(dataLength);
+            fixed (byte* pDst = rented)
+            {
+                Buffer.MemoryCopy((void*)pData, pDst, dataLength, dataLength);
+            }
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Video Write Error] {ex.Message}");
+            Debug.WriteLine($"[Video MemoryCopy Error] {ex.Message}");
+            return;
+        }
+
+        lock (_videoLock)
+        {
+            if (!_isWritingActive || _disposed)
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+                return;
+            }
+
+            if (_videoQueue.Count >= MaxQueuedVideoFrames)
+            {
+                var dropped = _videoQueue.Dequeue();
+                ArrayPool<byte>.Shared.Return(dropped.Buffer);
+                Interlocked.Increment(ref _droppedVideoFrames);
+            }
+
+            _videoQueue.Enqueue(new VideoFramePacket(rented, dataLength));
+            _videoSignal.Set();
         }
     }
 
     public void WriteAudio(byte[] buffer, int offset, int count)
     {
-        if (!_hasAudio || _audioPipe == null || buffer == null || count <= 0) return;
+        if (!_hasAudio || !_isWritingActive || _disposed || buffer == null || count <= 0) return;
 
+        byte[] rented;
         try
         {
-            if (_audioPipeConnectTask != null && !_audioPipeConnectTask.IsCompleted) return;
-            if (!_audioPipe.IsConnected) return;
-
-            // Prime audio with initial silence packet if this is the first write
-            if (!_audioPrimed)
-            {
-                _audioPrimed = true;
-            }
-
-            _audioPipe.Write(buffer, offset, count);
+            rented = ArrayPool<byte>.Shared.Rent(count);
+            Buffer.BlockCopy(buffer, offset, rented, 0, count);
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Audio Write Error] {ex.Message}");
+            Debug.WriteLine($"[Audio Buffer Copy Error] {ex.Message}");
+            return;
+        }
+
+        lock (_audioLock)
+        {
+            if (!_isWritingActive || _disposed)
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+                return;
+            }
+
+            if (_audioQueue.Count >= MaxQueuedAudioChunks)
+            {
+                var dropped = _audioQueue.Dequeue();
+                ArrayPool<byte>.Shared.Return(dropped.Buffer);
+                Interlocked.Increment(ref _droppedAudioChunks);
+            }
+
+            _audioQueue.Enqueue(new AudioDataPacket(rented, count));
+            _audioSignal.Set();
+        }
+    }
+
+    private void VideoWriterLoop()
+    {
+        try
+        {
+            if (_videoPipeConnectTask != null)
+            {
+                _videoPipeConnectTask.Wait(8000);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[Video Pipe Handshake Error] {ex.Message}");
+            if (_isWritingActive)
+            {
+                _isWritingActive = false;
+                SinkError?.Invoke($"FFmpeg video pipe handshake error: {ex.Message}");
+            }
+            return;
+        }
+
+        if (_videoPipe == null || !_videoPipe.IsConnected)
+        {
+            if (_isWritingActive)
+            {
+                _isWritingActive = false;
+                SinkError?.Invoke("FFmpeg video pipe failed to connect.");
+            }
+            return;
+        }
+
+        while (!_disposed)
+        {
+            VideoFramePacket packet = default;
+            lock (_videoLock)
+            {
+                if (_videoQueue.Count > 0)
+                {
+                    packet = _videoQueue.Dequeue();
+                }
+                else if (!_isWritingActive)
+                {
+                    // Recording stopped and all queued frames drained
+                    break;
+                }
+            }
+
+            if (packet.Buffer == null)
+            {
+                try
+                {
+                    _videoSignal.WaitOne(20);
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
+                continue;
+            }
+
+            try
+            {
+                if (_videoPipe != null && _videoPipe.IsConnected)
+                {
+                    _videoPipe.Write(packet.Buffer, 0, packet.Length);
+                }
+                else
+                {
+                    if (_isWritingActive)
+                    {
+                        _isWritingActive = false;
+                        SinkError?.Invoke("FFmpeg video pipe disconnected unexpectedly.");
+                    }
+                    break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[Video Pipe Write Error] {ex.Message}");
+                if (_isWritingActive)
+                {
+                    _isWritingActive = false;
+                    SinkError?.Invoke($"FFmpeg video write error: {ex.Message}");
+                }
+                break;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(packet.Buffer);
+            }
+        }
+    }
+
+    private void AudioWriterLoop()
+    {
+        try
+        {
+            if (_audioPipeConnectTask != null)
+            {
+                _audioPipeConnectTask.Wait(8000);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[Audio Pipe Handshake Error] {ex.Message}");
+            if (_isWritingActive)
+            {
+                _isWritingActive = false;
+                SinkError?.Invoke($"FFmpeg audio pipe handshake error: {ex.Message}");
+            }
+            return;
+        }
+
+        if (_audioPipe == null || !_audioPipe.IsConnected)
+        {
+            if (_isWritingActive)
+            {
+                _isWritingActive = false;
+                SinkError?.Invoke("FFmpeg audio pipe failed to connect.");
+            }
+            return;
+        }
+
+        while (!_disposed)
+        {
+            AudioDataPacket packet = default;
+            lock (_audioLock)
+            {
+                if (_audioQueue.Count > 0)
+                {
+                    packet = _audioQueue.Dequeue();
+                }
+                else if (!_isWritingActive)
+                {
+                    // Recording stopped and all queued audio drained
+                    break;
+                }
+            }
+
+            if (packet.Buffer == null)
+            {
+                try
+                {
+                    _audioSignal.WaitOne(20);
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
+                continue;
+            }
+
+            try
+            {
+                if (_audioPipe != null && _audioPipe.IsConnected)
+                {
+                    _audioPipe.Write(packet.Buffer, 0, packet.Length);
+                }
+                else
+                {
+                    if (_isWritingActive)
+                    {
+                        _isWritingActive = false;
+                        SinkError?.Invoke("FFmpeg audio pipe disconnected unexpectedly.");
+                    }
+                    break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[Audio Pipe Write Error] {ex.Message}");
+                if (_isWritingActive)
+                {
+                    _isWritingActive = false;
+                    SinkError?.Invoke($"FFmpeg audio write error: {ex.Message}");
+                }
+                break;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(packet.Buffer);
+            }
         }
     }
 
@@ -202,13 +509,36 @@ public class FfmpegPipeSink : IRecordingSink
         {
             try
             {
-                // Signal EOF to FFmpeg by closing pipes.
-                // Do not call Flush() before Dispose() as Win32 FlushFileBuffers blocks if FFmpeg is reading another stream.
+                // 1. Signal workers that no new incoming frames will be enqueued
+                _isWritingActive = false;
+
+                lock (_videoLock)
+                {
+                    _videoSignal.Set();
+                }
+                lock (_audioLock)
+                {
+                    _audioSignal.Set();
+                }
+
+                // 2. Allow workers to flush queued frames (give up to 5 seconds)
+                if (_videoWorkerThread != null && _videoWorkerThread.IsAlive)
+                {
+                    _videoWorkerThread.Join(5000);
+                }
+                if (_audioWorkerThread != null && _audioWorkerThread.IsAlive)
+                {
+                    _audioWorkerThread.Join(5000);
+                }
+
+                // 3. Close pipes to signal EOF to FFmpeg.
+                // Closing the named pipes tells FFmpeg that input streams have ended.
                 try { _videoPipe?.Dispose(); } catch { }
                 try { _audioPipe?.Dispose(); } catch { }
                 _videoPipe = null;
                 _audioPipe = null;
 
+                // 4. Wait for FFmpeg to finish writing file trailers and exit
                 if (_ffmpegProcess != null && !_ffmpegProcess.HasExited)
                 {
                     _ffmpegProcess.WaitForExit(10000);
@@ -243,17 +573,45 @@ public class FfmpegPipeSink : IRecordingSink
     {
         lock (_ffmpegErrorLog)
         {
-            string log = _ffmpegErrorLog.ToString().Trim();
-            if (string.IsNullOrEmpty(log)) return "";
-
-            string[] lines = log.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            int count = Math.Min(3, lines.Length);
-            return string.Join(" ", lines[^count..]).Trim();
+            return _ffmpegErrorLog.ToString().Trim();
         }
     }
 
     private void Cleanup()
     {
+        _isWritingActive = false;
+        _disposed = true;
+
+        try { _videoSignal.Set(); } catch { }
+        try { _audioSignal.Set(); } catch { }
+
+        if (_videoWorkerThread != null && _videoWorkerThread.IsAlive)
+        {
+            _videoWorkerThread.Join(1000);
+        }
+        if (_audioWorkerThread != null && _audioWorkerThread.IsAlive)
+        {
+            _audioWorkerThread.Join(1000);
+        }
+
+        lock (_videoLock)
+        {
+            while (_videoQueue.Count > 0)
+            {
+                var p = _videoQueue.Dequeue();
+                ArrayPool<byte>.Shared.Return(p.Buffer);
+            }
+        }
+
+        lock (_audioLock)
+        {
+            while (_audioQueue.Count > 0)
+            {
+                var p = _audioQueue.Dequeue();
+                ArrayPool<byte>.Shared.Return(p.Buffer);
+            }
+        }
+
         try { _videoPipe?.Dispose(); } catch { }
         try { _audioPipe?.Dispose(); } catch { }
         try { _ffmpegProcess?.Dispose(); } catch { }
@@ -263,6 +621,8 @@ public class FfmpegPipeSink : IRecordingSink
         _ffmpegProcess = null;
         _videoPipeConnectTask = null;
         _audioPipeConnectTask = null;
+        _videoWorkerThread = null;
+        _audioWorkerThread = null;
     }
 
     private static VideoEncoderChoice _detectedHardware = VideoEncoderChoice.AutoHardware;
@@ -344,6 +704,8 @@ public class FfmpegPipeSink : IRecordingSink
     public void Dispose()
     {
         Cleanup();
+        try { _videoSignal.Dispose(); } catch { }
+        try { _audioSignal.Dispose(); } catch { }
         GC.SuppressFinalize(this);
     }
 }
