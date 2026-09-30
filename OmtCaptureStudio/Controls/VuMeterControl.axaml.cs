@@ -12,6 +12,23 @@ namespace OmtCaptureStudio.Controls;
 
 public partial class VuMeterControl : UserControl
 {
+    private static readonly float[] ScaleMarks = { 0f, -6f, -12f, -18f, -24f, -36f, -48f, -60f };
+    private static readonly IBrush BrushDanger = new SolidColorBrush(Color.FromRgb(239, 68, 68));
+    private static readonly IBrush BrushWarnHigh = new SolidColorBrush(Color.FromRgb(245, 158, 11));
+    private static readonly IBrush BrushWarnMid = new SolidColorBrush(Color.FromRgb(234, 179, 8));
+    private static readonly IBrush BrushNormal = new SolidColorBrush(Color.FromRgb(34, 197, 94));
+    private static readonly IBrush BrushMuted = new SolidColorBrush(Color.FromRgb(113, 113, 122));
+    private static readonly IBrush BrushClipInactive = new SolidColorBrush(Color.FromRgb(63, 63, 70));
+    private static readonly IBrush BrushClipActive = new SolidColorBrush(Color.FromRgb(239, 68, 68));
+    private static readonly IBrush BrushMonitorActive = new SolidColorBrush(Color.FromRgb(34, 197, 94));
+    private static readonly IBrush BrushMonitorInactive = new SolidColorBrush(Color.FromRgb(39, 39, 42));
+    private static readonly IBrush BrushMonitorTextActive = Brushes.Black;
+    private static readonly IBrush BrushMonitorTextInactive = new SolidColorBrush(Color.FromRgb(228, 228, 231));
+    private static readonly FontFamily MonoFontFamily = new FontFamily("Consolas, monospace");
+
+    private readonly TextBlock[] _scaleLabels;
+    private readonly Rectangle[] _scaleTicks;
+
     private float _peakHoldLeft = -60f;
     private float _peakHoldRight = -60f;
     private DateTime _lastClipLeft = DateTime.MinValue;
@@ -24,7 +41,13 @@ public partial class VuMeterControl : UserControl
     {
         InitializeComponent();
 
+        _scaleLabels = new TextBlock[ScaleMarks.Length];
+        _scaleTicks = new Rectangle[ScaleMarks.Length];
+        InitializeScaleElements();
+
         MeterAreaGrid.SizeChanged += (s, e) => RedrawScale();
+        TrackLeft.SizeChanged += (s, e) => RedrawScale();
+        Loaded += (s, e) => RedrawScale();
         BtnMonitor.IsCheckedChanged += BtnMonitor_IsCheckedChanged;
     }
 
@@ -36,58 +59,70 @@ public partial class VuMeterControl : UserControl
         return (db + 60.0) / 60.0;
     }
 
-    private void RedrawScale()
+    private void InitializeScaleElements()
     {
-        ScaleCanvas.Children.Clear();
-        double height = TrackLeft.Bounds.Height;
-        if (height <= 20) return;
-
-        // Keep the full-height gradient bars synced to actual track height
-        GradientBarLeft.Height = height;
-        GradientBarRight.Height = height;
-
-        // Calibrated scale marks (dBFS)
-        float[] marks = new float[] { 0f, -6f, -12f, -18f, -24f, -36f, -48f, -60f };
-
-        foreach (float db in marks)
+        for (int i = 0; i < ScaleMarks.Length; i++)
         {
-            double norm = DbToNormalized(db);
-            double y = (1.0 - norm) * height;
-
-            Color markColor = db switch
+            float db = ScaleMarks[i];
+            IBrush markBrush = db switch
             {
-                0f => Color.FromRgb(239, 68, 68),
-                >= -6f => Color.FromRgb(245, 158, 11),
-                >= -12f => Color.FromRgb(234, 179, 8),
-                >= -36f => Color.FromRgb(34, 197, 94),
-                _ => Color.FromRgb(113, 113, 122)
+                0f => BrushDanger,
+                >= -6f => BrushWarnHigh,
+                >= -12f => BrushWarnMid,
+                >= -36f => BrushNormal,
+                _ => BrushMuted
             };
 
             var tb = new TextBlock
             {
                 Text = db == 0f ? "0" : $"{db:0}",
-                Foreground = new SolidColorBrush(markColor),
+                Foreground = markBrush,
                 FontSize = 9,
-                FontFamily = new FontFamily("Consolas, monospace"),
+                FontFamily = MonoFontFamily,
                 FontWeight = FontWeight.SemiBold,
                 Width = 24,
                 TextAlignment = TextAlignment.Right
             };
-
             Canvas.SetLeft(tb, 0);
-            Canvas.SetTop(tb, Math.Max(0, Math.Min(height - 12, y - 6)));
             ScaleCanvas.Children.Add(tb);
+            _scaleLabels[i] = tb;
 
             var tick = new Rectangle
             {
                 Width = 4,
                 Height = 1,
-                Fill = new SolidColorBrush(markColor),
+                Fill = markBrush,
                 Opacity = 0.8
             };
             Canvas.SetLeft(tick, 26);
-            Canvas.SetTop(tick, Math.Max(0, Math.Min(height - 1, y)));
             ScaleCanvas.Children.Add(tick);
+            _scaleTicks[i] = tick;
+        }
+    }
+
+    private void RedrawScale()
+    {
+        double height = TrackLeft.Bounds.Height;
+        if (height <= 20)
+        {
+            ScaleCanvas.IsVisible = false;
+            return;
+        }
+
+        ScaleCanvas.IsVisible = true;
+
+        // Keep the full-height gradient bars synced to actual track height
+        GradientBarLeft.Height = height;
+        GradientBarRight.Height = height;
+
+        // Zero-allocation positioning of pooled scale marks
+        for (int i = 0; i < ScaleMarks.Length; i++)
+        {
+            double norm = DbToNormalized(ScaleMarks[i]);
+            double y = (1.0 - norm) * height;
+
+            Canvas.SetTop(_scaleLabels[i], Math.Max(0, Math.Min(height - 12, y - 6)));
+            Canvas.SetTop(_scaleTicks[i], Math.Max(0, Math.Min(height - 1, y)));
         }
     }
 
@@ -125,7 +160,7 @@ public partial class VuMeterControl : UserControl
 
                 if (chL.IsClipping || chL.PeakDb >= -0.1f) _lastClipLeft = DateTime.UtcNow;
                 bool isClipActive = (DateTime.UtcNow - _lastClipLeft).TotalMilliseconds < 500;
-                ClipLeft.Background = new SolidColorBrush(isClipActive ? Color.FromRgb(239, 68, 68) : Color.FromRgb(63, 63, 70));
+                ClipLeft.Background = isClipActive ? BrushClipActive : BrushClipInactive;
             }
 
             // Channel 1 (Right)
@@ -145,7 +180,7 @@ public partial class VuMeterControl : UserControl
 
                 if (chR.IsClipping || chR.PeakDb >= -0.1f) _lastClipRight = DateTime.UtcNow;
                 bool isClipActive = (DateTime.UtcNow - _lastClipRight).TotalMilliseconds < 500;
-                ClipRight.Background = new SolidColorBrush(isClipActive ? Color.FromRgb(239, 68, 68) : Color.FromRgb(63, 63, 70));
+                ClipRight.Background = isClipActive ? BrushClipActive : BrushClipInactive;
             }
 
             float maxCurrentPeak = Math.Max(chL?.PeakDb ?? -60f, chR?.PeakDb ?? -60f);
@@ -153,7 +188,7 @@ public partial class VuMeterControl : UserControl
         });
     }
 
-    private void ResetMeters()
+    public void ResetMeters()
     {
         _peakHoldLeft = -60f;
         _peakHoldRight = -60f;
@@ -162,15 +197,15 @@ public partial class VuMeterControl : UserControl
         PeakLineLeft.Margin = new Thickness(0);
         PeakLineRight.Margin = new Thickness(0);
         TxtDbReadout.Text = "-inf dB";
-        ClipLeft.Background = new SolidColorBrush(Color.FromRgb(63, 63, 70));
-        ClipRight.Background = new SolidColorBrush(Color.FromRgb(63, 63, 70));
+        ClipLeft.Background = BrushClipInactive;
+        ClipRight.Background = BrushClipInactive;
     }
 
     private void BtnMonitor_IsCheckedChanged(object? sender, RoutedEventArgs e)
     {
         bool isChecked = BtnMonitor.IsChecked == true;
-        BtnMonitor.Background = new SolidColorBrush(isChecked ? Color.FromRgb(34, 197, 94) : Color.FromRgb(39, 39, 42));
-        BtnMonitor.Foreground = new SolidColorBrush(isChecked ? Colors.Black : Color.FromRgb(228, 228, 231));
+        BtnMonitor.Background = isChecked ? BrushMonitorActive : BrushMonitorInactive;
+        BtnMonitor.Foreground = isChecked ? BrushMonitorTextActive : BrushMonitorTextInactive;
         MonitoringToggled?.Invoke(isChecked);
     }
 }

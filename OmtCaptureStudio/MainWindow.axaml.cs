@@ -3,7 +3,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
+using Avalonia.Automation;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
@@ -16,6 +19,15 @@ namespace OmtCaptureStudio;
 
 public partial class MainWindow : Window
 {
+    private static readonly IBrush ConnectBrush = new SolidColorBrush(Color.FromRgb(16, 185, 129));
+    private static readonly IBrush DisconnectBrush = new SolidColorBrush(Color.FromRgb(239, 68, 68));
+    private static readonly IBrush TestSignalActiveBrush = new SolidColorBrush(Color.FromRgb(99, 102, 241));
+    private static readonly IBrush TestSignalInactiveBrush = new SolidColorBrush(Color.FromRgb(39, 39, 42));
+    private static readonly IBrush LiveIndicatorActiveBrush = new SolidColorBrush(Color.FromRgb(34, 197, 94));
+    private static readonly IBrush LiveIndicatorInactiveBrush = new SolidColorBrush(Color.FromRgb(113, 113, 122));
+    private static readonly IBrush RecordStartBrush = new SolidColorBrush(Color.FromRgb(220, 38, 38));
+    private static readonly IBrush RecordStopBrush = new SolidColorBrush(Color.FromRgb(185, 28, 28));
+
     private readonly CaptureSession _session;
     private readonly OmtDiscoveryService _discoveryService;
     private readonly DispatcherTimer _recordUiTimer;
@@ -23,6 +35,8 @@ public partial class MainWindow : Window
     private int _lastWidth;
     private int _lastHeight;
     private double _lastFps;
+    private volatile bool _isLive;
+    private bool _isSafeExitConfirmed;
 
     public MainWindow()
     {
@@ -40,11 +54,8 @@ public partial class MainWindow : Window
         SetupUiDefaults();
         HookEvents();
 
-        Closing += (s, e) =>
-        {
-            _discoveryService.Dispose();
-            _session.Dispose();
-        };
+        Closing += MainWindow_Closing;
+        KeyDown += MainWindow_KeyDown;
 
         _discoveryService.Start();
     }
@@ -158,17 +169,24 @@ public partial class MainWindow : Window
         {
             _session.Disconnect();
             VideoViewport.Clear();
+            VuMeter.ResetMeters();
+            _isLive = false;
+            _lastWidth = 0;
+            _lastHeight = 0;
+            _lastFps = 0;
             BtnConnect.Content = "Connect";
-            BtnConnect.Background = new SolidColorBrush(Color.FromRgb(16, 185, 129));
-            BtnConnect.Foreground = new SolidColorBrush(Color.FromRgb(0, 0, 0));
+            BtnConnect.Background = ConnectBrush;
+            BtnConnect.Foreground = Brushes.Black;
+            AutomationProperties.SetName(BtnConnect, "Connect Stream");
             NoSignalOverlay.IsVisible = true;
-            LiveIndicator.Fill = new SolidColorBrush(Color.FromRgb(113, 113, 122));
+            LiveIndicator.Fill = LiveIndicatorInactiveBrush;
             TxtLiveStatus.Text = "OFFLINE";
             TxtVideoSpecs.Text = "-- x -- @ -- fps";
 
             BtnTestSignal.IsChecked = false;
-            BtnTestSignal.Background = new SolidColorBrush(Color.FromRgb(39, 39, 42));
-            BtnTestSignal.Foreground = new SolidColorBrush(Color.FromRgb(244, 244, 245));
+            BtnTestSignal.Background = TestSignalInactiveBrush;
+            BtnTestSignal.Foreground = Brushes.WhiteSmoke;
+            AutomationProperties.SetName(BtnTestSignal, "Enable Test Signal Generator");
         }
         else
         {
@@ -181,8 +199,9 @@ public partial class MainWindow : Window
             TxtSourceName.Text = info.DisplayName;
             _session.Connect(info.Address);
             BtnConnect.Content = "Disconnect";
-            BtnConnect.Background = new SolidColorBrush(Color.FromRgb(239, 68, 68));
-            BtnConnect.Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255));
+            BtnConnect.Background = DisconnectBrush;
+            BtnConnect.Foreground = Brushes.White;
+            AutomationProperties.SetName(BtnConnect, "Disconnect Stream");
         }
     }
 
@@ -197,32 +216,41 @@ public partial class MainWindow : Window
                 _session.Disconnect();
             }
 
-            BtnTestSignal.Background = new SolidColorBrush(Color.FromRgb(99, 102, 241));
-            BtnTestSignal.Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255));
+            BtnTestSignal.Background = TestSignalActiveBrush;
+            BtnTestSignal.Foreground = Brushes.White;
+            AutomationProperties.SetName(BtnTestSignal, "Disable Test Signal Generator");
             TxtSourceName.Text = "Local Test Pattern (SMPTE)";
             TxtStatus.Text = "Connected to internal synthetic test generator.";
 
             _session.Connect(new SyntheticPatternSource());
 
             BtnConnect.Content = "Disconnect";
-            BtnConnect.Background = new SolidColorBrush(Color.FromRgb(239, 68, 68));
-            BtnConnect.Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255));
+            BtnConnect.Background = DisconnectBrush;
+            BtnConnect.Foreground = Brushes.White;
+            AutomationProperties.SetName(BtnConnect, "Disconnect Stream");
         }
         else
         {
-            BtnTestSignal.Background = new SolidColorBrush(Color.FromRgb(39, 39, 42));
-            BtnTestSignal.Foreground = new SolidColorBrush(Color.FromRgb(244, 244, 245));
+            BtnTestSignal.Background = TestSignalInactiveBrush;
+            BtnTestSignal.Foreground = Brushes.WhiteSmoke;
+            AutomationProperties.SetName(BtnTestSignal, "Enable Test Signal Generator");
             TxtStatus.Text = "Test pattern stopped.";
 
             if (_session.IsConnected)
             {
                 _session.Disconnect();
                 VideoViewport.Clear();
+                VuMeter.ResetMeters();
+                _isLive = false;
+                _lastWidth = 0;
+                _lastHeight = 0;
+                _lastFps = 0;
                 BtnConnect.Content = "Connect";
-                BtnConnect.Background = new SolidColorBrush(Color.FromRgb(16, 185, 129));
-                BtnConnect.Foreground = new SolidColorBrush(Color.FromRgb(0, 0, 0));
+                BtnConnect.Background = ConnectBrush;
+                BtnConnect.Foreground = Brushes.Black;
+                AutomationProperties.SetName(BtnConnect, "Connect Stream");
                 NoSignalOverlay.IsVisible = true;
-                LiveIndicator.Fill = new SolidColorBrush(Color.FromRgb(113, 113, 122));
+                LiveIndicator.Fill = LiveIndicatorInactiveBrush;
                 TxtLiveStatus.Text = "OFFLINE";
                 TxtVideoSpecs.Text = "-- x -- @ -- fps";
             }
@@ -256,8 +284,9 @@ public partial class MainWindow : Window
 
         // 2. Throttle HUD overlay updates (at most once every 500ms or on format change)
         long now = Environment.TickCount64;
-        if (NoSignalOverlay.IsVisible || width != _lastWidth || height != _lastHeight || Math.Abs(fps - _lastFps) > 0.5 || now - _lastHudUpdateTick >= 500)
+        if (!_isLive || width != _lastWidth || height != _lastHeight || Math.Abs(fps - _lastFps) > 0.5 || now - _lastHudUpdateTick >= 500)
         {
+            _isLive = true;
             _lastHudUpdateTick = now;
             _lastWidth = width;
             _lastHeight = height;
@@ -265,13 +294,9 @@ public partial class MainWindow : Window
 
             Dispatcher.UIThread.Post(() =>
             {
-                if (NoSignalOverlay.IsVisible)
-                {
-                    NoSignalOverlay.IsVisible = false;
-                    LiveIndicator.Fill = new SolidColorBrush(Color.FromRgb(34, 197, 94));
-                    TxtLiveStatus.Text = "LIVE";
-                }
-
+                NoSignalOverlay.IsVisible = false;
+                LiveIndicator.Fill = LiveIndicatorActiveBrush;
+                TxtLiveStatus.Text = "LIVE";
                 TxtVideoSpecs.Text = $"{width}x{height} @ {fps:F2} fps";
             }, DispatcherPriority.Normal);
         }
@@ -331,7 +356,8 @@ public partial class MainWindow : Window
         Dispatcher.UIThread.Post(() =>
         {
             BtnRecord.Content = "■ STOP RECORDING";
-            BtnRecord.Background = new SolidColorBrush(Color.FromRgb(185, 28, 28));
+            BtnRecord.Background = RecordStopBrush;
+            AutomationProperties.SetName(BtnRecord, "Stop Recording Stream");
             TxtRecordStats.Text = $"Recording to {Path.GetFileName(filePath)}";
             _recordUiTimer.Start();
         });
@@ -341,9 +367,11 @@ public partial class MainWindow : Window
     {
         Dispatcher.UIThread.Post(() =>
         {
+            RecordingCloseOverlay.IsVisible = false;
             _recordUiTimer.Stop();
             BtnRecord.Content = "● START RECORDING";
-            BtnRecord.Background = new SolidColorBrush(Color.FromRgb(220, 38, 38));
+            BtnRecord.Background = RecordStartBrush;
+            AutomationProperties.SetName(BtnRecord, "Start Recording Stream");
 
             double mb = fileSize / (1024.0 * 1024.0);
             TxtRecordDuration.Text = "00:00:00";
@@ -430,6 +458,69 @@ public partial class MainWindow : Window
             {
                 CmbEncoder.SelectedItem = VideoEncoderChoice.AutoHardware;
             }
+        }
+    }
+
+    #endregion
+
+    #region Window Lifecycle & Shortcuts
+
+    private void MainWindow_Closing(object? sender, WindowClosingEventArgs e)
+    {
+        if (_session.IsRecording && !_isSafeExitConfirmed)
+        {
+            e.Cancel = true;
+            RecordingCloseOverlay.IsVisible = true;
+            BtnKeepRecording.Focus();
+            TxtStatus.Text = "Warning: Active recording in progress. Safe exit confirmation required.";
+            return;
+        }
+
+        _discoveryService.Dispose();
+        _session.Dispose();
+    }
+
+    private void MainWindow_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (RecordingCloseOverlay.IsVisible && e.Key == Key.Escape)
+        {
+            BtnKeepRecording_Click(BtnKeepRecording, new RoutedEventArgs());
+            e.Handled = true;
+            return;
+        }
+
+        if (e.KeyModifiers == KeyModifiers.Control && (e.Key == Key.Enter || e.Key == Key.Return))
+        {
+            BtnConnect_Click(BtnConnect, new RoutedEventArgs());
+            e.Handled = true;
+        }
+    }
+
+    private void BtnKeepRecording_Click(object? sender, RoutedEventArgs e)
+    {
+        RecordingCloseOverlay.IsVisible = false;
+        TxtStatus.Text = "Exit cancelled. Recording continues.";
+    }
+
+    private async void BtnStopAndExit_Click(object? sender, RoutedEventArgs e)
+    {
+        BtnStopAndExit.IsEnabled = false;
+        BtnKeepRecording.IsEnabled = false;
+        BtnStopAndExit.Content = "Finalizing File...";
+        TxtStatus.Text = "Stopping recording and finalizing file before exit...";
+
+        try
+        {
+            await Task.Run(() => _session.StopRecording());
+        }
+        catch (Exception ex)
+        {
+            TxtStatus.Text = $"Error stopping recording: {ex.Message}";
+        }
+        finally
+        {
+            _isSafeExitConfirmed = true;
+            Close();
         }
     }
 

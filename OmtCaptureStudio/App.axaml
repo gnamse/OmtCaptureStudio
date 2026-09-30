@@ -2,6 +2,38 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="OmtCaptureStudio.App"
              RequestedThemeVariant="Dark">
+    <Application.Resources>
+        <!-- Semantic Color Palette -->
+        <Color x:Key="StudioBgColor">#0F0F12</Color>
+        <Color x:Key="StudioSurfaceColor">#18181B</Color>
+        <Color x:Key="StudioSurfaceElevatedColor">#27272A</Color>
+        <Color x:Key="StudioBorderColor">#27272A</Color>
+        <Color x:Key="StudioBorderSubtleColor">#3F3F46</Color>
+
+        <Color x:Key="StudioTextPrimaryColor">#F4F4F5</Color>
+        <Color x:Key="StudioTextSecondaryColor">#A1A1AA</Color>
+        <Color x:Key="StudioTextMutedColor">#71717A</Color>
+
+        <Color x:Key="StudioAccentSuccessColor">#10B981</Color>
+        <Color x:Key="StudioAccentDangerColor">#DC2626</Color>
+        <Color x:Key="StudioAccentPrimaryColor">#6366F1</Color>
+
+        <!-- Semantic SolidColorBrushes -->
+        <SolidColorBrush x:Key="StudioBg" Color="#0F0F12"/>
+        <SolidColorBrush x:Key="StudioSurface" Color="#18181B"/>
+        <SolidColorBrush x:Key="StudioSurfaceElevated" Color="#27272A"/>
+        <SolidColorBrush x:Key="StudioBorder" Color="#27272A"/>
+        <SolidColorBrush x:Key="StudioBorderSubtle" Color="#3F3F46"/>
+
+        <SolidColorBrush x:Key="StudioTextPrimary" Color="#F4F4F5"/>
+        <SolidColorBrush x:Key="StudioTextSecondary" Color="#A1A1AA"/>
+        <SolidColorBrush x:Key="StudioTextMuted" Color="#71717A"/>
+
+        <SolidColorBrush x:Key="StudioAccentSuccess" Color="#10B981"/>
+        <SolidColorBrush x:Key="StudioAccentDanger" Color="#DC2626"/>
+        <SolidColorBrush x:Key="StudioAccentPrimary" Color="#6366F1"/>
+    </Application.Resources>
+
     <Application.Styles>
         <FluentTheme />
     </Application.Styles>

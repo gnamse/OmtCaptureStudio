@@ -1,7 +1,7 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="OmtCaptureStudio.Controls.VuMeterControl"
-             Background="#18181B">
+             Background="{DynamicResource StudioSurface}">
     <Grid Margin="6,4">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/> <!-- Header -->
@@ -12,8 +12,8 @@
         </Grid.RowDefinitions>
 
         <!-- 1. Header -->
-        <Border Grid.Row="0" Margin="0,0,0,6" Background="#27272A" CornerRadius="4" Padding="4,3">
-            <TextBlock Text="AUDIO LEVELS" Foreground="#A1A1AA" FontSize="10" FontWeight="Bold" HorizontalAlignment="Center"/>
+        <Border Grid.Row="0" Margin="0,0,0,6" Background="{DynamicResource StudioSurfaceElevated}" CornerRadius="4" Padding="4,3">
+            <TextBlock Text="AUDIO LEVELS" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" HorizontalAlignment="Center"/>
         </Border>
 
         <!-- 2. Clip Indicators -->
@@ -23,11 +23,11 @@
                 <ColumnDefinition Width="4"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            <Border x:Name="ClipLeft" Grid.Column="0" Background="#3F3F46" CornerRadius="2" Height="14">
-                <TextBlock Text="CLIP" Foreground="#D4D4D8" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Border x:Name="ClipLeft" Grid.Column="0" Background="{DynamicResource StudioBorderSubtle}" CornerRadius="2" Height="14">
+                <TextBlock Text="CLIP" Foreground="{DynamicResource StudioTextPrimary}" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
-            <Border x:Name="ClipRight" Grid.Column="2" Background="#3F3F46" CornerRadius="2" Height="14">
-                <TextBlock Text="CLIP" Foreground="#D4D4D8" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Border x:Name="ClipRight" Grid.Column="2" Background="{DynamicResource StudioBorderSubtle}" CornerRadius="2" Height="14">
+                <TextBlock Text="CLIP" Foreground="{DynamicResource StudioTextPrimary}" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
         </Grid>
 
@@ -44,8 +44,8 @@
             <Canvas Grid.Column="0" x:Name="ScaleCanvas" ClipToBounds="True"/>
 
             <!-- Left Channel Track -->
-            <Border Grid.Column="1" Background="#09090B" CornerRadius="3" BorderBrush="#27272A" BorderThickness="1" ClipToBounds="True">
-                <Grid x:Name="TrackLeft" Background="#09090B">
+            <Border Grid.Column="1" Background="{DynamicResource StudioBg}" CornerRadius="3" BorderBrush="{DynamicResource StudioBorder}" BorderThickness="1" ClipToBounds="True">
+                <Grid x:Name="TrackLeft" Background="{DynamicResource StudioBg}">
                     <!-- Clipper reveals full-height gradient from bottom -->
                     <Border x:Name="BarClipperLeft" VerticalAlignment="Bottom" Height="0" ClipToBounds="True">
                         <Rectangle x:Name="GradientBarLeft" VerticalAlignment="Bottom" Height="300">
@@ -67,8 +67,8 @@
             </Border>
 
             <!-- Right Channel Track -->
-            <Border Grid.Column="3" Background="#09090B" CornerRadius="3" BorderBrush="#27272A" BorderThickness="1" ClipToBounds="True">
-                <Grid x:Name="TrackRight" Background="#09090B">
+            <Border Grid.Column="3" Background="{DynamicResource StudioBg}" CornerRadius="3" BorderBrush="{DynamicResource StudioBorder}" BorderThickness="1" ClipToBounds="True">
+                <Grid x:Name="TrackRight" Background="{DynamicResource StudioBg}">
                     <Border x:Name="BarClipperRight" VerticalAlignment="Bottom" Height="0" ClipToBounds="True">
                         <Rectangle x:Name="GradientBarRight" VerticalAlignment="Bottom" Height="300">
                             <Rectangle.Fill>
@@ -96,16 +96,18 @@
                 <ColumnDefinition Width="4"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="L" Foreground="#A1A1AA" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center"/>
-            <TextBlock Grid.Column="2" Text="R" Foreground="#A1A1AA" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center"/>
+            <TextBlock Grid.Column="0" Text="L" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center"/>
+            <TextBlock Grid.Column="2" Text="R" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center"/>
         </Grid>
 
         <!-- 5. Numerical Readout & Monitor Button -->
         <StackPanel Grid.Row="4" Margin="0,6,0,0">
-            <TextBlock x:Name="TxtDbReadout" Text="-inf dB" Foreground="#F4F4F5" FontSize="11" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Center"/>
+            <TextBlock x:Name="TxtDbReadout" Text="-inf dB" Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Center"/>
             <ToggleButton x:Name="BtnMonitor" Content="Monitor" Height="24" Margin="0,6,0,0"
-                          Background="#27272A" Foreground="#E4E4E7" FontSize="10" FontWeight="SemiBold"
-                          BorderBrush="#3F3F46" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"/>
+                          Background="{DynamicResource StudioSurfaceElevated}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="10" FontWeight="SemiBold"
+                          BorderBrush="{DynamicResource StudioBorderSubtle}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                          AutomationProperties.Name="Audio Monitor Toggle"
+                          ToolTip.Tip="Toggle real-time local audio monitoring playback through speakers or headphones"/>
         </StackPanel>
     </Grid>
 </UserControl>
