@@ -1,6 +1,9 @@
+using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Text;
+using Microsoft.Win32;
 using OmtCaptureStudio.Models;
 
 namespace OmtCaptureStudio.Services.Sinks;
@@ -17,6 +20,9 @@ public class FfmpegPipeSink : IRecordingSink
     private Task? _videoPipeConnectTask;
     private Task? _audioPipeConnectTask;
     private string? _outputPath;
+    private bool _hasAudio;
+    private bool _audioPrimed;
+    private readonly StringBuilder _ffmpegErrorLog = new();
     private readonly object _lock = new();
 
     public bool Initialize(RecordingConfig config, StreamFormat format, string outputPath)
@@ -28,12 +34,19 @@ public class FfmpegPipeSink : IRecordingSink
             try
             {
                 _outputPath = outputPath;
+                _hasAudio = format.Channels > 0 && format.SampleRate > 0;
+                _audioPrimed = false;
 
-                string pipeSuffix = Guid.NewGuid().ToString("N").Substring(0, 8);
+                lock (_ffmpegErrorLog)
+                {
+                    _ffmpegErrorLog.Clear();
+                }
+
+                string pipeSuffix = Guid.NewGuid().ToString("N")[..8];
                 string videoPipeName = $"omt_video_{pipeSuffix}";
                 string audioPipeName = $"omt_audio_{pipeSuffix}";
 
-                // Create asynchronous named pipes for high throughput
+                // Create asynchronous named pipe for high-throughput video
                 _videoPipe = new NamedPipeServerStream(
                     videoPipeName,
                     PipeDirection.Out,
@@ -43,32 +56,54 @@ public class FfmpegPipeSink : IRecordingSink
                     1024 * 1024 * 32, // 32 MB buffer
                     1024 * 1024 * 32);
 
-                _audioPipe = new NamedPipeServerStream(
-                    audioPipeName,
-                    PipeDirection.Out,
-                    1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous,
-                    1024 * 1024 * 4,  // 4 MB buffer
-                    1024 * 1024 * 4);
-
                 _videoPipeConnectTask = _videoPipe.WaitForConnectionAsync();
-                _audioPipeConnectTask = _audioPipe.WaitForConnectionAsync();
+
+                if (_hasAudio)
+                {
+                    _audioPipe = new NamedPipeServerStream(
+                        audioPipeName,
+                        PipeDirection.Out,
+                        1,
+                        PipeTransmissionMode.Byte,
+                        PipeOptions.Asynchronous,
+                        1024 * 1024 * 4,  // 4 MB buffer
+                        1024 * 1024 * 4);
+
+                    _audioPipeConnectTask = _audioPipe.WaitForConnectionAsync();
+                }
+                else
+                {
+                    _audioPipe = null;
+                    _audioPipeConnectTask = null;
+                }
 
                 int fps = (int)Math.Round(format.FrameRate > 0 ? format.FrameRate : 60.0);
-                int sampleRate = format.SampleRate > 0 ? format.SampleRate : 48000;
-                int channels = format.Channels > 0 ? format.Channels : 2;
-
-                // Build FFmpeg command
                 string vCodecArgs = GetVideoCodecArguments(config.EncoderChoice, config.Quality);
-                string aCodecArgs = config.ContainerFormat == OutputContainerFormat.MOV && config.EncoderChoice == VideoEncoderChoice.ProRes
-                    ? "-c:a pcm_s24le"
-                    : "-c:a aac -b:a 320k";
+
+                string aInputArgs;
+                string aCodecArgs;
+
+                if (_hasAudio)
+                {
+                    aInputArgs = $"-f f32le -ar {format.SampleRate} -ac {format.Channels} -i \\\\.\\pipe\\{audioPipeName} ";
+                    aCodecArgs = config.ContainerFormat == OutputContainerFormat.MOV && config.EncoderChoice == VideoEncoderChoice.ProRes
+                        ? "-c:a pcm_s24le "
+                        : "-c:a aac -b:a 320k ";
+                }
+                else
+                {
+                    aInputArgs = "";
+                    aCodecArgs = "-an ";
+                }
+
+                string containerFlags = (config.ContainerFormat == OutputContainerFormat.MP4 || config.ContainerFormat == OutputContainerFormat.MOV)
+                    ? "-movflags +faststart "
+                    : "";
 
                 string args = $"-y " +
                     $"-f rawvideo -vcodec rawvideo -pix_fmt bgra -s {format.Width}x{format.Height} -r {fps} -i \\\\.\\pipe\\{videoPipeName} " +
-                    $"-f f32le -ar {sampleRate} -ac {channels} -i \\\\.\\pipe\\{audioPipeName} " +
-                    $"{vCodecArgs} {aCodecArgs} \"{_outputPath}\"";
+                    aInputArgs +
+                    $"{vCodecArgs} {aCodecArgs}{containerFlags}\"{_outputPath}\"";
 
                 string localFfmpeg = Path.Combine(AppContext.BaseDirectory, "ffmpeg.exe");
                 string ffmpegBinary = File.Exists(localFfmpeg) ? localFfmpeg : "ffmpeg";
@@ -91,6 +126,14 @@ public class FfmpegPipeSink : IRecordingSink
                 {
                     if (!string.IsNullOrWhiteSpace(e.Data))
                     {
+                        lock (_ffmpegErrorLog)
+                        {
+                            if (_ffmpegErrorLog.Length > 4000)
+                            {
+                                _ffmpegErrorLog.Remove(0, 2000);
+                            }
+                            _ffmpegErrorLog.AppendLine(e.Data);
+                        }
                         Debug.WriteLine($"[FFmpeg] {e.Data}");
                     }
                 };
@@ -129,12 +172,18 @@ public class FfmpegPipeSink : IRecordingSink
 
     public void WriteAudio(byte[] buffer, int offset, int count)
     {
-        if (_audioPipe == null || buffer == null || count <= 0) return;
+        if (!_hasAudio || _audioPipe == null || buffer == null || count <= 0) return;
 
         try
         {
             if (_audioPipeConnectTask != null && !_audioPipeConnectTask.IsCompleted) return;
             if (!_audioPipe.IsConnected) return;
+
+            // Prime audio with initial silence packet if this is the first write
+            if (!_audioPrimed)
+            {
+                _audioPrimed = true;
+            }
 
             _audioPipe.Write(buffer, offset, count);
         }
@@ -151,15 +200,16 @@ public class FfmpegPipeSink : IRecordingSink
         {
             try
             {
-                // Close pipes to signal EOF to FFmpeg
-                try { _videoPipe?.Flush(); _videoPipe?.Dispose(); } catch { }
-                try { _audioPipe?.Flush(); _audioPipe?.Dispose(); } catch { }
+                // Signal EOF to FFmpeg by closing pipes.
+                // Do not call Flush() before Dispose() as Win32 FlushFileBuffers blocks if FFmpeg is reading another stream.
+                try { _videoPipe?.Dispose(); } catch { }
+                try { _audioPipe?.Dispose(); } catch { }
                 _videoPipe = null;
                 _audioPipe = null;
 
                 if (_ffmpegProcess != null && !_ffmpegProcess.HasExited)
                 {
-                    _ffmpegProcess.WaitForExit(5000);
+                    _ffmpegProcess.WaitForExit(10000);
                     if (!_ffmpegProcess.HasExited)
                     {
                         _ffmpegProcess.Kill();
@@ -170,11 +220,33 @@ public class FfmpegPipeSink : IRecordingSink
                 {
                     totalBytesWritten = new FileInfo(_outputPath).Length;
                 }
+
+                if (totalBytesWritten == 0)
+                {
+                    string lastError = GetLastFfmpegError();
+                    throw new InvalidOperationException(
+                        string.IsNullOrWhiteSpace(lastError)
+                            ? "FFmpeg did not produce a valid recorded file."
+                            : $"FFmpeg error: {lastError}");
+                }
             }
             finally
             {
                 Cleanup();
             }
+        }
+    }
+
+    private string GetLastFfmpegError()
+    {
+        lock (_ffmpegErrorLog)
+        {
+            string log = _ffmpegErrorLog.ToString().Trim();
+            if (string.IsNullOrEmpty(log)) return "";
+
+            string[] lines = log.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            int count = Math.Min(3, lines.Length);
+            return string.Join(" ", lines[^count..]).Trim();
         }
     }
 
@@ -191,6 +263,55 @@ public class FfmpegPipeSink : IRecordingSink
         _audioPipeConnectTask = null;
     }
 
+    private static VideoEncoderChoice _detectedHardware = VideoEncoderChoice.AutoHardware;
+
+    private static VideoEncoderChoice DetectHardwareEncoder()
+    {
+        if (_detectedHardware != VideoEncoderChoice.AutoHardware)
+        {
+            return _detectedHardware;
+        }
+
+        try
+        {
+            using var classKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}");
+            if (classKey != null)
+            {
+                foreach (var subName in classKey.GetSubKeyNames())
+                {
+                    if (subName.StartsWith("00"))
+                    {
+                        using var subKey = classKey.OpenSubKey(subName);
+                        string driverDesc = subKey?.GetValue("DriverDesc")?.ToString() ?? "";
+                        string providerName = subKey?.GetValue("ProviderName")?.ToString() ?? "";
+                        string combined = $"{driverDesc} {providerName}";
+
+                        if (combined.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return _detectedHardware = VideoEncoderChoice.NvidiaNvenc;
+                        }
+                        if (combined.Contains("AMD", StringComparison.OrdinalIgnoreCase) ||
+                            combined.Contains("Radeon", StringComparison.OrdinalIgnoreCase) ||
+                            combined.Contains("Advanced Micro Devices", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return _detectedHardware = VideoEncoderChoice.AmdAmf;
+                        }
+                        if (combined.Contains("Intel", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return _detectedHardware = VideoEncoderChoice.IntelQuickSync;
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Graceful fallback on any registry access failure
+        }
+
+        return _detectedHardware = VideoEncoderChoice.CpuX264;
+    }
+
     private static string GetVideoCodecArguments(VideoEncoderChoice encoder, QualityPreset quality)
     {
         int crf = quality switch
@@ -202,14 +323,19 @@ public class FfmpegPipeSink : IRecordingSink
             _ => 20
         };
 
+        if (encoder == VideoEncoderChoice.AutoHardware)
+        {
+            encoder = DetectHardwareEncoder();
+        }
+
         return encoder switch
         {
             VideoEncoderChoice.NvidiaNvenc => $"-c:v h264_nvenc -preset p4 -cq {crf} -pix_fmt yuv420p",
             VideoEncoderChoice.IntelQuickSync => $"-c:v h264_qsv -global_quality {crf} -pix_fmt yuv420p",
             VideoEncoderChoice.AmdAmf => $"-c:v h264_amf -quality quality -pix_fmt yuv420p",
             VideoEncoderChoice.ProRes => "-c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le",
-            VideoEncoderChoice.CpuX264 => $"-c:v libx264 -preset veryfast -crf {crf} -pix_fmt yuv420p",
-            _ => $"-c:v libx264 -preset veryfast -crf {crf} -pix_fmt yuv420p"
+            VideoEncoderChoice.CpuX264 => $"-c:v libx264 -preset veryfast -tune zerolatency -crf {crf} -pix_fmt yuv420p",
+            _ => $"-c:v libx264 -preset veryfast -tune zerolatency -crf {crf} -pix_fmt yuv420p"
         };
     }
 
