@@ -19,6 +19,10 @@ public partial class MainWindow : Window
     private readonly CaptureSession _session;
     private readonly OmtDiscoveryService _discoveryService;
     private readonly DispatcherTimer _recordUiTimer;
+    private long _lastHudUpdateTick;
+    private int _lastWidth;
+    private int _lastHeight;
+    private double _lastFps;
 
     public MainWindow()
     {
@@ -250,18 +254,27 @@ public partial class MainWindow : Window
         // 1. Submit raw video buffer to the hardware/Skia viewport control
         VideoViewport.UpdateFrame(pData, dataLength, width, height, stride);
 
-        // 2. Update HUD overlay on UI thread
-        Dispatcher.UIThread.Post(() =>
+        // 2. Throttle HUD overlay updates (at most once every 500ms or on format change)
+        long now = Environment.TickCount64;
+        if (NoSignalOverlay.IsVisible || width != _lastWidth || height != _lastHeight || Math.Abs(fps - _lastFps) > 0.5 || now - _lastHudUpdateTick >= 500)
         {
-            if (NoSignalOverlay.IsVisible)
-            {
-                NoSignalOverlay.IsVisible = false;
-                LiveIndicator.Fill = new SolidColorBrush(Color.FromRgb(34, 197, 94));
-                TxtLiveStatus.Text = "LIVE";
-            }
+            _lastHudUpdateTick = now;
+            _lastWidth = width;
+            _lastHeight = height;
+            _lastFps = fps;
 
-            TxtVideoSpecs.Text = $"{width}x{height} @ {fps:F2} fps";
-        }, DispatcherPriority.Render);
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (NoSignalOverlay.IsVisible)
+                {
+                    NoSignalOverlay.IsVisible = false;
+                    LiveIndicator.Fill = new SolidColorBrush(Color.FromRgb(34, 197, 94));
+                    TxtLiveStatus.Text = "LIVE";
+                }
+
+                TxtVideoSpecs.Text = $"{width}x{height} @ {fps:F2} fps";
+            }, DispatcherPriority.Normal);
+        }
     }
 
     private void OnAudioLevelsUpdated(AudioLevelData levels)

@@ -16,6 +16,7 @@ public partial class VuMeterControl : UserControl
     private float _peakHoldRight = -60f;
     private DateTime _lastClipLeft = DateTime.MinValue;
     private DateTime _lastClipRight = DateTime.MinValue;
+    private long _lastMeterTick;
 
     public event Action<bool>? MonitoringToggled;
 
@@ -92,6 +93,10 @@ public partial class VuMeterControl : UserControl
 
     public void UpdateLevels(AudioLevelData? levelData)
     {
+        long now = Environment.TickCount64;
+        if (now - _lastMeterTick < 25) return; // Cap meter UI refresh rate to ~40 fps
+        _lastMeterTick = now;
+
         Dispatcher.UIThread.Post(() =>
         {
             if (levelData == null || levelData.Channels.Length == 0)

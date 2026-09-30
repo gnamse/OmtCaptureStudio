@@ -70,7 +70,7 @@ public class VideoViewportControl : Control
         // Frame-drop guard: if a render dispatch is already scheduled on UI thread, skip scheduling another.
         if (Interlocked.CompareExchange(ref _renderPending, 1, 0) == 0)
         {
-            Dispatcher.UIThread.Post(ProcessPendingFrame, DispatcherPriority.Render);
+            Dispatcher.UIThread.Post(ProcessPendingFrame, DispatcherPriority.Normal);
         }
     }
 
@@ -122,11 +122,18 @@ public class VideoViewportControl : Control
                     fixed (byte* srcBase = activeBuffer)
                     {
                         byte* srcPtr = srcBase;
-                        for (int y = 0; y < h; y++)
+                        if (srcStride == dstStride && srcStride == w * 4)
                         {
-                            Buffer.MemoryCopy(srcPtr, dstPtr, dstStride, rowBytesToCopy);
-                            srcPtr += srcStride;
-                            dstPtr += dstStride;
+                            Buffer.MemoryCopy(srcPtr, dstPtr, (long)dstStride * h, (long)dstStride * h);
+                        }
+                        else
+                        {
+                            for (int y = 0; y < h; y++)
+                            {
+                                Buffer.MemoryCopy(srcPtr, dstPtr, dstStride, rowBytesToCopy);
+                                srcPtr += srcStride;
+                                dstPtr += dstStride;
+                            }
                         }
                     }
                 }
@@ -142,6 +149,15 @@ public class VideoViewportControl : Control
         finally
         {
             Interlocked.Exchange(ref _renderPending, 0);
+
+            // If a frame arrived while we were processing, schedule UI update immediately
+            lock (_stagingLock)
+            {
+                if (_hasNewFrame && Interlocked.CompareExchange(ref _renderPending, 1, 0) == 0)
+                {
+                    Dispatcher.UIThread.Post(ProcessPendingFrame, DispatcherPriority.Normal);
+                }
+            }
         }
     }
 

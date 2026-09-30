@@ -46,15 +46,15 @@ public class FfmpegPipeSink : IRecordingSink
                 string videoPipeName = $"omt_video_{pipeSuffix}";
                 string audioPipeName = $"omt_audio_{pipeSuffix}";
 
-                // Create asynchronous named pipe for high-throughput video
+                // Create asynchronous named pipe for high-throughput video (64 MB buffer)
                 _videoPipe = new NamedPipeServerStream(
                     videoPipeName,
                     PipeDirection.Out,
                     1,
                     PipeTransmissionMode.Byte,
                     PipeOptions.Asynchronous,
-                    1024 * 1024 * 32, // 32 MB buffer
-                    1024 * 1024 * 32);
+                    1024 * 1024 * 64, // 64 MB buffer
+                    1024 * 1024 * 64);
 
                 _videoPipeConnectTask = _videoPipe.WaitForConnectionAsync();
 
@@ -66,8 +66,8 @@ public class FfmpegPipeSink : IRecordingSink
                         1,
                         PipeTransmissionMode.Byte,
                         PipeOptions.Asynchronous,
-                        1024 * 1024 * 4,  // 4 MB buffer
-                        1024 * 1024 * 4);
+                        1024 * 1024 * 8,  // 8 MB buffer
+                        1024 * 1024 * 8);
 
                     _audioPipeConnectTask = _audioPipe.WaitForConnectionAsync();
                 }
@@ -85,7 +85,7 @@ public class FfmpegPipeSink : IRecordingSink
 
                 if (_hasAudio)
                 {
-                    aInputArgs = $"-f f32le -ar {format.SampleRate} -ac {format.Channels} -i \\\\.\\pipe\\{audioPipeName} ";
+                    aInputArgs = $"-thread_queue_size 4096 -f f32le -ar {format.SampleRate} -ac {format.Channels} -i \\\\.\\pipe\\{audioPipeName} ";
                     aCodecArgs = config.ContainerFormat == OutputContainerFormat.MOV && config.EncoderChoice == VideoEncoderChoice.ProRes
                         ? "-c:a pcm_s24le "
                         : "-c:a aac -b:a 320k ";
@@ -101,8 +101,10 @@ public class FfmpegPipeSink : IRecordingSink
                     : "";
 
                 string args = $"-y " +
+                    $"-thread_queue_size 4096 " +
                     $"-f rawvideo -vcodec rawvideo -pix_fmt bgra -s {format.Width}x{format.Height} -r {fps} -i \\\\.\\pipe\\{videoPipeName} " +
                     aInputArgs +
+                    $"-max_interleave_delta 0 " +
                     $"{vCodecArgs} {aCodecArgs}{containerFlags}\"{_outputPath}\"";
 
                 string localFfmpeg = Path.Combine(AppContext.BaseDirectory, "ffmpeg.exe");
@@ -117,7 +119,7 @@ public class FfmpegPipeSink : IRecordingSink
                         UseShellExecute = false,
                         CreateNoWindow = true,
                         RedirectStandardError = true,
-                        RedirectStandardOutput = true
+                        RedirectStandardOutput = false
                     },
                     EnableRaisingEvents = true
                 };
@@ -334,8 +336,8 @@ public class FfmpegPipeSink : IRecordingSink
             VideoEncoderChoice.IntelQuickSync => $"-c:v h264_qsv -global_quality {crf} -pix_fmt yuv420p",
             VideoEncoderChoice.AmdAmf => $"-c:v h264_amf -quality quality -pix_fmt yuv420p",
             VideoEncoderChoice.ProRes => "-c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le",
-            VideoEncoderChoice.CpuX264 => $"-c:v libx264 -preset veryfast -tune zerolatency -crf {crf} -pix_fmt yuv420p",
-            _ => $"-c:v libx264 -preset veryfast -tune zerolatency -crf {crf} -pix_fmt yuv420p"
+            VideoEncoderChoice.CpuX264 => $"-c:v libx264 -preset ultrafast -tune zerolatency -crf {crf} -pix_fmt yuv420p",
+            _ => $"-c:v libx264 -preset ultrafast -tune zerolatency -crf {crf} -pix_fmt yuv420p"
         };
     }
 

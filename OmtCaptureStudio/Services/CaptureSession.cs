@@ -138,14 +138,14 @@ public class CaptureSession : IDisposable
             }
         }
 
-        // Forward directly to recorder if active
+        // 1. Notify preview consumers (GUI renderer) immediately with highest priority
+        VideoFrameAvailable?.Invoke(pData, length, width, height, stride, fps, timestamp);
+
+        // 2. Forward to recorder if active
         if (_recorder.IsRecording)
         {
             _recorder.WriteVideoFrame(pData, length);
         }
-
-        // Notify preview consumers (e.g. GUI renderer)
-        VideoFrameAvailable?.Invoke(pData, length, width, height, stride, fps, timestamp);
     }
 
     private void OnSourceAudioFrameReceived(IntPtr pPlanarData, int channels, int samples, int rate, long timestamp)

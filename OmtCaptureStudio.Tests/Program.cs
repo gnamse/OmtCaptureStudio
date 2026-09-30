@@ -228,8 +228,14 @@ class Program
             return;
         }
 
-        Console.WriteLine($" -> Recording active. Writing frames to {session.CurrentRecordingPath} for 3 seconds...");
-        Thread.Sleep(3000);
+        Console.WriteLine($" -> Recording active. Writing frames to {session.CurrentRecordingPath} for 6 seconds (verifying past 5s threshold)...");
+        for (int sec = 1; sec <= 6; sec++)
+        {
+            long startFrames = Interlocked.Read(ref videoFrameCount);
+            Thread.Sleep(1000);
+            long endFrames = Interlocked.Read(ref videoFrameCount);
+            Console.WriteLine($"   [Sec {sec:D2}] Frames received in this second: {endFrames - startFrames}, Total: {endFrames}, Recorder Frames: {session.RecordingFramesWritten}");
+        }
 
         Console.WriteLine("\n[Step 5] Stopping Recording & Finalizing MP4 Container via CaptureSession.StopRecording()...");
         string? recordedFile = session.CurrentRecordingPath;
