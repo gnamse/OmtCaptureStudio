@@ -2,7 +2,7 @@
 
 A standalone broadcast-grade desktop GUI client for **Open Media Transport (OMT)** to discover, preview, capture, and record video and multi-channel audio directly to disk (`.mp4`, `.mkv`, `.mov`) without requiring OBS Studio or commercial switchers.
 
-![OMT Capture Studio User Interface](docs/images/omt_capture_studio_ui.png)
+![OMT Capture Studio User Interface](docs/images/omt_capture_studio_ui.jpg)
 
 ---
 
