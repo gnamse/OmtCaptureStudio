@@ -32,6 +32,22 @@
         <SolidColorBrush x:Key="StudioAccentSuccess" Color="#10B981"/>
         <SolidColorBrush x:Key="StudioAccentDanger" Color="#DC2626"/>
         <SolidColorBrush x:Key="StudioAccentPrimary" Color="#6366F1"/>
+
+        <!-- Spacing Scale (4px base) -->
+        <Thickness x:Key="SpaceXs">4</Thickness>
+        <Thickness x:Key="SpaceSm">8</Thickness>
+        <Thickness x:Key="SpaceMd">12</Thickness>
+        <Thickness x:Key="SpaceLg">16</Thickness>
+        <Thickness x:Key="SpaceXl">24</Thickness>
+        <Thickness x:Key="Space2xl">32</Thickness>
+
+        <!-- Bar Padding -->
+        <Thickness x:Key="BarPadding">16,8</Thickness>
+        <Thickness x:Key="StatusBarPadding">16,0</Thickness>
+
+        <!-- Standard Radius -->
+        <CornerRadius x:Key="RadiusSm">4</CornerRadius>
+        <CornerRadius x:Key="RadiusMd">8</CornerRadius>
     </Application.Resources>
 
     <Application.Styles>

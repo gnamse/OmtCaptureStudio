@@ -2,7 +2,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="OmtCaptureStudio.Controls.VuMeterControl"
              Background="{DynamicResource StudioSurface}">
-    <Grid Margin="6,4">
+    <Grid Margin="8">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/> <!-- Header -->
             <RowDefinition Height="Auto"/> <!-- Clip Indicators -->
@@ -12,12 +12,12 @@
         </Grid.RowDefinitions>
 
         <!-- 1. Header -->
-        <Border Grid.Row="0" Margin="0,0,0,6" Background="{DynamicResource StudioSurfaceElevated}" CornerRadius="4" Padding="4,3">
+        <Border Grid.Row="0" Margin="0,0,0,8" Background="{DynamicResource StudioSurfaceElevated}" CornerRadius="4" Padding="4,3">
             <TextBlock Text="AUDIO LEVELS" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" HorizontalAlignment="Center"/>
         </Border>
 
         <!-- 2. Clip Indicators -->
-        <Grid Grid.Row="1" Margin="32,0,0,4">
+        <Grid Grid.Row="1" Margin="32,0,0,6">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="4"/>
@@ -90,7 +90,7 @@
         </Grid>
 
         <!-- 4. Channel Labels -->
-        <Grid Grid.Row="3" Margin="32,4,0,0">
+        <Grid Grid.Row="3" Margin="32,6,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="4"/>
@@ -101,9 +101,9 @@
         </Grid>
 
         <!-- 5. Numerical Readout & Monitor Button -->
-        <StackPanel Grid.Row="4" Margin="0,6,0,0">
+        <StackPanel Grid.Row="4" Margin="0,8,0,0">
             <TextBlock x:Name="TxtDbReadout" Text="-inf dB" Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Center"/>
-            <ToggleButton x:Name="BtnMonitor" Content="Monitor" Height="24" Margin="0,6,0,0"
+            <ToggleButton x:Name="BtnMonitor" Content="Monitor" Height="28" Margin="0,8,0,0"
                           Background="{DynamicResource StudioSurfaceElevated}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="10" FontWeight="SemiBold"
                           BorderBrush="{DynamicResource StudioBorderSubtle}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
                           AutomationProperties.Name="Audio Monitor Toggle"
