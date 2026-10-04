@@ -116,8 +116,9 @@ public class CaptureSession : IDisposable
             _currentSource.AudioFrameReceived += OnSourceAudioFrameReceived;
             _currentSource.TelemetryUpdated += t => TelemetryUpdated?.Invoke(t);
             _currentSource.StatusChanged += s => StatusChanged?.Invoke(s);
-            _currentSource.ErrorOccurred += err => ErrorOccurred?.Invoke(err);
+            _currentSource.ErrorOccurred += err => { AppLogger.LogError($"Media source error: {err}"); ErrorOccurred?.Invoke(err); };
 
+            AppLogger.LogInfo($"Connecting to media source: {_currentSource.Name ?? _currentSource.Address}");
             _currentSource.Connect();
         }
     }
@@ -183,10 +184,11 @@ public class CaptureSession : IDisposable
             {
                 try
                 {
+                    AppLogger.LogInfo("Disconnecting current media source.");
                     _currentSource.Disconnect();
                     _currentSource.Dispose();
                 }
-                catch { }
+                catch (Exception ex) { AppLogger.LogError("Error disconnecting media source", ex); }
                 _currentSource = null;
             }
 

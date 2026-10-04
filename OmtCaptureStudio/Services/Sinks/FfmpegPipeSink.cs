@@ -50,7 +50,7 @@ public class FfmpegPipeSink : IRecordingSink
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[FFmpeg Sink Init Error] {ex.Message}");
+                AppLogger.LogError($"[FFmpeg Sink Init Error] {ex.Message}", ex);
                 Cleanup();
                 return false;
             }
@@ -72,7 +72,7 @@ public class FfmpegPipeSink : IRecordingSink
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Video MemoryCopy Error] {ex.Message}");
+            AppLogger.LogError($"[Video MemoryCopy Error] {ex.Message}", ex);
             return;
         }
 
@@ -91,7 +91,7 @@ public class FfmpegPipeSink : IRecordingSink
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Audio Buffer Copy Error] {ex.Message}");
+            AppLogger.LogError($"[Audio Buffer Copy Error] {ex.Message}", ex);
             return;
         }
 

@@ -237,6 +237,8 @@
                     <TextBlock x:Name="TxtBitrate" Text="Bitrate: 0.0 Mbps" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0"/>
                     <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" VerticalAlignment="Center"/>
                     <TextBlock x:Name="TxtDroppedFrames" Text="Dropped: 0" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0,0,0"/>
+                    <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                    <TextBlock x:Name="TxtVersion" Text="v0.0.0" Foreground="{DynamicResource StudioTextMuted}" FontSize="11" Margin="12,0,0,0"/>
                 </StackPanel>
             </Grid>
         </Border>

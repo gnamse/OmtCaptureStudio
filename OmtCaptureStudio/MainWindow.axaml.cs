@@ -42,6 +42,9 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
+        AppLogger.LogInfo("OMT Capture Studio application starting.");
+        TxtVersion.Text = $"v{System.Reflection.Assembly.GetExecutingAssembly().GetName().Version}";
+
         _session = new CaptureSession();
         _discoveryService = new OmtDiscoveryService();
 
@@ -174,6 +177,7 @@ public partial class MainWindow : Window
             }
 
             _session.Disconnect();
+            AppLogger.LogInfo("Disconnected from stream.");
             VideoViewport.Clear();
             VuMeter.ResetMeters();
             _isLive = false;
@@ -203,6 +207,7 @@ public partial class MainWindow : Window
             }
 
             TxtSourceName.Text = info.DisplayName;
+            AppLogger.LogInfo($"Connecting to stream at {info.Address}");
             _session.Connect(info.Address);
             BtnConnect.Content = "Disconnect";
             BtnConnect.Background = DisconnectBrush;
@@ -232,6 +237,7 @@ public partial class MainWindow : Window
             AutomationProperties.SetName(BtnTestSignal, "Disable Test Signal Generator");
             TxtSourceName.Text = "Local Test Pattern (SMPTE)";
             TxtStatus.Text = "Connected to internal synthetic test generator.";
+            AppLogger.LogInfo("Started local test signal generator.");
 
             _session.Connect(new SyntheticPatternSource());
 
@@ -255,6 +261,7 @@ public partial class MainWindow : Window
                     await _session.StopRecordingAsync();
                 }
                 _session.Disconnect();
+                AppLogger.LogInfo("Disconnected test signal generator.");
                 VideoViewport.Clear();
                 VuMeter.ResetMeters();
                 _isLive = false;
@@ -283,6 +290,7 @@ public partial class MainWindow : Window
 
     private void OnSessionError(string error)
     {
+        AppLogger.LogError($"Session error: {error}");
         Dispatcher.UIThread.Post(() =>
         {
             TxtStatus.Text = $"Error: {error}";
@@ -350,6 +358,7 @@ public partial class MainWindow : Window
             }
             catch (Exception ex)
             {
+                AppLogger.LogError($"Error stopping recording: {ex.Message}", ex);
                 TxtStatus.Text = $"Error stopping recording: {ex.Message}";
             }
             finally
@@ -383,6 +392,7 @@ public partial class MainWindow : Window
 
     private void OnRecordingStarted(string filePath)
     {
+        AppLogger.LogInfo($"Recording started: {filePath}");
         Dispatcher.UIThread.Post(() =>
         {
             BtnRecord.IsEnabled = true;
@@ -396,6 +406,7 @@ public partial class MainWindow : Window
 
     private void OnRecordingStopped(string filePath, TimeSpan duration, long fileSize)
     {
+        AppLogger.LogInfo($"Recording stopped: {filePath} (Duration: {duration}, Size: {fileSize} bytes)");
         Dispatcher.UIThread.Post(() =>
         {
             RecordingCloseOverlay.IsVisible = false;
@@ -415,6 +426,7 @@ public partial class MainWindow : Window
 
     private void OnRecordingError(string error)
     {
+        AppLogger.LogError($"Recording error: {error}");
         Dispatcher.UIThread.Post(() =>
         {
             RecordingCloseOverlay.IsVisible = false;

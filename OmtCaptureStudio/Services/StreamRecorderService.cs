@@ -93,6 +93,7 @@ public class StreamRecorderService : IDisposable
                 bool initialized = _sink.Initialize(config, format, _currentRecordingPath);
                 if (!initialized)
                 {
+                    AppLogger.LogError("Failed to initialize recording sink.");
                     RecordingError?.Invoke("Failed to initialize recording sink.");
                     return false;
                 }
@@ -102,11 +103,13 @@ public class StreamRecorderService : IDisposable
                 _audioBytesWritten = 0;
                 _isRecording = true;
 
+                AppLogger.LogInfo($"Recording started internally: {_currentRecordingPath}");
                 RecordingStarted?.Invoke(_currentRecordingPath);
                 return true;
             }
             catch (Exception ex)
             {
+                AppLogger.LogError($"Failed to start recording: {ex.Message}", ex);
                 RecordingError?.Invoke($"Failed to start recording: {ex.Message}");
                 return false;
             }
@@ -185,10 +188,12 @@ public class StreamRecorderService : IDisposable
             try
             {
                 _sink.FinalizeSink(out long fileSize);
+                AppLogger.LogInfo($"Recording finalized internally: {path}, {fileSize} bytes");
                 RecordingStopped?.Invoke(path, duration, fileSize);
             }
             catch (Exception ex)
             {
+                AppLogger.LogError($"Error finalizing recording: {ex.Message}", ex);
                 RecordingError?.Invoke($"Error finalizing recording: {ex.Message}");
             }
         }
