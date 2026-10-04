@@ -42,8 +42,19 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        AppLogger.LogInfo("OMT Capture Studio application starting.");
-        TxtVersion.Text = $"v{System.Reflection.Assembly.GetExecutingAssembly().GetName().Version}";
+        string version = "Unknown";
+        try
+        {
+            string versionPath = Path.Combine(AppContext.BaseDirectory, "version.txt");
+            if (File.Exists(versionPath))
+            {
+                version = File.ReadAllText(versionPath).Trim();
+            }
+        }
+        catch { }
+
+        AppLogger.LogInfo($"OMT Capture Studio application starting. Version: {version}");
+        TxtVersion.Text = $"v{version}";
 
         _session = new CaptureSession();
         _discoveryService = new OmtDiscoveryService();
