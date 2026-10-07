@@ -353,6 +353,12 @@ public class FfmpegProcessHost : IDisposable
             _audioWorkerThread.Join(5000);
         }
 
+        // Flush pipes and wait briefly before closing to ensure FFmpeg receives all data
+        // Wrap in tasks with timeouts to prevent deadlocks if FFmpeg stops reading
+        try { if (_videoPipe != null) Task.Run(() => _videoPipe.Flush()).Wait(2000); } catch { }
+        try { if (_audioPipe != null) Task.Run(() => _audioPipe.Flush()).Wait(2000); } catch { }
+        Thread.Sleep(500);
+
         // Close pipes to signal EOF to FFmpeg.
         try { _videoPipe?.Dispose(); } catch { }
         try { _audioPipe?.Dispose(); } catch { }
@@ -360,13 +366,26 @@ public class FfmpegProcessHost : IDisposable
         _audioPipe = null;
 
         // Wait for FFmpeg to finish writing file trailers and exit
+        bool killed = false;
         if (_ffmpegProcess != null && !_ffmpegProcess.HasExited)
         {
-            _ffmpegProcess.WaitForExit(10000);
+            _ffmpegProcess.WaitForExit(30000);
             if (!_ffmpegProcess.HasExited)
             {
-                _ffmpegProcess.Kill();
+                try { _ffmpegProcess.Kill(); } catch { }
+                killed = true;
             }
+        }
+
+        if (killed)
+        {
+            throw new InvalidOperationException("FFmpeg recording process timed out during finalization and was killed. The output file is likely corrupted.");
+        }
+
+        if (_ffmpegProcess != null && _ffmpegProcess.HasExited && _ffmpegProcess.ExitCode != 0)
+        {
+            string lastError = GetLastFfmpegError();
+            throw new InvalidOperationException($"FFmpeg exited with error code {_ffmpegProcess.ExitCode}. Error: {lastError}");
         }
 
         if (!string.IsNullOrEmpty(_outputPath) && File.Exists(_outputPath))
