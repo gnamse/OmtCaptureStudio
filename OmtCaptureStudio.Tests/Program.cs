@@ -5,6 +5,7 @@ using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
 using OmtCaptureStudio.Services.Sinks;
 using OmtCaptureStudio.Services.Sources;
+using OmtCaptureStudio.ViewModels;
 
 namespace OmtCaptureStudio.Tests;
 
@@ -116,6 +117,233 @@ class Program
             Console.WriteLine($" -> NullRecordingSink captured {nullSink.VideoFramesReceived} video frames, {nullSink.AudioBytesReceived} audio bytes in memory (0 disk I/O, 0 FFmpeg processes)!");
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine(" -> Architectural seams successfully verified!");
+            Console.ResetColor();
+        }
+
+        Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
+        using (var vmSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(new NullRecordingSink())))
+        using (var vmDiscovery = new OmtDiscoveryService())
+        using (var vm = new MainWindowViewModel(vmSession, vmDiscovery))
+        {
+            // Verify default UI state
+            if (vm.SelectedContainerFormat != OutputContainerFormat.MP4 ||
+                vm.SelectedEncoderChoice != VideoEncoderChoice.AutoHardware ||
+                vm.SelectedQualityPreset != QualityPreset.High)
+            {
+                throw new Exception("ViewModel recording config defaults mismatch!");
+            }
+
+            if (!vm.IsNoSignalOverlayVisible || vm.LiveStatusText != "OFFLINE")
+            {
+                throw new Exception("ViewModel live status defaults mismatch!");
+            }
+
+            // Test MOV auto-switches encoder to ProRes
+            vm.SelectedContainerFormat = OutputContainerFormat.MOV;
+            if (vm.SelectedEncoderChoice != VideoEncoderChoice.ProRes)
+            {
+                throw new Exception($"Expected ProRes for MOV, got: {vm.SelectedEncoderChoice}");
+            }
+
+            // Test switching away from MOV restores AutoHardware
+            vm.SelectedContainerFormat = OutputContainerFormat.MP4;
+            if (vm.SelectedEncoderChoice != VideoEncoderChoice.AutoHardware)
+            {
+                throw new Exception($"Expected AutoHardware for MP4, got: {vm.SelectedEncoderChoice}");
+            }
+
+            // Test Source ToolTip generation
+            var dummySource = OmtSourceInfo.Parse("PC (Camera 1)");
+            vm.SelectedSource = dummySource;
+            if (string.IsNullOrWhiteSpace(vm.SelectedSourceToolTip) || !vm.SelectedSourceToolTip.Contains("Camera 1"))
+            {
+                throw new Exception($"ViewModel tooltip not updated correctly: '{vm.SelectedSourceToolTip}'");
+            }
+            vm.SelectedSource = null;
+            if (vm.SelectedSourceToolTip != null)
+            {
+                throw new Exception("ViewModel tooltip should be null when SelectedSource is null!");
+            }
+
+            // Test Commands
+            vm.RefreshSourcesCommand.Execute(null);
+            if (!vm.StatusText.Contains("Scanning network"))
+            {
+                throw new Exception($"RefreshSourcesCommand failed to update status: '{vm.StatusText}'");
+            }
+
+            vm.IsRecordingCloseOverlayVisible = true;
+            vm.KeepRecordingCommand.Execute(null);
+            if (vm.IsRecordingCloseOverlayVisible || !vm.IsKeepRecordingEnabled)
+            {
+                throw new Exception("KeepRecordingCommand failed to dismiss overlay or restore button state!");
+            }
+
+            // Connect validation without source
+            vm.ToggleConnectCommand.Execute(null);
+            if (!vm.StatusText.Contains("Please select an OMT source"))
+            {
+                throw new Exception($"ToggleConnectCommand without source failed validation: '{vm.StatusText}'");
+            }
+
+            // Test ToggleTestSignalCommand (Turn ON)
+            vm.ToggleTestSignalCommand.ExecuteAsync(null).GetAwaiter().GetResult();
+            if (!vm.IsTestSignalActive || !vm.IsConnected || vm.ConnectButtonText != "Disconnect")
+            {
+                throw new Exception($"ToggleTestSignalCommand failed to activate test signal! IsActive={vm.IsTestSignalActive}, IsConnected={vm.IsConnected}");
+            }
+            if (!vm.StatusText.Contains("Internal Test Pattern Generator", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new Exception($"Unexpected status after starting test signal: '{vm.StatusText}'");
+            }
+
+            // Test ToggleTestSignalCommand (Turn OFF)
+            vm.ToggleTestSignalCommand.ExecuteAsync(null).GetAwaiter().GetResult();
+            if (vm.IsTestSignalActive || vm.IsConnected || vm.ConnectButtonText != "Connect")
+            {
+                throw new Exception($"ToggleTestSignalCommand failed to deactivate test signal! IsActive={vm.IsTestSignalActive}, IsConnected={vm.IsConnected}");
+            }
+
+            // Test Folder Picker seam & exception resilience
+            vm.OutputDirectory = "";
+            vm.OpenOutputDirectoryCommand.Execute(null);
+            if (!vm.StatusText.Contains("not set", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new Exception($"OpenOutputDirectoryCommand with empty path should report not set, got: '{vm.StatusText}'");
+            }
+
+            vm.PickFolderAsync = _ => throw new InvalidOperationException("Simulated picker error");
+            vm.BrowseOutputDirectoryCommand.Execute(null);
+            if (!vm.StatusText.Contains("cancelled or failed", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new Exception($"BrowseOutputDirectoryCommand failed to catch error gracefully: '{vm.StatusText}'");
+            }
+
+            string mockFolder = Path.Combine(Path.GetTempPath(), "OMT_Mock_Capture_Dir");
+            vm.PickFolderAsync = _ => Task.FromResult<string?>(mockFolder);
+            vm.BrowseOutputDirectoryCommand.Execute(null);
+            if (vm.OutputDirectory != mockFolder)
+            {
+                throw new Exception($"BrowseOutputDirectoryCommand failed to update OutputDirectory! Got: '{vm.OutputDirectory}'");
+            }
+
+            // Test audio monitoring toggle
+            vm.SetAudioMonitoring(true);
+            if (!vmSession.IsAudioMonitoringEnabled)
+            {
+                throw new Exception("SetAudioMonitoring(true) failed to update session audio monitoring state!");
+            }
+            vm.SetAudioMonitoring(false);
+            if (vmSession.IsAudioMonitoringEnabled)
+            {
+                throw new Exception("SetAudioMonitoring(false) failed to disable session audio monitoring state!");
+            }
+
+            // Test ToggleRecordCommand validation when disconnected
+            vm.ToggleRecordCommand.Execute(null);
+            if (!vm.StatusText.Contains("Please connect to an active OMT stream"))
+            {
+                throw new Exception($"ToggleRecordCommand without active stream failed validation: '{vm.StatusText}'");
+            }
+
+            // Connect live synthetic pattern generator to verify HUD overlay and live recording
+            vm.SetTestSignalActiveAsync(true).GetAwaiter().GetResult();
+            if (!vm.IsTestSignalActive || !vm.IsConnected || vm.ConnectButtonText != "Disconnect")
+            {
+                throw new Exception("Failed to activate test signal generator for recording test!");
+            }
+
+            // Wait briefly for synthetic frames to negotiate stream format
+            int frameWait = 0;
+            while (!vmSession.CurrentFormat.HasVideo && frameWait < 30)
+            {
+                Thread.Sleep(50);
+                frameWait++;
+            }
+            if (!vmSession.CurrentFormat.HasVideo)
+            {
+                throw new Exception("Synthetic pattern generator failed to deliver video stream format!");
+            }
+            if (vm.IsNoSignalOverlayVisible || vm.LiveStatusText != "LIVE")
+            {
+                throw new Exception($"Video frame HUD overlay failed to transition to LIVE! OverlayVisible={vm.IsNoSignalOverlayVisible}, LiveStatus='{vm.LiveStatusText}'");
+            }
+            if (!vm.VideoSpecsText.Contains("1920x1080"))
+            {
+                throw new Exception($"VideoSpecsText does not reflect synthetic 1080p stream! Got: '{vm.VideoSpecsText}'");
+            }
+
+            // Test empty output directory pre-flight validation while connected
+            vm.OutputDirectory = "   ";
+            vm.ToggleRecordCommand.ExecuteAsync(null).GetAwaiter().GetResult();
+            if (!vm.StatusText.Contains("valid destination folder", StringComparison.OrdinalIgnoreCase) || vm.IsRecording)
+            {
+                throw new Exception($"ToggleRecordCommand with empty directory failed pre-flight validation: '{vm.StatusText}'");
+            }
+
+            // Test active recording lifecycle through ViewModel
+            vm.OutputDirectory = Path.GetTempPath();
+            vm.ToggleRecordCommand.ExecuteAsync(null).GetAwaiter().GetResult();
+            if (!vm.IsRecording || !vm.RecordButtonText.Contains("STOP RECORDING"))
+            {
+                throw new Exception($"ToggleRecordCommand failed to start recording! IsRecording={vm.IsRecording}, BtnText='{vm.RecordButtonText}', Status='{vm.StatusText}'");
+            }
+
+            // Test close protection modal while active recording is in flight
+            vm.IsRecordingCloseOverlayVisible = true;
+            vm.KeepRecordingCommand.Execute(null);
+            if (vm.IsRecordingCloseOverlayVisible || vm.IsSafeExitConfirmed)
+            {
+                throw new Exception("KeepRecordingCommand failed to dismiss modal or left IsSafeExitConfirmed true!");
+            }
+
+            // Test StopAndExitCommand safe finalization while recording
+            bool closeRequested = false;
+            vm.RequestClose += () => closeRequested = true;
+            vm.StopAndExitCommand.ExecuteAsync(null).GetAwaiter().GetResult();
+
+            int exitWait = 0;
+            while ((!vm.IsSafeExitConfirmed || vm.IsRecording) && exitWait < 30)
+            {
+                Thread.Sleep(50);
+                exitWait++;
+            }
+            if (!vm.IsSafeExitConfirmed || !closeRequested || vm.IsRecording)
+            {
+                throw new Exception($"StopAndExitCommand failed safe recording finalization! Confirmed={vm.IsSafeExitConfirmed}, CloseReq={closeRequested}, IsRec={vm.IsRecording}");
+            }
+
+            // Deactivate test signal generator and verify offline state
+            vm.SetTestSignalActiveAsync(false).GetAwaiter().GetResult();
+            if (vm.IsTestSignalActive || vm.IsConnected || vm.ConnectButtonText != "Connect" || !vm.IsNoSignalOverlayVisible || vm.LiveStatusText != "OFFLINE")
+            {
+                throw new Exception($"Deactivating test signal failed to restore offline state! IsActive={vm.IsTestSignalActive}, Live={vm.LiveStatusText}");
+            }
+            if (vm.AudioTelemetryText != "Audio: --" || vm.BitrateText != "Bitrate: 0.0 Mbps" || vm.DroppedFramesText != "Dropped: 0" || vm.SourceNameText != "")
+            {
+                throw new Exception($"Deactivating test signal failed to reset telemetry! Audio='{vm.AudioTelemetryText}', Bitrate='{vm.BitrateText}', Dropped='{vm.DroppedFramesText}', Source='{vm.SourceNameText}'");
+            }
+
+            // Test OmtSourceInfo equality
+            var srcA = OmtSourceInfo.Parse("PC (Camera 1)");
+            var srcB = OmtSourceInfo.Parse("PC (Camera 1)");
+            var srcC = OmtSourceInfo.Parse("PC (Camera 2)");
+            if (!srcA.Equals(srcB) || srcA != srcB || srcA == srcC || srcA.GetHashCode() != srcB.GetHashCode())
+            {
+                throw new Exception("OmtSourceInfo equality implementation failed!");
+            }
+
+            // Test Dispose idempotency & seam cleanup
+            vm.PickFolderAsync = _ => Task.FromResult<string?>("mock");
+            vm.Dispose();
+            if (vm.PickFolderAsync != null)
+            {
+                throw new Exception("PickFolderAsync hook was not cleared on Dispose!");
+            }
+            vm.Dispose();
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine(" -> MainWindowViewModel MVVM patterns, bindings, commands, and seams verified!");
             Console.ResetColor();
         }
 

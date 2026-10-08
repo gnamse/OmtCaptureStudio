@@ -4,8 +4,10 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:controls="clr-namespace:OmtCaptureStudio.Controls"
         xmlns:models="clr-namespace:OmtCaptureStudio.Models"
+        xmlns:vm="clr-namespace:OmtCaptureStudio.ViewModels"
         mc:Ignorable="d"
         x:Class="OmtCaptureStudio.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
         Title="OMT Capture Studio - Open Media Transport Recorder"
         Height="800" Width="1240" MinHeight="650" MinWidth="950"
         Background="{DynamicResource StudioBg}" Foreground="{DynamicResource StudioTextPrimary}"
@@ -57,56 +59,74 @@
                     <!-- Source Picker -->
                     <TextBlock Grid.Column="0" Text="Source:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,4,0"/>
                     <ComboBox x:Name="CmbSources" Grid.Column="1" Margin="0,0,4,0" HorizontalAlignment="Stretch"
-                              AutomationProperties.Name="Source Stream Selection"
-                              ToolTip.Tip="Select an active OMT source stream from the network or local system">
+                              ItemsSource="{CompiledBinding DiscoveredSources}"
+                              SelectedItem="{CompiledBinding SelectedSource, Mode=TwoWay}"
+                              IsDropDownOpen="{CompiledBinding IsSourceDropDownOpen, Mode=TwoWay}"
+                              ToolTip.Tip="{CompiledBinding SelectedSourceToolTip}"
+                              AutomationProperties.Name="Source Stream Selection">
                         <ComboBox.ItemTemplate>
                             <DataTemplate x:DataType="models:OmtSourceInfo">
-                                <TextBlock Text="{Binding DisplayName}" />
+                                <TextBlock Text="{CompiledBinding DisplayName}" />
                             </DataTemplate>
                         </ComboBox.ItemTemplate>
                     </ComboBox>
-                    <Button x:Name="BtnRefreshSources" Grid.Column="2" Content="↻ Refresh" Padding="7,4" Margin="0,0,8,0"
+                    <Button x:Name="BtnRefreshSources" Grid.Column="2" Padding="8,0" Margin="0,0,8,0" MinHeight="30"
                             HotKey="F5"
                             AutomationProperties.Name="Refresh Discovered Sources"
                             ToolTip.Tip="Scan network and refresh discovered OMT sources (F5)"
-                            Click="BtnRefreshSources_Click"/>
+                            Command="{CompiledBinding RefreshSourcesCommand}">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Path Data="{DynamicResource IconRefresh}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center"/>
+                            <TextBlock Text="Refresh" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
 
                     <!-- Connect / Disconnect Button -->
-                    <Button x:Name="BtnConnect" Grid.Column="3" Content="Connect" MinWidth="82" Padding="10,5" Margin="0,0,8,0"
-                            Background="{DynamicResource StudioAccentSuccess}" Foreground="#000000" FontWeight="Bold"
+                    <Button x:Name="BtnConnect" Grid.Column="3"
+                            Content="{CompiledBinding ConnectButtonText}"
+                            Background="{CompiledBinding ConnectButtonBackground}"
+                            Foreground="{CompiledBinding ConnectButtonForeground}"
+                            AutomationProperties.Name="{CompiledBinding ConnectButtonAutomationName}"
+                            MinWidth="82" MinHeight="30" Padding="10,5" Margin="0,0,8,0"
+                            FontWeight="Bold"
                             HotKey="Ctrl+Enter"
-                            AutomationProperties.Name="Connect or Disconnect Stream"
                             ToolTip.Tip="Connect to or disconnect from the selected OMT stream (Ctrl+Enter)"
-                            Click="BtnConnect_Click"/>
+                            Command="{CompiledBinding ToggleConnectCommand}"/>
 
                     <!-- Divider -->
                     <Rectangle Grid.Column="4" Width="1" Height="22" Fill="{DynamicResource StudioBorderSubtle}" Margin="0,0,8,0" VerticalAlignment="Center"/>
 
                     <!-- Recording Timer & Stats -->
                     <StackPanel Grid.Column="5" VerticalAlignment="Center" Margin="0,0,8,0" HorizontalAlignment="Right">
-                        <TextBlock x:Name="TxtRecordDuration" Text="00:00:00" Foreground="{DynamicResource StudioTextPrimary}" FontSize="15" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Right"/>
-                        <TextBlock x:Name="TxtRecordStats" Text="Ready" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" HorizontalAlignment="Right" Margin="0,2,0,0"
+                        <TextBlock x:Name="TxtRecordDuration" Text="{CompiledBinding RecordDurationText}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="15" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Right"/>
+                        <TextBlock x:Name="TxtRecordStats" Text="{CompiledBinding RecordStatsText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" HorizontalAlignment="Right" Margin="0,2,0,0"
                                    MaxWidth="120" TextTrimming="CharacterEllipsis"/>
                     </StackPanel>
 
                     <!-- Main Record Button -->
-                    <Button x:Name="BtnRecord" Grid.Column="6" Content="● START RECORDING" MinWidth="136" Padding="8,5"
-                            Background="{DynamicResource StudioAccentDanger}" Foreground="#FFFFFF" FontSize="11" FontWeight="Bold"
+                    <Button x:Name="BtnRecord" Grid.Column="6"
+                            Content="{CompiledBinding RecordButtonText}"
+                            IsEnabled="{CompiledBinding IsRecordButtonEnabled}"
+                            Background="{CompiledBinding RecordButtonBackground}"
+                            AutomationProperties.Name="{CompiledBinding RecordButtonAutomationName}"
+                            MinWidth="136" MinHeight="30" Padding="8,5"
+                            Foreground="#FFFFFF" FontSize="11" FontWeight="Bold"
                             HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
                             HotKey="Ctrl+R"
-                            AutomationProperties.Name="Record Stream"
                             ToolTip.Tip="Start or stop recording stream to disk (Ctrl+R)"
-                            Click="BtnRecord_Click"/>
+                            Command="{CompiledBinding ToggleRecordCommand}"/>
                 </Grid>
 
                 <!-- Test Signal Generator -->
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                    <ToggleButton x:Name="BtnTestSignal" Content="Test Signal" Padding="10,5"
-                                  Background="{DynamicResource StudioSurfaceElevated}" Foreground="{DynamicResource StudioTextPrimary}"
+                    <ToggleButton x:Name="BtnTestSignal" Content="Test Signal" Padding="10,5" MinHeight="30"
+                                  IsChecked="{CompiledBinding IsTestSignalActive, Mode=OneWay}"
+                                  Background="{CompiledBinding TestSignalBackground}"
+                                  Foreground="{CompiledBinding TestSignalForeground}"
                                   BorderBrush="{DynamicResource StudioAccentPrimary}" BorderThickness="1"
-                                  AutomationProperties.Name="Test Signal Generator"
+                                  AutomationProperties.Name="{CompiledBinding TestSignalAutomationName}"
                                   ToolTip.Tip="Toggle internal SMPTE color bars test generator"
-                                  Click="BtnTestSignal_Click"/>
+                                  Command="{CompiledBinding ToggleTestSignalCommand}"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -125,7 +145,8 @@
                     <controls:VideoViewportControl x:Name="VideoViewport" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
 
                     <!-- No Signal / Placeholder Overlay -->
-                    <Border x:Name="NoSignalOverlay" Background="{DynamicResource StudioBg}" Opacity="0.95" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                    <Border x:Name="NoSignalOverlay" Background="{DynamicResource StudioBg}" Opacity="0.95" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                            IsVisible="{CompiledBinding IsNoSignalOverlayVisible}">
                         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                             <TextBlock Text="NO SIGNAL" Foreground="{DynamicResource StudioTextMuted}" FontSize="28" FontWeight="Black" HorizontalAlignment="Center" Margin="0,0,0,8"/>
                             <TextBlock Text="Select an OMT source from the toolbar and click Connect, or start the Test Signal" 
@@ -134,18 +155,18 @@
                     </Border>
 
                     <!-- Video Viewport HUD Overlay (Top-Left) -->
-                    <Border Background="#CC18181B" CornerRadius="4" Padding="8,4" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8">
+                    <Border Background="{DynamicResource StudioHudScrim}" CornerRadius="4" Padding="8,4" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8">
                         <StackPanel Orientation="Horizontal">
-                            <Ellipse x:Name="LiveIndicator" Width="8" Height="8" Fill="{DynamicResource StudioTextMuted}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                            <TextBlock x:Name="TxtLiveStatus" Text="OFFLINE" Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontWeight="Bold" VerticalAlignment="Center"/>
-                            <TextBlock x:Name="TxtSourceName" Text="" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="8,0,0,0"
+                            <Ellipse x:Name="LiveIndicator" Width="8" Height="8" Fill="{CompiledBinding LiveIndicatorBrush}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <TextBlock x:Name="TxtLiveStatus" Text="{CompiledBinding LiveStatusText}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontWeight="Bold" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="TxtSourceName" Text="{CompiledBinding SourceNameText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="8,0,0,0"
                                        MaxWidth="380" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Border>
 
                     <!-- Video Viewport HUD Overlay (Top-Right: Resolution & FPS) -->
-                    <Border Background="#CC18181B" CornerRadius="4" Padding="8,4" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="8">
-                        <TextBlock x:Name="TxtVideoSpecs" Text="-- x -- @ -- fps" Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontFamily="Consolas, monospace" VerticalAlignment="Center"/>
+                    <Border Background="{DynamicResource StudioHudScrim}" CornerRadius="4" Padding="8,4" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="8">
+                        <TextBlock x:Name="TxtVideoSpecs" Text="{CompiledBinding VideoSpecsText}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontFamily="Consolas, monospace" VerticalAlignment="Center"/>
                     </Border>
                 </Grid>
             </Border>
@@ -168,15 +189,18 @@
                     <StackPanel Margin="0,0,16,0">
                         <TextBlock Text="CONTAINER" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
                         <ComboBox x:Name="CmbContainer" Width="75"
+                                  ItemsSource="{CompiledBinding ContainerFormats}"
+                                  SelectedItem="{CompiledBinding SelectedContainerFormat, Mode=TwoWay}"
                                   AutomationProperties.Name="Container Format"
-                                  ToolTip.Tip="Select output container file format (MP4, MOV, MKV, TS)"
-                                  SelectionChanged="CmbContainer_SelectionChanged"/>
+                                  ToolTip.Tip="Select output container file format (MP4, MOV, MKV, TS)"/>
                     </StackPanel>
 
                     <!-- Encoder -->
                     <StackPanel Margin="0,0,16,0">
                         <TextBlock Text="ENCODER" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
                         <ComboBox x:Name="CmbEncoder" Width="140"
+                                  ItemsSource="{CompiledBinding EncoderChoices}"
+                                  SelectedItem="{CompiledBinding SelectedEncoderChoice, Mode=TwoWay}"
                                   AutomationProperties.Name="Video Encoder"
                                   ToolTip.Tip="Select video encoding acceleration (Auto Hardware, NVENC, QSV, AMF, CPU x264, ProRes)"/>
                     </StackPanel>
@@ -185,6 +209,8 @@
                     <StackPanel>
                         <TextBlock Text="QUALITY" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
                         <ComboBox x:Name="CmbQuality" Width="90"
+                                  ItemsSource="{CompiledBinding QualityPresets}"
+                                  SelectedItem="{CompiledBinding SelectedQualityPreset, Mode=TwoWay}"
                                   AutomationProperties.Name="Recording Quality Preset"
                                   ToolTip.Tip="Select recording quality and bitrate preset (High, Ultra, Master ProRes, Medium)"/>
                     </StackPanel>
@@ -203,17 +229,20 @@
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <TextBox x:Name="TxtOutputDir" Grid.Column="0" VerticalContentAlignment="Center"
+                        <TextBox x:Name="TxtOutputDir" Grid.Column="0" MinHeight="30" VerticalContentAlignment="Center"
+                                 Text="{CompiledBinding OutputDirectory, Mode=TwoWay}"
                                  AutomationProperties.Name="Destination Folder Path"
                                  ToolTip.Tip="Destination directory where recorded media files will be saved"/>
-                        <Button x:Name="BtnBrowseDir" Grid.Column="1" Content="..." Width="34" Margin="4,0,0,0"
+                        <Button x:Name="BtnBrowseDir" Grid.Column="1" MinHeight="30" Width="34" Margin="4,0,0,0"
                                 AutomationProperties.Name="Browse Destination Folder"
                                 ToolTip.Tip="Browse for destination folder"
-                                Click="BtnBrowseDir_Click"/>
-                        <Button x:Name="BtnOpenDir" Grid.Column="2" Content="Open Folder" Padding="10,4" Margin="4,0,0,0"
+                                Command="{CompiledBinding BrowseOutputDirectoryCommand}">
+                            <Path Data="{DynamicResource IconFolder}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="15" Height="15" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Button>
+                        <Button x:Name="BtnOpenDir" Grid.Column="2" Content="Open Folder" Padding="10,4" MinHeight="30" Margin="4,0,0,0"
                                 AutomationProperties.Name="Open Output Directory in Explorer"
                                 ToolTip.Tip="Open current destination directory in File Explorer"
-                                Click="BtnOpenDir_Click"/>
+                                Command="{CompiledBinding OpenOutputDirectoryCommand}"/>
                     </Grid>
                 </Grid>
             </Grid>
@@ -228,24 +257,24 @@
                 </Grid.ColumnDefinitions>
 
                 <!-- Status message -->
-                <TextBlock x:Name="TxtStatus" Text="Ready. Discovering OMT sources on network..." Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="TxtStatus" Text="{CompiledBinding StatusText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
 
                 <!-- Telemetry Readouts -->
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock x:Name="TxtAudioTelemetry" Text="Audio: --" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0"/>
+                    <TextBlock x:Name="TxtAudioTelemetry" Text="{CompiledBinding AudioTelemetryText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0"/>
                     <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="TxtBitrate" Text="Bitrate: 0.0 Mbps" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0"/>
+                    <TextBlock x:Name="TxtBitrate" Text="{CompiledBinding BitrateText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0"/>
                     <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="TxtDroppedFrames" Text="Dropped: 0" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0,0,0"/>
+                    <TextBlock x:Name="TxtDroppedFrames" Text="{CompiledBinding DroppedFramesText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0,0,0"/>
                     <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" VerticalAlignment="Center" Margin="12,0,0,0"/>
-                    <TextBlock x:Name="TxtVersion" Text="v0.0.0" Foreground="{DynamicResource StudioTextMuted}" FontSize="11" Margin="12,0,0,0"/>
+                    <TextBlock x:Name="TxtVersion" Text="{CompiledBinding VersionText}" Foreground="{DynamicResource StudioTextMuted}" FontSize="11" Margin="12,0,0,0"/>
                 </StackPanel>
             </Grid>
         </Border>
 
         <!-- 5. MODAL OVERLAY: Active Recording Close Protection -->
         <Border x:Name="RecordingCloseOverlay" Grid.Row="0" Grid.RowSpan="4"
-                Background="#CC09090B" IsVisible="False" ZIndex="1000">
+                Background="#CC09090B" IsVisible="{CompiledBinding IsRecordingCloseOverlayVisible}" ZIndex="1000">
             <Border Background="{DynamicResource StudioSurface}" BorderBrush="{DynamicResource StudioBorder}"
                     BorderThickness="1" CornerRadius="8" Padding="24"
                     MaxWidth="480" HorizontalAlignment="Center" VerticalAlignment="Center"
@@ -254,7 +283,7 @@
                     <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
                         <Border Background="{DynamicResource StudioAccentDanger}" Width="36" Height="36" CornerRadius="18"
                                 HorizontalAlignment="Center" VerticalAlignment="Center">
-                            <TextBlock Text="!" Foreground="#FFFFFF" FontWeight="Black" FontSize="20"
+                            <Path Data="{DynamicResource IconWarning}" Stroke="#FFFFFF" StrokeThickness="2" Stretch="Uniform" Width="20" Height="20"
                                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <StackPanel VerticalAlignment="Center">
@@ -275,14 +304,17 @@
                                 Foreground="{DynamicResource StudioTextPrimary}" FontWeight="SemiBold"
                                 AutomationProperties.Name="Keep Recording and Cancel Exit"
                                 ToolTip.Tip="Cancel exit and continue recording"
-                                Click="BtnKeepRecording_Click"/>
-                        <Button x:Name="BtnStopAndExit" Grid.Column="2" Content="Stop &amp; Exit"
+                                IsEnabled="{CompiledBinding IsKeepRecordingEnabled}"
+                                Command="{CompiledBinding KeepRecordingCommand}"/>
+                        <Button x:Name="BtnStopAndExit" Grid.Column="2"
+                                Content="{CompiledBinding StopAndExitButtonText}"
+                                IsEnabled="{CompiledBinding IsStopAndExitEnabled}"
                                 HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
                                 Padding="12,8" Background="{DynamicResource StudioAccentDanger}"
                                 Foreground="#FFFFFF" FontWeight="Bold"
                                 AutomationProperties.Name="Stop Recording and Exit"
                                 ToolTip.Tip="Stop recording to finalize file and exit application"
-                                Click="BtnStopAndExit_Click"/>
+                                Command="{CompiledBinding StopAndExitCommand}"/>
                     </Grid>
                 </StackPanel>
             </Border>

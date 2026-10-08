@@ -58,6 +58,7 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.1.4" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.1.4" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="11.1.4" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Vortice.XAudio2" Version="3.6.2" />
   </ItemGroup>
 

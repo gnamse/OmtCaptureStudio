@@ -12,7 +12,7 @@
 
         <Color x:Key="StudioTextPrimaryColor">#F4F4F5</Color>
         <Color x:Key="StudioTextSecondaryColor">#A1A1AA</Color>
-        <Color x:Key="StudioTextMutedColor">#71717A</Color>
+        <Color x:Key="StudioTextMutedColor">#80808A</Color>
 
         <Color x:Key="StudioAccentSuccessColor">#10B981</Color>
         <Color x:Key="StudioAccentDangerColor">#DC2626</Color>
@@ -27,7 +27,7 @@
 
         <SolidColorBrush x:Key="StudioTextPrimary" Color="#F4F4F5"/>
         <SolidColorBrush x:Key="StudioTextSecondary" Color="#A1A1AA"/>
-        <SolidColorBrush x:Key="StudioTextMuted" Color="#71717A"/>
+        <SolidColorBrush x:Key="StudioTextMuted" Color="#80808A"/>
 
         <SolidColorBrush x:Key="StudioAccentSuccess" Color="#10B981"/>
         <SolidColorBrush x:Key="StudioAccentDanger" Color="#DC2626"/>
@@ -48,6 +48,14 @@
         <!-- Standard Radius -->
         <CornerRadius x:Key="RadiusSm">4</CornerRadius>
         <CornerRadius x:Key="RadiusMd">8</CornerRadius>
+
+        <!-- Viewport HUD Scrim -->
+        <SolidColorBrush x:Key="StudioHudScrim" Color="#CC18181B"/>
+
+        <!-- Drawn Icon Set (24x24 stroke geometry, consistent 2px weight) -->
+        <StreamGeometry x:Key="IconRefresh">M4.35 6.4A8 8 0 1 1 4 14 M4 3v4h4</StreamGeometry>
+        <StreamGeometry x:Key="IconFolder">M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z</StreamGeometry>
+        <StreamGeometry x:Key="IconWarning">M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z M12 9v4 M12 17h.01</StreamGeometry>
     </Application.Resources>
 
     <Application.Styles>

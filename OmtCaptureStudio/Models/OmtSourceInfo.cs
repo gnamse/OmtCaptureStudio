@@ -1,11 +1,27 @@
 namespace OmtCaptureStudio.Models;
 
-public class OmtSourceInfo
+public class OmtSourceInfo : IEquatable<OmtSourceInfo>
 {
     public string Name { get; set; } = string.Empty;
     public string Host { get; set; } = string.Empty;
     public string Address { get; set; } = string.Empty;
     public bool IsManual { get; set; }
+
+    public bool Equals(OmtSourceInfo? other)
+    {
+        if (other is null) return false;
+        if (ReferenceEquals(this, other)) return true;
+        return string.Equals(Address, other.Address, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public override bool Equals(object? obj) => obj is OmtSourceInfo other && Equals(other);
+
+    public override int GetHashCode() => string.IsNullOrEmpty(Address) ? 0 : StringComparer.OrdinalIgnoreCase.GetHashCode(Address);
+
+    public static bool operator ==(OmtSourceInfo? left, OmtSourceInfo? right) =>
+        ReferenceEquals(left, right) || (left is not null && left.Equals(right));
+
+    public static bool operator !=(OmtSourceInfo? left, OmtSourceInfo? right) => !(left == right);
 
     public string DisplayName
     {
