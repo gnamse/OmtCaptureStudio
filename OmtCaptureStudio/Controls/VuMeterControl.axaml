@@ -96,13 +96,13 @@
                 <ColumnDefinition Width="4"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="L" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center"/>
-            <TextBlock Grid.Column="2" Text="R" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center"/>
+            <TextBlock Grid.Column="0" Text="L" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center" AutomationProperties.Name="Left channel"/>
+            <TextBlock Grid.Column="2" Text="R" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center" AutomationProperties.Name="Right channel"/>
         </Grid>
 
         <!-- 5. Numerical Readout & Monitor Button -->
         <StackPanel Grid.Row="4" Margin="0,8,0,0">
-            <TextBlock x:Name="TxtDbReadout" Text="-inf dB" Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Center"/>
+            <TextBlock x:Name="TxtDbReadout" Text="-inf dB" Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Center" AutomationProperties.LiveSetting="Assertive"/>
             <ToggleButton x:Name="BtnMonitor" Content="Monitor" Height="28" Margin="0,8,0,0"
                           Background="{DynamicResource StudioSurfaceElevated}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="10" FontWeight="SemiBold"
                           BorderBrush="{DynamicResource StudioBorderSubtle}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"

@@ -100,7 +100,7 @@
                     <StackPanel Grid.Column="5" VerticalAlignment="Center" Margin="0,0,8,0" HorizontalAlignment="Right">
                         <TextBlock x:Name="TxtRecordDuration" Text="{CompiledBinding RecordDurationText}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="15" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Right"/>
                         <TextBlock x:Name="TxtRecordStats" Text="{CompiledBinding RecordStatsText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" HorizontalAlignment="Right" Margin="0,2,0,0"
-                                   MaxWidth="120" TextTrimming="CharacterEllipsis"/>
+                                   MaxWidth="120" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Assertive"/>
                     </StackPanel>
 
                     <!-- Main Record Button -->
@@ -158,7 +158,7 @@
                     <Border Background="{DynamicResource StudioHudScrim}" CornerRadius="4" Padding="8,4" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8">
                         <StackPanel Orientation="Horizontal">
                             <Ellipse x:Name="LiveIndicator" Width="8" Height="8" Fill="{CompiledBinding LiveIndicatorBrush}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                            <TextBlock x:Name="TxtLiveStatus" Text="{CompiledBinding LiveStatusText}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontWeight="Bold" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="TxtLiveStatus" Text="{CompiledBinding LiveStatusText}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontWeight="Bold" VerticalAlignment="Center" AutomationProperties.LiveSetting="Assertive"/>
                             <TextBlock x:Name="TxtSourceName" Text="{CompiledBinding SourceNameText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="8,0,0,0"
                                        MaxWidth="380" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
                         </StackPanel>
@@ -257,15 +257,15 @@
                 </Grid.ColumnDefinitions>
 
                 <!-- Status message -->
-                <TextBlock x:Name="TxtStatus" Text="{CompiledBinding StatusText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="TxtStatus" Text="{CompiledBinding StatusText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Assertive"/>
 
                 <!-- Telemetry Readouts -->
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock x:Name="TxtAudioTelemetry" Text="{CompiledBinding AudioTelemetryText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0"/>
+                    <TextBlock x:Name="TxtAudioTelemetry" Text="{CompiledBinding AudioTelemetryText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0" AutomationProperties.LiveSetting="Polite"/>
                     <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="TxtBitrate" Text="{CompiledBinding BitrateText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0"/>
+                    <TextBlock x:Name="TxtBitrate" Text="{CompiledBinding BitrateText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0" AutomationProperties.LiveSetting="Polite"/>
                     <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="TxtDroppedFrames" Text="{CompiledBinding DroppedFramesText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0,0,0"/>
+                    <TextBlock x:Name="TxtDroppedFrames" Text="{CompiledBinding DroppedFramesText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0,0,0" AutomationProperties.LiveSetting="Polite"/>
                     <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" VerticalAlignment="Center" Margin="12,0,0,0"/>
                     <TextBlock x:Name="TxtVersion" Text="{CompiledBinding VersionText}" Foreground="{DynamicResource StudioTextMuted}" FontSize="11" Margin="12,0,0,0"/>
                 </StackPanel>
@@ -274,7 +274,9 @@
 
         <!-- 5. MODAL OVERLAY: Active Recording Close Protection -->
         <Border x:Name="RecordingCloseOverlay" Grid.Row="0" Grid.RowSpan="4"
-                Background="#CC09090B" IsVisible="{CompiledBinding IsRecordingCloseOverlayVisible}" ZIndex="1000">
+                Background="#CC09090B" IsVisible="{CompiledBinding IsRecordingCloseOverlayVisible}" ZIndex="1000"
+                AutomationProperties.Name="Recording in progress — confirmation required"
+                AutomationProperties.HelpText="An active recording session is writing to disk. Stop and exit, or keep recording.">
             <Border Background="{DynamicResource StudioSurface}" BorderBrush="{DynamicResource StudioBorder}"
                     BorderThickness="1" CornerRadius="8" Padding="24"
                     MaxWidth="480" HorizontalAlignment="Center" VerticalAlignment="Center"

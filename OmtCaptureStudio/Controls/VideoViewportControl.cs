@@ -18,7 +18,7 @@ namespace OmtCaptureStudio.Controls;
 /// </summary>
 public class VideoViewportControl : Control
 {
-    private static readonly IBrush s_backdropBrush = new SolidColorBrush(Color.FromRgb(9, 9, 11));
+    private static readonly IBrush s_backdropBrush = StudioPalette.Backdrop;
 
     private WriteableBitmap? _bitmap;
     private readonly object _bitmapLock = new();

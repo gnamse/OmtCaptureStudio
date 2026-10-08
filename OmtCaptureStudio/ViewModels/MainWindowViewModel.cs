@@ -23,14 +23,14 @@ public delegate void VideoFrameReceivedHandler(IntPtr pData, int dataLength, int
 /// </summary>
 public partial class MainWindowViewModel : ObservableObject, IDisposable
 {
-    public static readonly IBrush ConnectBrush = new SolidColorBrush(Color.FromRgb(16, 185, 129));
-    public static readonly IBrush DisconnectBrush = new SolidColorBrush(Color.FromRgb(239, 68, 68));
-    public static readonly IBrush TestSignalActiveBrush = new SolidColorBrush(Color.FromRgb(99, 102, 241));
-    public static readonly IBrush TestSignalInactiveBrush = new SolidColorBrush(Color.FromRgb(39, 39, 42));
-    public static readonly IBrush LiveIndicatorActiveBrush = new SolidColorBrush(Color.FromRgb(34, 197, 94));
-    public static readonly IBrush LiveIndicatorInactiveBrush = new SolidColorBrush(Color.FromRgb(113, 113, 122));
-    public static readonly IBrush RecordStartBrush = new SolidColorBrush(Color.FromRgb(220, 38, 38));
-    public static readonly IBrush RecordStopBrush = new SolidColorBrush(Color.FromRgb(185, 28, 28));
+    public static readonly IBrush ConnectBrush = StudioPalette.Connect;
+    public static readonly IBrush DisconnectBrush = StudioPalette.Disconnect;
+    public static readonly IBrush TestSignalActiveBrush = StudioPalette.TestSignalActive;
+    public static readonly IBrush TestSignalInactiveBrush = StudioPalette.TestSignalInactive;
+    public static readonly IBrush LiveIndicatorActiveBrush = StudioPalette.LiveActive;
+    public static readonly IBrush LiveIndicatorInactiveBrush = StudioPalette.LiveInactive;
+    public static readonly IBrush RecordStartBrush = StudioPalette.RecordStart;
+    public static readonly IBrush RecordStopBrush = StudioPalette.RecordStop;
 
     private readonly CaptureSession _session;
     private readonly OmtDiscoveryService _discoveryService;

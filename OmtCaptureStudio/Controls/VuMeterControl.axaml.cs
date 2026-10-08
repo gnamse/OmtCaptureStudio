@@ -13,17 +13,17 @@ namespace OmtCaptureStudio.Controls;
 public partial class VuMeterControl : UserControl
 {
     private static readonly float[] ScaleMarks = { 0f, -6f, -12f, -18f, -24f, -36f, -48f, -60f };
-    private static readonly IBrush BrushDanger = new SolidColorBrush(Color.FromRgb(239, 68, 68));
-    private static readonly IBrush BrushWarnHigh = new SolidColorBrush(Color.FromRgb(245, 158, 11));
-    private static readonly IBrush BrushWarnMid = new SolidColorBrush(Color.FromRgb(234, 179, 8));
-    private static readonly IBrush BrushNormal = new SolidColorBrush(Color.FromRgb(34, 197, 94));
-    private static readonly IBrush BrushMuted = new SolidColorBrush(Color.FromRgb(113, 113, 122));
-    private static readonly IBrush BrushClipInactive = new SolidColorBrush(Color.FromRgb(63, 63, 70));
-    private static readonly IBrush BrushClipActive = new SolidColorBrush(Color.FromRgb(239, 68, 68));
-    private static readonly IBrush BrushMonitorActive = new SolidColorBrush(Color.FromRgb(34, 197, 94));
-    private static readonly IBrush BrushMonitorInactive = new SolidColorBrush(Color.FromRgb(39, 39, 42));
-    private static readonly IBrush BrushMonitorTextActive = Brushes.Black;
-    private static readonly IBrush BrushMonitorTextInactive = new SolidColorBrush(Color.FromRgb(228, 228, 231));
+    private static readonly IBrush BrushDanger = StudioPalette.MeterDanger;
+    private static readonly IBrush BrushWarnHigh = StudioPalette.MeterWarnHigh;
+    private static readonly IBrush BrushWarnMid = StudioPalette.MeterWarnMid;
+    private static readonly IBrush BrushNormal = StudioPalette.MeterNormal;
+    private static readonly IBrush BrushMuted = StudioPalette.MeterMuted;
+    private static readonly IBrush BrushClipInactive = StudioPalette.ClipInactive;
+    private static readonly IBrush BrushClipActive = StudioPalette.ClipActive;
+    private static readonly IBrush BrushMonitorActive = StudioPalette.MonitorActive;
+    private static readonly IBrush BrushMonitorInactive = StudioPalette.MonitorInactive;
+    private static readonly IBrush BrushMonitorTextActive = StudioPalette.MonitorTextActive;
+    private static readonly IBrush BrushMonitorTextInactive = StudioPalette.MonitorTextInactive;
     private static readonly FontFamily MonoFontFamily = new FontFamily("Consolas, monospace");
 
     private readonly TextBlock[] _scaleLabels;

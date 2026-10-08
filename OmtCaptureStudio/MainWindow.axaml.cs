@@ -113,6 +113,20 @@ public partial class MainWindow : Window
             {
                 _viewModel.KeepRecordingCommand.Execute(null);
             }
+            else if (e.Key == Key.Tab)
+            {
+                // Focus trap: with only two actions in the dialog, cycle focus
+                // between them so it never escapes onto controls behind the overlay.
+                bool backwards = (e.KeyModifiers & KeyModifiers.Shift) != 0;
+                if (backwards)
+                {
+                    BtnKeepRecording.Focus();
+                }
+                else
+                {
+                    BtnStopAndExit.Focus();
+                }
+            }
             e.Handled = true;
             return;
         }
