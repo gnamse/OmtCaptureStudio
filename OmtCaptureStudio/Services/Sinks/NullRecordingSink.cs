@@ -11,6 +11,8 @@ public class NullRecordingSink : IRecordingSink
     public long VideoFramesReceived => _videoFramesCount;
     public long AudioBytesReceived => _audioBytesCount;
     public bool IsInitialized { get; private set; }
+    public long VideoFramesDropped => 0;
+    public long AudioChunksDropped => 0;
     public StreamFormat? InitializedFormat { get; private set; }
     public string? OutputPath { get; private set; }
     public event Action<string>? SinkError { add { } remove { } }

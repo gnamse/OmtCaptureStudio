@@ -26,6 +26,25 @@ public class FfmpegProcessHost : IDisposable
 
     private volatile bool _isWritingActive;
     private volatile bool _disposed;
+    private volatile bool _videoConnected;
+
+    // Stall/drop watchdog. A stall check placed inside VideoWriterLoop cannot detect
+    // a hang on its own: once FFmpeg stops draining the pipe, the OS pipe buffer
+    // fills and the synchronous _videoPipe.Write blocks forever, so no loop iteration
+    // ever runs to perform the check. A single low-frequency background thread is
+    // therefore required (it is a plain `long`/volatile reader — no timers, no locks
+    // beyond what the queue already exposes, thread-affinity-safe).
+    private const long StallThresholdMs = 10_000;    // ~10s with no write while data is queued => fail loudly
+    private const int WatchdogIntervalMs = 1_000;    // cheap once-per-second cadence
+    private const int DropWindowSamples = 4;         // ~4s rolling window for drop-rate
+    private const long DropWindowMinFrames = 200;    // need >= ~3.3s of traffic before judging drop rate
+    private long _lastVideoWriteMs;
+    private long _videoDequeued;
+    private readonly long[] _dropRingDrops = new long[DropWindowSamples];
+    private readonly long[] _dropRingDeq = new long[DropWindowSamples];
+    private int _dropRingIndex;
+    private int _dropRingFilled;
+    private Thread? _watchdogThread;
 
     private readonly BoundedMediaQueue<VideoFramePacket> _videoQueue;
     private readonly BoundedMediaQueue<AudioDataPacket>? _audioQueue;
@@ -169,6 +188,13 @@ public class FfmpegProcessHost : IDisposable
         _isWritingActive = true;
         _disposed = false;
 
+        // (Re)initialize watchdog state for this session.
+        _videoConnected = false;
+        Volatile.Write(ref _lastVideoWriteMs, 0);
+        Volatile.Write(ref _videoDequeued, 0);
+        _dropRingIndex = 0;
+        _dropRingFilled = 0;
+
         _videoWorkerThread = new Thread(VideoWriterLoop)
         {
             Name = "Ffmpeg_VideoPipeWriter",
@@ -187,6 +213,14 @@ public class FfmpegProcessHost : IDisposable
             };
             _audioWorkerThread.Start();
         }
+
+        _watchdogThread = new Thread(WatchdogLoop)
+        {
+            Name = "Ffmpeg_Watchdog",
+            IsBackground = true,
+            Priority = ThreadPriority.Lowest
+        };
+        _watchdogThread.Start();
 
         return true;
     }
@@ -221,15 +255,22 @@ public class FfmpegProcessHost : IDisposable
             return;
         }
 
+        // Arm the watchdog only now so the (up to 8s) pipe-connect handshake can
+        // never count toward the stall threshold.
+        _videoConnected = true;
+        Interlocked.Exchange(ref _lastVideoWriteMs, Environment.TickCount64);
+
         while (!_disposed)
         {
             if (_videoQueue.TryDequeue(out var packet))
             {
+                Interlocked.Increment(ref _videoDequeued);
                 try
                 {
                     if (_videoPipe != null && _videoPipe.IsConnected)
                     {
                         _videoPipe.Write(packet.Buffer, 0, packet.Length);
+                        Interlocked.Exchange(ref _lastVideoWriteMs, Environment.TickCount64);
                     }
                     else
                     {
@@ -253,7 +294,7 @@ public class FfmpegProcessHost : IDisposable
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(packet.Buffer);
+                    LargeArrayPool.Shared.Return(packet.Buffer);
                 }
             }
             else
@@ -341,6 +382,76 @@ public class FfmpegProcessHost : IDisposable
                 _audioQueue.Wait(20);
             }
         }
+    }
+
+    private void WatchdogLoop()
+    {
+        try
+        {
+            while (!_disposed && _isWritingActive)
+            {
+                Thread.Sleep(WatchdogIntervalMs);
+                if (_disposed || !_isWritingActive) break;
+
+                CheckForStall();
+                CheckForDropRate(_dropRingIndex);
+
+                // Record the latest (dropped, dequeued) sample into the ring. Slot
+                // _dropRingIndex currently holds the sample from DropWindowSamples
+                // ticks ago, which CheckForDropRate used as its window baseline.
+                long drops = _videoQueue.DroppedCount;
+                long deq = Volatile.Read(ref _videoDequeued);
+                _dropRingDrops[_dropRingIndex] = drops;
+                _dropRingDeq[_dropRingIndex] = deq;
+                _dropRingIndex = (_dropRingIndex + 1) % DropWindowSamples;
+                if (_dropRingFilled < DropWindowSamples) _dropRingFilled++;
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[FFmpeg Watchdog Error] {ex.Message}");
+        }
+    }
+
+    private void CheckForStall()
+    {
+        if (!_videoConnected) return;
+        if (_videoQueue.Count == 0) return; // idle/quiet window is not a stall
+
+        long lastWrite = Volatile.Read(ref _lastVideoWriteMs);
+        long stalledMs = Environment.TickCount64 - lastWrite;
+        if (stalledMs > StallThresholdMs)
+        {
+            FailRecording(
+                $"FFmpeg output stalled (no data written for {stalledMs / 1000}s) — likely encoder/pipe hang.");
+        }
+    }
+
+    private void CheckForDropRate(int prevSlot)
+    {
+        if (_dropRingFilled < DropWindowSamples) return; // window not full yet
+
+        long dropsPrev = _dropRingDrops[prevSlot];
+        long deqPrev = _dropRingDeq[prevSlot];
+        long dropsNow = _videoQueue.DroppedCount;
+        long deqNow = Volatile.Read(ref _videoDequeued);
+
+        long dropsDelta = dropsNow - dropsPrev;
+        long framesDelta = (deqNow - deqPrev) + dropsDelta;
+        if (framesDelta < DropWindowMinFrames) return;    // not enough traffic to judge
+        if (dropsDelta * 100 < framesDelta) return;        // drop rate < 1%: acceptable transient
+
+        FailRecording(
+            $"FFmpeg recording dropping frames: {dropsDelta} of {framesDelta} frames (>1%) lost " +
+            $"over the last {(DropWindowSamples * WatchdogIntervalMs) / 1000}s — encoder/disk cannot " +
+            "keep up; earliest frames are being silently discarded.");
+    }
+
+    private void FailRecording(string error)
+    {
+        if (!_isWritingActive) return;
+        _isWritingActive = false;
+        SinkError?.Invoke(error);
     }
 
     public long Stop()
@@ -514,6 +625,12 @@ public class FfmpegProcessHost : IDisposable
 
         _videoQueue.CompleteAdding();
         _audioQueue?.CompleteAdding();
+
+        if (_watchdogThread != null && _watchdogThread.IsAlive)
+        {
+            _watchdogThread.Join(1500);
+        }
+        _watchdogThread = null;
 
         if (_videoWorkerThread != null && _videoWorkerThread.IsAlive)
         {

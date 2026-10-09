@@ -16,6 +16,8 @@ public class FfmpegPipeSink : IRecordingSink
     private bool _hasAudio;
     private volatile bool _disposed;
     private readonly object _lock = new();
+    private long _videoDropsBeforeFinalize;
+    private long _audioDropsBeforeFinalize;
 
     public event Action<string>? SinkError;
 
@@ -29,7 +31,7 @@ public class FfmpegPipeSink : IRecordingSink
             {
                 _hasAudio = format.Channels > 0 && format.SampleRate > 0;
 
-                _videoQueue = new BoundedMediaQueue<VideoFramePacket>(MaxQueuedVideoFrames, p => ArrayPool<byte>.Shared.Return(p.Buffer));
+                _videoQueue = new BoundedMediaQueue<VideoFramePacket>(MaxQueuedVideoFrames, p => LargeArrayPool.Shared.Return(p.Buffer));
                 
                 if (_hasAudio)
                 {
@@ -64,7 +66,7 @@ public class FfmpegPipeSink : IRecordingSink
         byte[] rented;
         try
         {
-            rented = ArrayPool<byte>.Shared.Rent(dataLength);
+            rented = LargeArrayPool.Shared.Rent(dataLength);
             fixed (byte* pDst = rented)
             {
                 Buffer.MemoryCopy((void*)pData, pDst, dataLength, dataLength);
@@ -110,6 +112,8 @@ public class FfmpegPipeSink : IRecordingSink
 
                 if (_host != null)
                 {
+                    _videoDropsBeforeFinalize = _videoQueue?.DroppedCount ?? 0;
+                    _audioDropsBeforeFinalize = _audioQueue?.DroppedCount ?? 0;
                     totalBytesWritten = _host.Stop();
                 }
             }
@@ -117,6 +121,33 @@ public class FfmpegPipeSink : IRecordingSink
             {
                 Cleanup();
             }
+        }
+    }
+
+    /// <summary>
+    /// Number of video frames discarded (drop-oldest) by the bounded queue since the
+    /// sink was last initialized. Reads the live queue while a session is active, and
+    /// the final snapshot value after cleanup.
+    /// </summary>
+    public long VideoFramesDropped
+    {
+        get
+        {
+            var q = _videoQueue;
+            return q != null ? q.DroppedCount : Interlocked.Read(ref _videoDropsBeforeFinalize);
+        }
+    }
+
+    /// <summary>
+    /// Number of audio chunks discarded (drop-oldest) by the bounded queue since the
+    /// sink was last initialized.
+    /// </summary>
+    public long AudioChunksDropped
+    {
+        get
+        {
+            var q = _audioQueue;
+            return q != null ? q.DroppedCount : Interlocked.Read(ref _audioDropsBeforeFinalize);
         }
     }
 

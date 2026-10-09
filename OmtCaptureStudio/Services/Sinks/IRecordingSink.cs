@@ -29,6 +29,17 @@ public interface IRecordingSink : IDisposable
     void FinalizeSink(out long totalBytesWritten);
 
     /// <summary>
+    /// Number of video frames the transport's internal queue discarded (drop-oldest,
+    /// encoder/disk backpressure) since the last Initialize.
+    /// </summary>
+    long VideoFramesDropped { get; }
+
+    /// <summary>
+    /// Number of audio chunks the transport's internal queue discarded since the last Initialize.
+    /// </summary>
+    long AudioChunksDropped { get; }
+
+    /// <summary>
     /// Raised when an asynchronous error occurs within the recording transport sink.
     /// </summary>
     event Action<string>? SinkError;

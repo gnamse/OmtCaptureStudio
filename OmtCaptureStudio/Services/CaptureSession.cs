@@ -25,6 +25,8 @@ public class CaptureSession : IDisposable
     public string? CurrentRecordingPath => _recorder.CurrentRecordingPath;
     public TimeSpan RecordingElapsedTime => _recorder.ElapsedTime;
     public long RecordingFramesWritten => _recorder.FramesWritten;
+    public long RecordingFramesDropped => _recorder.VideoFramesDropped;
+    public long RecordingAudioChunksDropped => _recorder.AudioChunksDropped;
 
     public bool IsAudioMonitoringEnabled
     {
@@ -249,6 +251,14 @@ public class CaptureSession : IDisposable
     public Task StopRecordingAsync()
     {
         return _recorder.StopRecordingAsync();
+    }
+
+    /// <summary>
+    /// Periodic low-disk protection sweep. Cheap; call from a UI tick loop while recording.
+    /// </summary>
+    public void CheckDiskSpaceAndProtect()
+    {
+        _recorder.CheckDiskSpaceAndProtect();
     }
 
     public void Dispose()

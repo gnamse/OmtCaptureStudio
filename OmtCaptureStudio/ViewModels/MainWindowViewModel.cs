@@ -748,6 +748,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     {
         if (_session.IsRecording)
         {
+            // Periodic low-disk protection (internally throttled to ~30s; cheap DriveInfo query).
+            _session.CheckDiskSpaceAndProtect();
+
             var elapsed = _session.RecordingElapsedTime;
             RecordDurationText = elapsed.ToString(@"hh\:mm\:ss");
 
