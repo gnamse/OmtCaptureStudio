@@ -96,8 +96,17 @@ public class FfmpegProcessHost : IDisposable
                 : "-c:a aac -b:a 320k ";
         }
 
+        // MP4/MOV are fragmented (-frag_keyframe+empty_moov) instead of a
+        // single moov-at-end (faststart). Rationale: a non-fragmented MP4
+        // streams mdat first and rewrites a multi-GB moov/index only at Stop,
+        // which (a) blows the finalize time budget on slow disks and (b) makes
+        // the whole file 100% unplayable if FFmpeg is killed/crashes mid-take.
+        // Fragmented output writes playable moof/mdat incrementally, so a mid-
+        // session crash still leaves a salvageable file and Stop finalizes in
+        // ~O(1). No faststart needed: the index is already online per fragment.
+        // MKV/TS are already crash-tolerant and are left untouched.
         string containerFlags = (config.ContainerFormat == OutputContainerFormat.MP4 || config.ContainerFormat == OutputContainerFormat.MOV)
-            ? "-movflags +faststart "
+            ? "-movflags +frag_keyframe+empty_moov "
             : "";
 
         string args = $"-nostdin -y " +
@@ -229,8 +238,7 @@ public class FfmpegProcessHost : IDisposable
                             _isWritingActive = false;
                             SinkError?.Invoke("FFmpeg video pipe disconnected unexpectedly.");
                         }
-                        ArrayPool<byte>.Shared.Return(packet.Buffer);
-                        break;
+                        break; // leave iteration via finally, which returns the buffer exactly once
                     }
                 }
                 catch (Exception ex)
@@ -241,8 +249,7 @@ public class FfmpegProcessHost : IDisposable
                         _isWritingActive = false;
                         SinkError?.Invoke($"FFmpeg video write error: {ex.Message}");
                     }
-                    ArrayPool<byte>.Shared.Return(packet.Buffer);
-                    break;
+                    break; // leave iteration via finally, which returns the buffer exactly once
                 }
                 finally
                 {
@@ -307,8 +314,7 @@ public class FfmpegProcessHost : IDisposable
                             _isWritingActive = false;
                             SinkError?.Invoke("FFmpeg audio pipe disconnected unexpectedly.");
                         }
-                        ArrayPool<byte>.Shared.Return(packet.Buffer);
-                        break;
+                        break; // leave iteration via finally, which returns the buffer exactly once
                     }
                 }
                 catch (Exception ex)
@@ -319,8 +325,7 @@ public class FfmpegProcessHost : IDisposable
                         _isWritingActive = false;
                         SinkError?.Invoke($"FFmpeg audio write error: {ex.Message}");
                     }
-                    ArrayPool<byte>.Shared.Return(packet.Buffer);
-                    break;
+                    break; // leave iteration via finally, which returns the buffer exactly once
                 }
                 finally
                 {
@@ -365,11 +370,24 @@ public class FfmpegProcessHost : IDisposable
         _videoPipe = null;
         _audioPipe = null;
 
-        // Wait for FFmpeg to finish writing file trailers and exit
+        // Wait for FFmpeg to finish writing file trailers and exit. The budget
+        // must scale with output size: a non-fragmented container rewrite can
+        // take arbitrarily long on a slow disk, but fragmented MP4/MOV finalize
+        // is ~O(1). Base of 15s plus ~100 MB/s of projected finalize work, capped
+        // at 180s so an enormous file on a slow disk is never killed at a fixed
+        // 30s while FFmpeg is still healthily flushing.
         bool killed = false;
         if (_ffmpegProcess != null && !_ffmpegProcess.HasExited)
         {
-            _ffmpegProcess.WaitForExit(30000);
+            long outputSize = !string.IsNullOrEmpty(_outputPath) && File.Exists(_outputPath)
+                ? new FileInfo(_outputPath).Length
+                : 0;
+            const long projectedFinalizeBytesPerSecond = 100L * 1024 * 1024; // ~100 MB/s
+            int finalizeBudgetMs = (int)Math.Min(
+                180_000L,
+                15_000L + (outputSize / projectedFinalizeBytesPerSecond) * 1000L);
+
+            _ffmpegProcess.WaitForExit(finalizeBudgetMs);
             if (!_ffmpegProcess.HasExited)
             {
                 try { _ffmpegProcess.Kill(); } catch { }
