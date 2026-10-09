@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services.Sinks;
@@ -20,9 +21,12 @@ public class StreamRecorderService : IDisposable
 
     private readonly IRecordingSink _sink;
     private readonly bool _ownsSink;
-    private bool _isRecording;
+    // volatile: read on the media/source threads (WriteVideoFrame/WriteAudioData, IsRecording,
+    // ElapsedTime) while written under _recordLock on the stop edge — a stale read could let a
+    // source thread call into the sink during FinalizeSink teardown.
+    private volatile bool _isRecording;
     private string? _currentRecordingPath;
-    private DateTime _recordStartTime;
+    private long _recordStartTimestamp;
     private long _framesWritten;
     private long _audioBytesWritten;
     private readonly object _recordLock = new();
@@ -30,7 +34,7 @@ public class StreamRecorderService : IDisposable
 
     public bool IsRecording => _isRecording;
     public string? CurrentRecordingPath => _currentRecordingPath;
-    public TimeSpan ElapsedTime => _isRecording ? DateTime.Now - _recordStartTime : TimeSpan.Zero;
+    public TimeSpan ElapsedTime => _isRecording ? Stopwatch.GetElapsedTime(_recordStartTimestamp) : TimeSpan.Zero;
     public long FramesWritten => _framesWritten;
     public long AudioBytesWritten => _audioBytesWritten;
     /// <summary>Frames the recording transport discarded (drop-oldest) since recording started.</summary>
@@ -143,7 +147,7 @@ public class StreamRecorderService : IDisposable
                     return false;
                 }
 
-                _recordStartTime = DateTime.Now;
+                _recordStartTimestamp = Stopwatch.GetTimestamp();
                 _framesWritten = 0;
                 _audioBytesWritten = 0;
                 _isRecording = true;
@@ -357,7 +361,7 @@ public class StreamRecorderService : IDisposable
             _isRecording = false;
 
             string path = _currentRecordingPath ?? string.Empty;
-            TimeSpan duration = DateTime.Now - _recordStartTime;
+            TimeSpan duration = Stopwatch.GetElapsedTime(_recordStartTimestamp);
 
             try
             {

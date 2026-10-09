@@ -61,7 +61,10 @@ public class FfmpegPipeSink : IRecordingSink
 
     public unsafe void WriteVideo(IntPtr pData, int dataLength)
     {
-        if (_disposed || pData == IntPtr.Zero || dataLength <= 0 || _videoQueue == null) return;
+        // Capture the queue ref into a local once: after the guard below, Cleanup() may null the
+        // field on FinalizeSink's stop edge — dereferencing the field a second time could fault.
+        var videoQueue = _videoQueue;
+        if (_disposed || videoQueue == null || pData == IntPtr.Zero || dataLength <= 0) return;
 
         byte[] rented;
         try
@@ -78,12 +81,24 @@ public class FfmpegPipeSink : IRecordingSink
             return;
         }
 
-        _videoQueue.Enqueue(new VideoFramePacket(rented, dataLength));
+        // Stop-edge: FinalizeSink may have run CompleteAdding()/Cleanup() while we copied. The
+        // queue's Enqueue already drops exactly-once (via the ArrayPool return callback) when it is
+        // adding-completed, but if the queue was disposed it may no longer accept items — so drop
+        // the rented buffer here (return exactly once) rather than enqueue into a torn-down sink.
+        // A Set() on a disposed signal or a lost rented buffer must never escape into the source loop.
+        if (_disposed)
+        {
+            LargeArrayPool.Shared.Return(rented);
+            return;
+        }
+
+        videoQueue.Enqueue(new VideoFramePacket(rented, dataLength));
     }
 
     public void WriteAudio(byte[] buffer, int offset, int count)
     {
-        if (!_hasAudio || _disposed || buffer == null || count <= 0 || _audioQueue == null) return;
+        var audioQueue = _audioQueue;
+        if (!_hasAudio || _disposed || audioQueue == null || buffer == null || count <= 0) return;
 
         byte[] rented;
         try
@@ -97,7 +112,14 @@ public class FfmpegPipeSink : IRecordingSink
             return;
         }
 
-        _audioQueue.Enqueue(new AudioDataPacket(rented, count));
+        // Same stop-edge guard as WriteVideo — drop the rented buffer exactly once.
+        if (_disposed)
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+            return;
+        }
+
+        audioQueue.Enqueue(new AudioDataPacket(rented, count));
     }
 
     public void FinalizeSink(out long totalBytesWritten)

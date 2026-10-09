@@ -47,11 +47,27 @@ public class SyntheticPatternSource : IMediaSource
     public void Disconnect()
     {
         _isRunning = false;
-        if (_thread != null && _thread.IsAlive)
+        var thread = _thread;
+        if (thread != null && thread.IsAlive)
         {
-            _thread.Join(300);
-            _thread = null;
+            // Wait for the loop to observe _isRunning == false and fully unwind
+            // (free GCHandles, return from GenerateLoop) before considering it
+            // dead. A single Join(300) can time out under load while the old
+            // loop is still finishing a frame; nulling _thread regardless would
+            // let a rapid reconnect start a SECOND thread that re-pins fresh
+            // video/audio buffers while the old one is still exiting.
+            // Retry Join in small increments up to a bounded budget. The loop
+            // always exits on _isRunning == false, so this budget is only a
+            // safety upper bound.
+            const int joinIncrementMs = 50;
+            const int joinBudgetMs = 5000;
+            int retries = joinBudgetMs / joinIncrementMs;
+            while (thread.IsAlive && retries-- > 0)
+            {
+                thread.Join(joinIncrementMs);
+            }
         }
+        _thread = null;
         StatusChanged?.Invoke("Disconnected");
     }
 
