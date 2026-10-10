@@ -122,6 +122,7 @@ class Program
 
         Console.WriteLine("\n[Step 0.6] Verifying AudioClockResampler (drift correction + passthrough)...");
         TestAudioClockResampler();
+        TestDesktopCapture();
 
         Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
         using (var vmSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(new NullRecordingSink())))
@@ -663,6 +664,76 @@ class Program
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> AudioClockResampler drift correction and lockstep verified!");
+        Console.ResetColor();
+    }
+
+    static void TestDesktopCapture()
+    {
+        Console.WriteLine("\n[Step 0.65] Verifying Host Desktop Capture (capture + OMT round-trip)...");
+
+        // 1. Capture sanity: dimensions + valid pinned BGRA buffer.
+        using (var capturer = new DesktopFrameCapturer())
+        {
+            if (capturer.Width <= 0 || capturer.Height <= 0)
+                throw new Exception($"DesktopFrameCapturer reported invalid bounds: {capturer.Width}x{capturer.Height}");
+            if (capturer.Stride != capturer.Width * 4)
+                throw new Exception($"DesktopFrameCapturer stride mismatch: {capturer.Stride} vs {capturer.Width * 4}");
+            if (capturer.BufferPtr == IntPtr.Zero)
+                throw new Exception("DesktopFrameCapturer buffer pointer is null.");
+
+            int frames = 0;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (frames < 2 && sw.ElapsedMilliseconds < 5000)
+            {
+                if (capturer.TryCaptureFrame()) frames++;
+                Thread.Sleep(16);
+            }
+            if (frames == 0)
+                throw new Exception("DesktopFrameCapturer produced no frames in 5s.");
+
+            Console.WriteLine($" -> Captured {frames} frame(s) at {capturer.Width}x{capturer.Height}, stride {capturer.Stride}");
+        }
+
+        // 2. OMT round-trip: broadcast the desktop, discover it, receive video frames.
+        string sourceName = "OMT_Automated_Desktop_Source";
+        using var generator = new OmtDesktopCaptureGenerator(sourceName, fps: 30);
+        generator.Start();
+        Console.WriteLine($" -> Broadcasting desktop as OMT source '{sourceName}' at {generator.Address}");
+
+        // Allow the source to bind and appear in discovery.
+        Thread.Sleep(1500);
+
+        using var discovery = new OmtDiscoveryService();
+        discovery.RefreshNow();
+        Thread.Sleep(1200);
+
+        var disc = libomtnet.OMTDiscovery.GetInstance();
+        string[] addrs = disc.GetAddresses() ?? Array.Empty<string>();
+        string? target = addrs.FirstOrDefault(a => a.Contains(sourceName, StringComparison.OrdinalIgnoreCase));
+        if (target == null)
+            throw new Exception($"Desktop OMT source '{sourceName}' not found via discovery. Addresses: {string.Join(", ", addrs)}");
+
+        using var session = new CaptureSession();
+        long videoFrames = 0;
+        session.VideoFrameAvailable += (p, len, w, h, s, fps, ts) => Interlocked.Increment(ref videoFrames);
+        session.Connect(target);
+
+        int wait = 0;
+        while (videoFrames < 5 && wait < 60)
+        {
+            Thread.Sleep(100);
+            wait++;
+        }
+        if (videoFrames < 5)
+            throw new Exception($"Received only {videoFrames} video frames from desktop OMT source in 6s.");
+
+        Console.WriteLine($" -> Received {videoFrames} desktop frames via OMT round-trip at {session.CurrentFormat.Width}x{session.CurrentFormat.Height}");
+
+        session.Disconnect();
+        generator.Stop();
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> Host desktop capture (capture + OMT round-trip) verified!");
         Console.ResetColor();
     }
 
