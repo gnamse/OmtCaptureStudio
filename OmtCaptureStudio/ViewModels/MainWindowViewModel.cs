@@ -37,6 +37,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private readonly DispatcherTimer? _recordUiTimer;
     private readonly bool _ownsDependencies;
 
+    private OmtDesktopCaptureGenerator? _desktopCapture;
+
     private long _lastHudUpdateTick;
     private int _lastWidth;
     private int _lastHeight;
@@ -108,6 +110,16 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private string _testSignalAutomationName = "Enable Test Signal Generator";
+
+    // Host desktop capture broadcaster
+    [ObservableProperty]
+    private bool _isDesktopCaptureActive;
+
+    [ObservableProperty]
+    private IBrush _desktopCaptureBackground = TestSignalInactiveBrush;
+
+    [ObservableProperty]
+    private string _desktopCaptureAutomationName = "Enable Host Desktop Capture";
 
     // 6. Viewport HUD & Overlay
     [ObservableProperty]
@@ -436,6 +448,46 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             AppLogger.LogError($"Error toggling test signal: {ex.Message}", ex);
             StatusText = $"Test signal error: {ex.Message}";
             OnPropertyChanged(nameof(IsTestSignalActive));
+        }
+    }
+
+    [RelayCommand(AllowConcurrentExecutions = false)]
+    private async Task ToggleDesktopCaptureAsync()
+    {
+        await SetDesktopCaptureActiveAsync(!IsDesktopCaptureActive);
+    }
+
+    public async Task SetDesktopCaptureActiveAsync(bool active)
+    {
+        try
+        {
+            if (active)
+            {
+                _desktopCapture ??= new OmtDesktopCaptureGenerator();
+                _desktopCapture.Start();
+                IsDesktopCaptureActive = true;
+                DesktopCaptureBackground = TestSignalActiveBrush;
+                DesktopCaptureAutomationName = "Disable Host Desktop Capture";
+                StatusText = "Broadcasting host desktop over OMT — select it in the Source dropdown and Connect to record.";
+                AppLogger.LogInfo($"Started host desktop capture: {_desktopCapture.Address}");
+            }
+            else
+            {
+                _desktopCapture?.Stop();
+                IsDesktopCaptureActive = false;
+                DesktopCaptureBackground = TestSignalInactiveBrush;
+                DesktopCaptureAutomationName = "Enable Host Desktop Capture";
+                StatusText = "Desktop capture stopped.";
+                AppLogger.LogInfo("Stopped host desktop capture.");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Error toggling desktop capture: {ex.Message}", ex);
+            IsDesktopCaptureActive = false;
+            DesktopCaptureBackground = TestSignalInactiveBrush;
+            DesktopCaptureAutomationName = "Enable Host Desktop Capture";
+            StatusText = $"Desktop capture error: {ex.Message}";
         }
     }
 
@@ -814,6 +866,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         AudioLevelsUpdated = null;
         MetersResetRequested = null;
         RequestClose = null;
+
+        _desktopCapture?.Stop();
 
         if (_ownsDependencies)
         {

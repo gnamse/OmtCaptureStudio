@@ -127,6 +127,14 @@
                                   AutomationProperties.Name="{CompiledBinding TestSignalAutomationName}"
                                   ToolTip.Tip="Toggle internal SMPTE color bars test generator"
                                   Command="{CompiledBinding ToggleTestSignalCommand}"/>
+                    <ToggleButton x:Name="BtnDesktopCapture" Content="Desktop Capture" Padding="10,5" MinHeight="30" Margin="8,0,0,0"
+                                  IsChecked="{CompiledBinding IsDesktopCaptureActive, Mode=OneWay}"
+                                  Background="{CompiledBinding DesktopCaptureBackground}"
+                                  Foreground="{CompiledBinding TestSignalForeground}"
+                                  BorderBrush="{DynamicResource StudioAccentPrimary}" BorderThickness="1"
+                                  AutomationProperties.Name="{CompiledBinding DesktopCaptureAutomationName}"
+                                  ToolTip.Tip="Broadcast the host desktop over OMT"
+                                  Command="{CompiledBinding ToggleDesktopCaptureCommand}"/>
                 </StackPanel>
             </Grid>
         </Border>
