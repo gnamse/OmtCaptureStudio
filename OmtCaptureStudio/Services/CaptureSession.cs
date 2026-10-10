@@ -16,6 +16,8 @@ public class CaptureSession : IDisposable
     private readonly StreamRecorderService _recorder;
     private readonly bool _ownsDependencies;
     private readonly object _stateLock = new();
+    private readonly FrameRateMeter _fpsMeter = new();
+    private readonly AudioClockResampler _audioResampler = new();
 
     public StreamFormat CurrentFormat { get; private set; } = StreamFormat.Empty;
     public bool IsConnected => _currentSource != null && _currentSource.IsConnected;
@@ -82,7 +84,11 @@ public class CaptureSession : IDisposable
         {
             if (_recorder.IsRecording)
             {
-                _recorder.WriteAudioData(buffer, 0, count);
+                byte[] outBuf = _audioResampler.Process(buffer, count, out int outCount);
+                if (outCount > 0)
+                {
+                    _recorder.WriteAudioData(outBuf, 0, outCount);
+                }
             }
         };
 
@@ -112,6 +118,7 @@ public class CaptureSession : IDisposable
         lock (_stateLock)
         {
             CurrentFormat = StreamFormat.Empty;
+            _fpsMeter.Reset();
             _currentSource = source;
 
             _currentSource.VideoFrameReceived += OnSourceVideoFrameReceived;
@@ -127,6 +134,10 @@ public class CaptureSession : IDisposable
 
     private void OnSourceVideoFrameReceived(IntPtr pData, int length, int width, int height, int stride, double fps, long timestamp)
     {
+        // Track the true delivery rate so recording can stamp video at its actual
+        // rate (the source-reported "fps" is a nominal maximum, e.g. vMix's "30").
+        _fpsMeter.OnVideoFrame();
+
         lock (_stateLock)
         {
             if (CurrentFormat.Width != width || CurrentFormat.Height != height || Math.Abs(CurrentFormat.FrameRate - fps) > 0.05)
@@ -147,6 +158,7 @@ public class CaptureSession : IDisposable
         // 2. Forward to recorder if active
         if (_recorder.IsRecording)
         {
+            _audioResampler.OnVideoFrame();
             _recorder.WriteVideoFrame(pData, length);
         }
     }
@@ -234,7 +246,25 @@ public class CaptureSession : IDisposable
             return false;
         }
 
-        return _recorder.StartRecording(config, fmt);
+        // Stamp video at the measured TRUE delivery rate, not the source-reported
+        // nominal maximum (vMix's "30" actually delivers ~29.2 fps). Stamping at the
+        // nominal rate is what makes the video track play fast and drift from the
+        // audio. Fall back to the reported rate only if no reliable measurement yet.
+        double effectiveFps = _fpsMeter.HasReliableEstimate ? _fpsMeter.Fps : fmt.FrameRate;
+        if (effectiveFps <= 1.0) effectiveFps = fmt.FrameRate;
+
+        AppLogger.LogInfo(
+            $"Recording A/V clock: reported {fmt.FrameRate:F2} fps, measured {_fpsMeter.Fps:F2} fps, " +
+            $"stamping video at {effectiveFps:F2} fps.");
+
+        // Arm the audio resampler BEFORE recording flips active. The media thread only
+        // touches the resampler while IsRecording is true (guarded in the video/audio
+        // callbacks), so this reset on the UI thread is race-free and published to the
+        // media thread by the volatile IsRecording write inside StartRecording.
+        _audioResampler.Reset(fmt.SampleRate, effectiveFps, fmt.Channels);
+
+        var effectiveFormat = fmt with { FrameRate = effectiveFps };
+        return _recorder.StartRecording(config, effectiveFormat);
     }
 
     /// <summary>

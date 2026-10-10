@@ -44,3 +44,4 @@ CONTEXT.md
 tools/
 ffmpeg.exe
 *.mp4
+/scratch_audio
