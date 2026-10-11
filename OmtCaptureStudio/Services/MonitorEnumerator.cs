@@ -29,11 +29,10 @@ public static class MonitorEnumerator
                 var bounds = output.Description.DesktopCoordinates;
                 int width = bounds.Right - bounds.Left;
                 int height = bounds.Bottom - bounds.Top;
-                string deviceName = output.Description.DeviceName;
                 targets.Add(new CaptureTarget
                 {
                     Kind = CaptureTargetKind.Monitor,
-                    DisplayName = $"Monitor {i + 1} ({deviceName})",
+                    DisplayName = $"Screen {i + 1} · {width}×{height}",
                     MonitorIndex = i
                 });
             }

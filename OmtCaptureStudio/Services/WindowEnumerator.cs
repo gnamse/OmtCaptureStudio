@@ -60,7 +60,7 @@ public static class WindowEnumerator
         {
             Kind = CaptureTargetKind.Window,
             WindowHandle = hWnd,
-            DisplayName = sb.ToString(),
+            DisplayName = $"Window: {sb}",
         });
 
         return true;

@@ -127,14 +127,16 @@
                                   AutomationProperties.Name="{CompiledBinding TestSignalAutomationName}"
                                   ToolTip.Tip="Toggle internal SMPTE color bars test generator"
                                   Command="{CompiledBinding ToggleTestSignalCommand}"/>
-                    <ComboBox x:Name="CmbCaptureTarget" Width="200" Margin="8,0,4,0" MinHeight="30" VerticalAlignment="Center"
+                    <TextBlock Text="Capture:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="12,0,4,0"/>
+                    <ComboBox x:Name="CmbCaptureTarget" Width="250" Margin="0,0,4,0" MinHeight="30" VerticalAlignment="Center"
                               ItemsSource="{CompiledBinding CaptureTargets}"
                               SelectedItem="{CompiledBinding SelectedCaptureTarget, Mode=TwoWay}"
+                              IsDropDownOpen="{CompiledBinding IsCaptureTargetDropDownOpen, Mode=TwoWay}"
                               AutomationProperties.Name="Host capture target"
-                              ToolTip.Tip="Select which monitor or window to broadcast">
+                              ToolTip.Tip="Select which screen or window to broadcast">
                         <ComboBox.ItemTemplate>
                             <DataTemplate x:DataType="models:CaptureTarget">
-                                <TextBlock Text="{CompiledBinding DisplayName}" />
+                                <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis"/>
                             </DataTemplate>
                         </ComboBox.ItemTemplate>
                     </ComboBox>
@@ -144,13 +146,13 @@
                             Command="{CompiledBinding RefreshCaptureTargetsCommand}">
                         <Path Data="{DynamicResource IconRefresh}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center"/>
                     </Button>
-                    <ToggleButton x:Name="BtnDesktopCapture" Content="Desktop Capture" Padding="10,5" MinHeight="30" Margin="8,0,0,0"
+                    <ToggleButton x:Name="BtnDesktopCapture" Content="Broadcast" Padding="10,5" MinHeight="30" Margin="8,0,0,0"
                                   IsChecked="{CompiledBinding IsDesktopCaptureActive, Mode=OneWay}"
                                   Background="{CompiledBinding DesktopCaptureBackground}"
                                   Foreground="{CompiledBinding TestSignalForeground}"
                                   BorderBrush="{DynamicResource StudioAccentPrimary}" BorderThickness="1"
                                   AutomationProperties.Name="{CompiledBinding DesktopCaptureAutomationName}"
-                                  ToolTip.Tip="Broadcast the host desktop over OMT"
+                                  ToolTip.Tip="Broadcast the selected screen or window over OMT"
                                   Command="{CompiledBinding ToggleDesktopCaptureCommand}"/>
                 </StackPanel>
             </Grid>

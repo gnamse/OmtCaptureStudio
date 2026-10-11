@@ -13,6 +13,8 @@ public enum CaptureTargetKind
 public sealed record CaptureTarget
 {
     public CaptureTargetKind Kind { get; init; }
+
+    /// <summary>Friendly name: monitor "Screen 1 · 1920×1080"; window its title.</summary>
     public string DisplayName { get; init; } = "";
 
     /// <summary>For <see cref="CaptureTargetKind.Monitor"/>: the DXGI output index.</summary>

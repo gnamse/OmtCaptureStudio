@@ -119,7 +119,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private IBrush _desktopCaptureBackground = TestSignalInactiveBrush;
 
     [ObservableProperty]
-    private string _desktopCaptureAutomationName = "Enable Host Desktop Capture";
+    private string _desktopCaptureAutomationName = "Enable Host Broadcast";
 
     // Host capture target selection
     [ObservableProperty]
@@ -127,6 +127,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private CaptureTarget? _selectedCaptureTarget;
+
+    [ObservableProperty]
+    private bool _isCaptureTargetDropDownOpen;
 
     // 6. Viewport HUD & Overlay
     [ObservableProperty]
@@ -267,6 +270,17 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
         HookEvents();
         _discoveryService.Start();
+
+        // Seed the capture-target picker so it's populated before the user touches it.
+        // Monitor enumeration creates a D3D11 device, so it's guarded for headless/no-GPU.
+        try
+        {
+            PopulateCaptureTargets();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Could not enumerate capture targets at startup: {ex.Message}");
+        }
     }
 
     private void HookEvents()
@@ -308,6 +322,16 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         SelectedSourceToolTip = value != null
             ? $"{value.DisplayName}\nAddress: {value.Address}"
             : null;
+    }
+
+    partial void OnIsCaptureTargetDropDownOpenChanged(bool value)
+    {
+        // Refresh the window list every time the picker opens (windows come and go);
+        // monitors are static but re-enumerating is cheap and keeps the list current.
+        if (value)
+        {
+            try { PopulateCaptureTargets(); } catch { /* headless / no-desktop */ }
+        }
     }
 
     #endregion
@@ -484,8 +508,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 _desktopCapture.Start();
                 IsDesktopCaptureActive = true;
                 DesktopCaptureBackground = TestSignalActiveBrush;
-                DesktopCaptureAutomationName = "Disable Host Desktop Capture";
-                StatusText = "Broadcasting host desktop over OMT — select it in the Source dropdown and Connect to record.";
+                DesktopCaptureAutomationName = "Disable Host Broadcast";
+                StatusText = "Broadcasting host capture over OMT — select it in the Source dropdown and Connect to record.";
                 AppLogger.LogInfo($"Started host desktop capture: {_desktopCapture.Address}");
             }
             else
@@ -494,8 +518,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 _desktopCapture = null;
                 IsDesktopCaptureActive = false;
                 DesktopCaptureBackground = TestSignalInactiveBrush;
-                DesktopCaptureAutomationName = "Enable Host Desktop Capture";
-                StatusText = "Desktop capture stopped.";
+                DesktopCaptureAutomationName = "Enable Host Broadcast";
+                StatusText = "Host capture stopped.";
                 AppLogger.LogInfo("Stopped host desktop capture.");
             }
         }
@@ -504,8 +528,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             AppLogger.LogError($"Error toggling desktop capture: {ex.Message}", ex);
             IsDesktopCaptureActive = false;
             DesktopCaptureBackground = TestSignalInactiveBrush;
-            DesktopCaptureAutomationName = "Enable Host Desktop Capture";
-            StatusText = $"Desktop capture error: {ex.Message}";
+            DesktopCaptureAutomationName = "Enable Host Broadcast";
+            StatusText = $"Host capture error: {ex.Message}";
         }
     }
 
