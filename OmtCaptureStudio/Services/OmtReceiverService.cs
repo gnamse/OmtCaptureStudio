@@ -100,12 +100,18 @@ public class OmtReceiverService : IDisposable
         int lastChannels = 0;
         int lastSampleRate = 0;
 
-        while (_isRunning && _receiver != null)
+        while (_isRunning)
         {
+            // Capture a stable local reference once per iteration. Disconnect() may null the
+            // _receiver field from another thread mid-iteration (after Join() times out), and
+            // dereferencing the field again below would NRE. The local cannot be invalidated.
+            OMTReceive? receiver = _receiver;
+            if (receiver == null) break;
+
             try
             {
                 // Receive Video or Audio with a 50ms timeout
-                if (_receiver.Receive(OMTFrameType.Video | OMTFrameType.Audio, 50, ref frame))
+                if (receiver.Receive(OMTFrameType.Video | OMTFrameType.Audio, 50, ref frame))
                 {
                     if (frame.Type == OMTFrameType.Video && frame.Data != IntPtr.Zero && frame.DataLength > 0)
                     {
@@ -145,14 +151,14 @@ public class OmtReceiverService : IDisposable
                 {
                     lastStatsTime = DateTime.UtcNow;
 
-                    var vStats = _receiver.GetVideoStatistics();
-                    var aStats = _receiver.GetAudioStatistics();
+                    var vStats = receiver.GetVideoStatistics();
+                    var aStats = receiver.GetAudioStatistics();
 
                     double mbps = (vStats.BytesReceivedSinceLast + aStats.BytesReceivedSinceLast) * 8.0 / 1_000_000.0;
 
                     var telemetry = new StreamTelemetry
                     {
-                        IsConnected = _receiver.IsConnected(),
+                        IsConnected = receiver.IsConnected(),
                         Width = lastWidth,
                         Height = lastHeight,
                         FrameRate = lastFps,

@@ -124,6 +124,7 @@ class Program
         TestAudioClockResampler();
         TestDesktopCapture();
         TestCaptureTargets();
+        TestReceiverServiceTelemetry();
 
         Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
         using (var vmSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(new NullRecordingSink())))
@@ -793,6 +794,74 @@ class Program
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> Capture target enumeration, window capture & factory mapping verified!");
+        Console.ResetColor();
+    }
+
+    /// <summary>
+    /// Exercises OmtReceiverService end-to-end: connect to a live OMT source, receive
+    /// video frames and at least one telemetry tick (which calls
+    /// GetVideoStatistics/GetAudioStatistics/IsConnected — the line that NRE'd when
+    /// _receiver was dereferenced mid-disconnect), then disconnect and reconnect.
+    /// </summary>
+    static void TestReceiverServiceTelemetry()
+    {
+        Console.WriteLine("\n[Step 0.71] Verifying OmtReceiverService telemetry + reconnect safety...");
+
+        using var generator = new OmtTestPatternGenerator("OMT_Automated_Receiver_Service_Source");
+        generator.Start();
+        Thread.Sleep(1200); // allow sender to bind
+
+        string target = generator.Url ?? generator.Address ?? "OMT_Automated_Receiver_Service_Source";
+
+        using var receiver = new OmtReceiverService();
+
+        long videoFrames = 0;
+        long telemetryTicks = 0;
+        string? error = null;
+        receiver.VideoFrameReceived += (p, len, w, h, s, fps, ts) => Interlocked.Increment(ref videoFrames);
+        receiver.TelemetryUpdated += t => Interlocked.Increment(ref telemetryTicks);
+        receiver.ErrorOccurred += e => error = e;
+
+        receiver.Connect(target);
+
+        // Wait for frames AND at least one telemetry tick (telemetry updates once per second).
+        int wait = 0;
+        while ((videoFrames < 5 || telemetryTicks < 1) && wait < 50)
+        {
+            Thread.Sleep(100);
+            wait++;
+        }
+
+        if (videoFrames < 5)
+            throw new Exception($"OmtReceiverService received only {videoFrames} video frames.");
+        if (telemetryTicks < 1)
+            throw new Exception("OmtReceiverService never emitted telemetry (GetVideoStatistics path not reached).");
+
+        Console.WriteLine($" -> Received {videoFrames} frames and {telemetryTicks} telemetry tick(s) at {receiver.CurrentAddress}");
+
+        // Disconnect and immediately reconnect to exercise the reconnect path that raced _receiver.
+        receiver.Disconnect();
+        if (receiver.IsConnected)
+            throw new Exception("OmtReceiverService.IsConnected should be false after Disconnect.");
+
+        receiver.Connect(target);
+        int wait2 = 0;
+        while (videoFrames < 8 && wait2 < 50)
+        {
+            Thread.Sleep(100);
+            wait2++;
+        }
+        if (videoFrames < 8)
+            throw new Exception($"OmtReceiverService did not resume receiving after reconnect (only {videoFrames} frames).");
+        if (error != null)
+            throw new Exception($"OmtReceiverService reported error: {error}");
+
+        Console.WriteLine($" -> Reconnected and resumed; total {videoFrames} frames, no errors.");
+
+        receiver.Disconnect();
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> OmtReceiverService telemetry + reconnect safety verified!");
         Console.ResetColor();
     }
 
