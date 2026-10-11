@@ -11,8 +11,9 @@ namespace OmtCaptureStudio.Services;
 /// into a reusable pinned BGRA buffer (tight stride = width * 4) suitable for OMTSend.
 /// Single-threaded: <see cref="TryCaptureFrame"/> is called from one sender thread.
 /// </summary>
-public sealed class DesktopFrameCapturer : IDisposable
+public sealed class DesktopFrameCapturer : IFrameSource
 {
+    private readonly int _monitorIndex;
     private readonly ID3D11Device _device;
     private ID3D11Texture2D? _staging;
     private IDXGIOutputDuplication? _duplication;
@@ -26,8 +27,10 @@ public sealed class DesktopFrameCapturer : IDisposable
     public int Stride => Width * 4;
     public IntPtr BufferPtr => _bufferHandle.IsAllocated ? _bufferHandle.AddrOfPinnedObject() : IntPtr.Zero;
 
-    public DesktopFrameCapturer()
+    public DesktopFrameCapturer(int monitorIndex = 0)
     {
+        _monitorIndex = monitorIndex;
+
         // Hardware device with BGRA support is required for Desktop Duplication.
         _device = D3D11.D3D11CreateDevice(
             DriverType.Hardware,
@@ -36,10 +39,10 @@ public sealed class DesktopFrameCapturer : IDisposable
 
         using IDXGIDevice dxgiDevice = _device.QueryInterface<IDXGIDevice>();
         using IDXGIAdapter adapter = dxgiDevice.GetAdapter();
-        var enumResult = adapter.EnumOutputs(0, out IDXGIOutput output); // primary monitor (v1)
+        var enumResult = adapter.EnumOutputs((uint)_monitorIndex, out IDXGIOutput output);
         if (enumResult.Failure)
         {
-            throw new InvalidOperationException("Desktop capture: failed to enumerate the primary monitor output.");
+            throw new InvalidOperationException($"Desktop capture: monitor index {_monitorIndex} not found.");
         }
 
         using (output)
