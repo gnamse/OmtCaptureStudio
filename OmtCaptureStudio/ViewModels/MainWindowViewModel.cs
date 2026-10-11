@@ -35,9 +35,18 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private readonly CaptureSession _session;
     private readonly OmtDiscoveryService _discoveryService;
     private readonly DispatcherTimer? _recordUiTimer;
+    private readonly DispatcherTimer? _captureTargetsTimer;
     private readonly bool _ownsDependencies;
 
     private OmtDesktopCaptureGenerator? _desktopCapture;
+
+    // The target currently being broadcast, so live tracking can stop the broadcast if the
+    // window it is capturing closes.
+    private CaptureTarget? _activeCaptureTarget;
+
+    // Monitors are effectively static (DXGI enumeration needs a D3D11 device) — cache them
+    // and refresh only the window list on the live-tracking timer.
+    private IReadOnlyList<CaptureTarget> _cachedMonitors = Array.Empty<CaptureTarget>();
 
     private long _lastHudUpdateTick;
     private int _lastWidth;
@@ -281,6 +290,19 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             AppLogger.LogError($"Could not enumerate capture targets at startup: {ex.Message}");
         }
+
+        // Live window tracking: windows open and close constantly, so re-enumerate the window
+        // list periodically (cheap EnumWindows; monitors stay cached). Guarded for headless.
+        try
+        {
+            _captureTargetsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _captureTargetsTimer.Tick += CaptureTargetsTimer_Tick;
+            _captureTargetsTimer.Start();
+        }
+        catch
+        {
+            // Headless testing environment without Avalonia dispatcher
+        }
     }
 
     private void HookEvents()
@@ -506,6 +528,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
                 _desktopCapture = new OmtDesktopCaptureGenerator(source, sourceName: "OmtCaptureStudio_DesktopCapture", fps: 30);
                 _desktopCapture.Start();
+                _activeCaptureTarget = target;
                 IsDesktopCaptureActive = true;
                 DesktopCaptureBackground = TestSignalActiveBrush;
                 DesktopCaptureAutomationName = "Disable Host Broadcast";
@@ -516,6 +539,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             {
                 _desktopCapture?.Stop();
                 _desktopCapture = null;
+                _activeCaptureTarget = null;
                 IsDesktopCaptureActive = false;
                 DesktopCaptureBackground = TestSignalInactiveBrush;
                 DesktopCaptureAutomationName = "Enable Host Broadcast";
@@ -535,8 +559,14 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private void PopulateCaptureTargets()
     {
-        var list = new List<CaptureTarget>();
-        list.AddRange(MonitorEnumerator.Enumerate());
+        // Monitors are cached after the first successful DXGI enumeration (it spins up a
+        // D3D11 device); only refresh them when the cache is empty.
+        if (_cachedMonitors.Count == 0)
+        {
+            _cachedMonitors = MonitorEnumerator.Enumerate();
+        }
+
+        var list = new List<CaptureTarget>(_cachedMonitors);
         list.AddRange(WindowEnumerator.Enumerate());
         CaptureTargets = list;
 
@@ -546,6 +576,82 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                            t.WindowHandle == SelectedCaptureTarget.WindowHandle))
         {
             SelectedCaptureTarget = list.FirstOrDefault();
+        }
+    }
+
+    /// <summary>
+    /// Re-enumerates only the window list (monitors stay cached) and merges it into the
+    /// current targets, preserving the user's selection. Skips the update when nothing
+    /// changed, so we don't churn the bound collection every tick.
+    /// </summary>
+    private void RefreshWindowTargets()
+    {
+        var windows = WindowEnumerator.Enumerate();
+
+        // Preserve current selection identity across the refresh.
+        var previous = SelectedCaptureTarget;
+
+        var list = new List<CaptureTarget>(_cachedMonitors.Count + windows.Count);
+        list.AddRange(_cachedMonitors);
+        list.AddRange(windows);
+
+        if (TargetListsEqual(CaptureTargets, list))
+        {
+            return;
+        }
+
+        // If the selected target was a window that has since closed, drop the selection.
+        CaptureTargets = list;
+
+        if (previous != null)
+        {
+            var match = list.FirstOrDefault(t => t.Kind == previous.Kind &&
+                                                 t.MonitorIndex == previous.MonitorIndex &&
+                                                 t.WindowHandle == previous.WindowHandle);
+            SelectedCaptureTarget = match; // null when the selected window closed
+        }
+        else
+        {
+            SelectedCaptureTarget = list.FirstOrDefault();
+        }
+
+        // If we are broadcasting a window that has since closed, stop cleanly rather than
+        // streaming a stale/black frame captured from a dead handle.
+        if (_activeCaptureTarget is { Kind: CaptureTargetKind.Window } active &&
+            !list.Any(t => t.Kind == active.Kind && t.WindowHandle == active.WindowHandle))
+        {
+            _ = SetDesktopCaptureActiveAsync(false);
+            StatusText = "Host broadcast stopped: the captured window was closed.";
+        }
+    }
+
+    private static bool TargetListsEqual(IReadOnlyList<CaptureTarget> a, IReadOnlyList<CaptureTarget> b)
+    {
+        if (ReferenceEquals(a, b)) return true;
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+        {
+            if (a[i].Kind != b[i].Kind ||
+                a[i].MonitorIndex != b[i].MonitorIndex ||
+                a[i].WindowHandle != b[i].WindowHandle ||
+                !string.Equals(a[i].DisplayName, b[i].DisplayName, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void CaptureTargetsTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_disposed) return;
+        try
+        {
+            RefreshWindowTargets();
+        }
+        catch
+        {
+            // Enumeration failure (e.g. session teardown) must never crash the UI thread.
         }
     }
 
@@ -931,6 +1037,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         if (_recordUiTimer != null)
         {
             _recordUiTimer.Tick -= RecordUiTimer_Tick;
+        }
+        _captureTargetsTimer?.Stop();
+        if (_captureTargetsTimer != null)
+        {
+            _captureTargetsTimer.Tick -= CaptureTargetsTimer_Tick;
         }
         UnhookEvents();
         PickFolderAsync = null;
