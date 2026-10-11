@@ -767,7 +767,10 @@ class Program
 
             if (captured)
             {
-                Console.WriteLine($" -> Captured top window '{windows[0].DisplayName}' at {wc.Width}x{wc.Height}, stride {wc.Stride}");
+                // A hard assert here would be flaky (the top window may legitimately be black),
+                // so report it. Non-black proves PrintWindow or its screen-region fallback worked.
+                bool nonBlack = IsBufferNonBlack(wc.BufferPtr, wc.Stride * wc.Height);
+                Console.WriteLine($" -> Captured top window '{windows[0].DisplayName}' at {wc.Width}x{wc.Height}, stride {wc.Stride} ({(nonBlack ? "non-black" : "[WARN] all-black")})");
             }
             else
             {
@@ -858,11 +861,44 @@ class Program
 
         Console.WriteLine($" -> Reconnected and resumed; total {videoFrames} frames, no errors.");
 
+        // Rapid connect/disconnect churn: each cycle hands a fresh receiver to a fresh loop
+        // and the previous loop must dispose its own instance after exiting. Exercises the
+        // disposal-ownership + identity-check fix (no use-after-dispose, no leaked handle).
+        for (int cycle = 0; cycle < 5; cycle++)
+        {
+            receiver.Disconnect();
+            receiver.Connect(target);
+        }
         receiver.Disconnect();
+
+        if (error != null)
+            throw new Exception($"OmtReceiverService reported error during churn: {error}");
+        if (receiver.IsConnected)
+            throw new Exception("OmtReceiverService still reports connected after final Disconnect.");
+
+        Console.WriteLine($" -> Survived 5 rapid connect/disconnect cycles cleanly; total {videoFrames} frames, no errors.");
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> OmtReceiverService telemetry + reconnect safety verified!");
         Console.ResetColor();
+    }
+
+    /// <summary>
+    /// Returns true when the BGRA buffer contains at least one non-black pixel. Used to prove
+    /// the window capturer produced real content (PrintWindow content or its screen-region
+    /// fallback), not the all-black failure frame.
+    /// </summary>
+    static bool IsBufferNonBlack(IntPtr bufferPtr, int length)
+    {
+        // Copy the whole buffer (window-sized, bounded) and scan every pixel; a window with
+        // any coloured content anywhere must register as non-black.
+        var bytes = new byte[length];
+        System.Runtime.InteropServices.Marshal.Copy(bufferPtr, bytes, 0, length);
+        for (int i = 0; i + 2 < bytes.Length; i += 4)
+        {
+            if (bytes[i] > 8 || bytes[i + 1] > 8 || bytes[i + 2] > 8) return true;
+        }
+        return false;
     }
 
     /// <summary>

@@ -5,16 +5,19 @@ using libomtnet;
 namespace OmtCaptureStudio.Services;
 
 /// <summary>
-/// Broadcasts the host desktop over OMT by capturing the primary monitor with
-/// <see cref="DesktopFrameCapturer"/> and sending each frame through <see cref="OMTSend"/>.
-/// Mirrors <see cref="OmtTestPatternGenerator"/>'s paced send loop, but sources real
-/// screen content. Video only (audio is a later phase).
+/// Broadcasts a host capture target (a monitor or a window — any <see cref="IFrameSource"/>)
+/// over OMT by sending each captured frame through <see cref="OMTSend"/>. Mirrors
+/// <see cref="OmtTestPatternGenerator"/>'s paced send loop, but sources real screen content.
+/// Video only (audio is a later phase).
 /// </summary>
 public sealed class OmtDesktopCaptureGenerator : IDisposable
 {
+    private const int StopJoinTimeoutMs = 1000;
+
     private readonly string _sourceName;
     private readonly int _fps;
     private readonly IFrameSource _frameSource;
+    private readonly object _lock = new();
 
     private OMTSend? _sender;
     private IFrameSource? _capturer;
@@ -37,90 +40,125 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
     public void Start()
     {
         if (_isRunning) return;
+
+        IFrameSource source = _frameSource;
+        OMTSend? sender = null;
+        bool threadStarted = false;
         try
         {
-            _capturer = _frameSource; // the generator owns and disposes the injected source
-            _sender = new OMTSend(_sourceName, OMTQuality.High);
-            _isRunning = true;
+            sender = new OMTSend(_sourceName, OMTQuality.High);
 
-            _sendThread = new Thread(SendLoop)
+            lock (_lock)
             {
-                Name = "OMT_DesktopCaptureThread",
-                IsBackground = true
-            };
-            _sendThread.Start();
+                _capturer = source;
+                _sender = sender;
+                _isRunning = true;
+
+                var thread = new Thread(() => SendLoop(source, sender))
+                {
+                    Name = "OMT_DesktopCaptureThread",
+                    IsBackground = true
+                };
+                _sendThread = thread;
+                thread.Start();
+                threadStarted = true;
+            }
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[Desktop Capture Start Error] {ex.Message}");
-            Stop();
+            lock (_lock)
+            {
+                _isRunning = false;
+                _capturer = null;
+                _sender = null;
+                _sendThread = null;
+            }
+
+            // The send loop owns disposal of the source + sender it runs. If it never
+            // started, dispose here so we don't leak the native handles.
+            if (!threadStarted)
+            {
+                try { sender?.Dispose(); } catch { }
+                try { source.Dispose(); } catch { }
+            }
+
             throw;
         }
     }
 
     public void Stop()
     {
-        _isRunning = false;
-
-        if (_sendThread != null && _sendThread.IsAlive)
+        Thread? thread;
+        lock (_lock)
         {
-            _sendThread.Join(1000);
+            _isRunning = false;
+            thread = _sendThread;
             _sendThread = null;
+            _capturer = null; // identity mismatch -> the loop exits and disposes its own source/sender
+            _sender = null;
         }
 
-        _capturer?.Dispose();
-        _capturer = null;
-
-        if (_sender != null)
+        // Bounded wait. We do NOT dispose here: if the join times out the loop is still
+        // using the source/sender, and the loop's finally disposes them once it exits.
+        if (thread != null && thread.IsAlive)
         {
-            try { _sender.Dispose(); } catch { }
-            _sender = null;
+            thread.Join(StopJoinTimeoutMs);
         }
     }
 
-    private void SendLoop()
+    private void SendLoop(IFrameSource capturer, OMTSend sender)
     {
         Stopwatch sw = Stopwatch.StartNew();
         long frameIndex = 0;
         bool hasFrame = false;
 
-        while (_isRunning && _sender != null && _capturer != null)
+        try
         {
-            long targetMs = frameIndex * 1000 / _fps;
-            long elapsedMs = sw.ElapsedMilliseconds;
-            if (elapsedMs < targetMs)
+            while (_isRunning && ReferenceEquals(_capturer, capturer) && ReferenceEquals(_sender, sender))
             {
-                int delay = (int)(targetMs - elapsedMs);
-                if (delay > 0) Thread.Sleep(delay);
-            }
-            frameIndex++;
+                long targetMs = frameIndex * 1000 / _fps;
+                long elapsedMs = sw.ElapsedMilliseconds;
+                if (elapsedMs < targetMs)
+                {
+                    int delay = (int)(targetMs - elapsedMs);
+                    if (delay > 0) Thread.Sleep(delay);
+                }
+                frameIndex++;
 
-            // Desktop Duplication only yields a frame when the screen changes, so a static
-            // desktop would otherwise starve receivers. Once one real frame is captured,
-            // keep re-broadcasting the latest buffer to hold the stream at the paced rate.
-            if (_capturer.TryCaptureFrame())
-            {
-                hasFrame = true;
-            }
-            else if (!hasFrame)
-            {
-                continue; // no frame captured yet
-            }
+                // Desktop Duplication only yields a frame when the screen changes, so a static
+                // desktop would otherwise starve receivers. Once one real frame is captured,
+                // keep re-broadcasting the latest buffer to hold the stream at the paced rate.
+                if (capturer.TryCaptureFrame())
+                {
+                    hasFrame = true;
+                }
+                else if (!hasFrame)
+                {
+                    continue; // no frame captured yet
+                }
 
-            OMTMediaFrame vFrame = new()
-            {
-                Type = OMTFrameType.Video,
-                Codec = (int)OMTCodec.BGRA,
-                Width = _capturer.Width,
-                Height = _capturer.Height,
-                Stride = _capturer.Stride,
-                FrameRateN = _fps,
-                FrameRateD = 1,
-                Data = _capturer.BufferPtr,
-                DataLength = _capturer.Stride * _capturer.Height,
-                Timestamp = -1 // automatic timestamp throttling
-            };
-            _sender.Send(vFrame);
+                OMTMediaFrame vFrame = new()
+                {
+                    Type = OMTFrameType.Video,
+                    Codec = (int)OMTCodec.BGRA,
+                    Width = capturer.Width,
+                    Height = capturer.Height,
+                    Stride = capturer.Stride,
+                    FrameRateN = _fps,
+                    FrameRateD = 1,
+                    Data = capturer.BufferPtr,
+                    DataLength = capturer.Stride * capturer.Height,
+                    Timestamp = -1 // automatic timestamp throttling
+                };
+                sender.Send(vFrame);
+            }
+        }
+        finally
+        {
+            // The loop owns the source and sender it was handed: dispose exactly once.
+            try { capturer.Dispose(); } catch { }
+            try { sender.Dispose(); } catch { }
         }
     }
 
