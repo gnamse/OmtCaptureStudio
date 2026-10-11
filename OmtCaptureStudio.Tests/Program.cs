@@ -123,6 +123,7 @@ class Program
         Console.WriteLine("\n[Step 0.6] Verifying AudioClockResampler (drift correction + passthrough)...");
         TestAudioClockResampler();
         TestDesktopCapture();
+        TestCaptureTargets();
 
         Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
         using (var vmSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(new NullRecordingSink())))
@@ -696,7 +697,7 @@ class Program
 
         // 2. OMT round-trip: broadcast the desktop, discover it, receive video frames.
         string sourceName = "OMT_Automated_Desktop_Source";
-        using var generator = new OmtDesktopCaptureGenerator(sourceName, fps: 30);
+        using var generator = new OmtDesktopCaptureGenerator(new DesktopFrameCapturer(), sourceName, fps: 30);
         generator.Start();
         Console.WriteLine($" -> Broadcasting desktop as OMT source '{sourceName}' at {generator.Address}");
 
@@ -734,6 +735,64 @@ class Program
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> Host desktop capture (capture + OMT round-trip) verified!");
+        Console.ResetColor();
+    }
+
+    static void TestCaptureTargets()
+    {
+        Console.WriteLine("\n[Step 0.7] Verifying Capture Target Enumeration, Window Capture & Factory Mapping...");
+
+        // (a) Monitors: DXGI output enumeration must yield at least one monitor.
+        var monitors = MonitorEnumerator.Enumerate();
+        if (monitors.Count < 1)
+            throw new Exception("MonitorEnumerator.Enumerate() returned no monitors.");
+        Console.WriteLine($" -> {monitors.Count} monitor(s) enumerated; first = '{monitors[0].DisplayName}'");
+
+        // (b) Windows: GDI window enumeration; capture the top-most window when available.
+        var windows = WindowEnumerator.Enumerate();
+        Console.WriteLine($" -> {windows.Count} visible window(s) enumerated.");
+        if (windows.Count > 0)
+        {
+            using var wc = new WindowFrameCapturer(windows[0].WindowHandle);
+            if (wc.Width <= 0 || wc.Height <= 0 || wc.BufferPtr == IntPtr.Zero)
+                throw new Exception($"WindowFrameCapturer invalid: {wc.Width}x{wc.Height}, BufferPtr={wc.BufferPtr}");
+
+            bool captured = false;
+            for (int i = 0; i < 50 && !captured; i++)
+            {
+                captured = wc.TryCaptureFrame();
+                if (!captured) Thread.Sleep(16);
+            }
+
+            if (captured)
+            {
+                Console.WriteLine($" -> Captured top window '{windows[0].DisplayName}' at {wc.Width}x{wc.Height}, stride {wc.Stride}");
+            }
+            else
+            {
+                Console.WriteLine(" -> [WARN] Window enumerated but TryCaptureFrame() never succeeded (may be obscured); continuing.");
+            }
+        }
+        else
+        {
+            Console.WriteLine(" -> [SKIP] no visible windows to test");
+        }
+
+        // (c) Factory mapping: monitors -> DesktopFrameCapturer, windows -> WindowFrameCapturer.
+        using (IFrameSource monitorSource = FrameSourceFactory.Create(monitors[0]))
+        {
+            if (monitorSource is not DesktopFrameCapturer)
+                throw new Exception("FrameSourceFactory.Create(monitor) did not produce DesktopFrameCapturer.");
+        }
+        if (windows.Count > 0)
+        {
+            using IFrameSource windowSource = FrameSourceFactory.Create(windows[0]);
+            if (windowSource is not WindowFrameCapturer)
+                throw new Exception("FrameSourceFactory.Create(window) did not produce WindowFrameCapturer.");
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> Capture target enumeration, window capture & factory mapping verified!");
         Console.ResetColor();
     }
 

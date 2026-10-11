@@ -127,6 +127,23 @@
                                   AutomationProperties.Name="{CompiledBinding TestSignalAutomationName}"
                                   ToolTip.Tip="Toggle internal SMPTE color bars test generator"
                                   Command="{CompiledBinding ToggleTestSignalCommand}"/>
+                    <ComboBox x:Name="CmbCaptureTarget" Width="200" Margin="8,0,4,0" MinHeight="30" VerticalAlignment="Center"
+                              ItemsSource="{CompiledBinding CaptureTargets}"
+                              SelectedItem="{CompiledBinding SelectedCaptureTarget, Mode=TwoWay}"
+                              AutomationProperties.Name="Host capture target"
+                              ToolTip.Tip="Select which monitor or window to broadcast">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="models:CaptureTarget">
+                                <TextBlock Text="{CompiledBinding DisplayName}" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                    <Button x:Name="BtnRefreshCaptureTargets" Padding="6,0" Margin="0,0,8,0" MinHeight="30"
+                            AutomationProperties.Name="Refresh capture targets"
+                            ToolTip.Tip="Refresh monitor and window list"
+                            Command="{CompiledBinding RefreshCaptureTargetsCommand}">
+                        <Path Data="{DynamicResource IconRefresh}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center"/>
+                    </Button>
                     <ToggleButton x:Name="BtnDesktopCapture" Content="Desktop Capture" Padding="10,5" MinHeight="30" Margin="8,0,0,0"
                                   IsChecked="{CompiledBinding IsDesktopCaptureActive, Mode=OneWay}"
                                   Background="{CompiledBinding DesktopCaptureBackground}"

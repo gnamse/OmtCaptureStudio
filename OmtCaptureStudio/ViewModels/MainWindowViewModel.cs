@@ -121,6 +121,13 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string _desktopCaptureAutomationName = "Enable Host Desktop Capture";
 
+    // Host capture target selection
+    [ObservableProperty]
+    private IReadOnlyList<CaptureTarget> _captureTargets = Array.Empty<CaptureTarget>();
+
+    [ObservableProperty]
+    private CaptureTarget? _selectedCaptureTarget;
+
     // 6. Viewport HUD & Overlay
     [ObservableProperty]
     private bool _isNoSignalOverlayVisible = true;
@@ -463,7 +470,17 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (active)
             {
-                _desktopCapture ??= new OmtDesktopCaptureGenerator();
+                if (CaptureTargets.Count == 0)
+                {
+                    PopulateCaptureTargets();
+                }
+
+                var target = SelectedCaptureTarget
+                    ?? MonitorEnumerator.Enumerate().FirstOrDefault()
+                    ?? throw new InvalidOperationException("No capture target available.");
+                IFrameSource source = FrameSourceFactory.Create(target);
+
+                _desktopCapture = new OmtDesktopCaptureGenerator(source, sourceName: "OmtCaptureStudio_DesktopCapture", fps: 30);
                 _desktopCapture.Start();
                 IsDesktopCaptureActive = true;
                 DesktopCaptureBackground = TestSignalActiveBrush;
@@ -474,6 +491,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             else
             {
                 _desktopCapture?.Stop();
+                _desktopCapture = null;
                 IsDesktopCaptureActive = false;
                 DesktopCaptureBackground = TestSignalInactiveBrush;
                 DesktopCaptureAutomationName = "Enable Host Desktop Capture";
@@ -488,6 +506,37 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             DesktopCaptureBackground = TestSignalInactiveBrush;
             DesktopCaptureAutomationName = "Enable Host Desktop Capture";
             StatusText = $"Desktop capture error: {ex.Message}";
+        }
+    }
+
+    private void PopulateCaptureTargets()
+    {
+        var list = new List<CaptureTarget>();
+        list.AddRange(MonitorEnumerator.Enumerate());
+        list.AddRange(WindowEnumerator.Enumerate());
+        CaptureTargets = list;
+
+        if (SelectedCaptureTarget == null ||
+            !list.Any(t => t.Kind == SelectedCaptureTarget.Kind &&
+                           t.MonitorIndex == SelectedCaptureTarget.MonitorIndex &&
+                           t.WindowHandle == SelectedCaptureTarget.WindowHandle))
+        {
+            SelectedCaptureTarget = list.FirstOrDefault();
+        }
+    }
+
+    [RelayCommand]
+    private void RefreshCaptureTargets()
+    {
+        try
+        {
+            PopulateCaptureTargets();
+            StatusText = $"Capture targets refreshed ({CaptureTargets.Count} available).";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Error refreshing capture targets: {ex.Message}", ex);
+            StatusText = $"Refresh capture targets failed: {ex.Message}";
         }
     }
 

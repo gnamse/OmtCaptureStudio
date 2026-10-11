@@ -14,9 +14,10 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
 {
     private readonly string _sourceName;
     private readonly int _fps;
+    private readonly IFrameSource _frameSource;
 
     private OMTSend? _sender;
-    private DesktopFrameCapturer? _capturer;
+    private IFrameSource? _capturer;
     private Thread? _sendThread;
     private volatile bool _isRunning;
 
@@ -26,8 +27,9 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
     public string? Address => _sender?.Address;
     public int Port => _sender?.Port ?? 0;
 
-    public OmtDesktopCaptureGenerator(string sourceName = "OmtCaptureStudio_DesktopCapture", int fps = 30)
+    public OmtDesktopCaptureGenerator(IFrameSource frameSource, string sourceName = "OmtCaptureStudio_DesktopCapture", int fps = 30)
     {
+        _frameSource = frameSource;
         _sourceName = sourceName;
         _fps = fps;
     }
@@ -37,7 +39,7 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         if (_isRunning) return;
         try
         {
-            _capturer = new DesktopFrameCapturer(); // throws if no desktop / no D3D11 hardware device
+            _capturer = _frameSource; // the generator owns and disposes the injected source
             _sender = new OMTSend(_sourceName, OMTQuality.High);
             _isRunning = true;
 
