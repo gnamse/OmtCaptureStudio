@@ -53,15 +53,31 @@ public sealed class SilentHostAudioSource : IHostAudioSource
 
 /// <summary>
 /// Builds a concrete <see cref="IHostAudioSource"/> from a user-selected <see cref="HostAudioCaptureMode"/>
-/// or <see cref="HostAudioCaptureOption"/> (including specific WASAPI hardware endpoint IDs).
+/// or <see cref="HostAudioCaptureOption"/> (including specific WASAPI hardware endpoint IDs and
+/// ASIO drivers).
 /// </summary>
 public static class HostAudioSourceFactory
 {
+    /// <summary>
+    /// Creates a source for <paramref name="mode"/>. For every mode except <see cref="HostAudioCaptureMode.Asio"/>
+    /// <paramref name="deviceId"/> is an optional WASAPI endpoint id; for ASIO it is the driver's CLSID string
+    /// (see <see cref="HostAudioCaptureOption.AsioDriverClsid"/>).
+    /// </summary>
     public static IHostAudioSource Create(HostAudioCaptureMode mode, string? deviceId = null)
     {
-        return mode == HostAudioCaptureMode.Mute
-            ? new SilentHostAudioSource()
-            : new WasapiHostAudioSource(mode, deviceId);
+        if (mode == HostAudioCaptureMode.Mute)
+        {
+            return new SilentHostAudioSource();
+        }
+
+        if (mode == HostAudioCaptureMode.Asio)
+        {
+            Guid? clsid = TryParseClsid(deviceId);
+            AsioDriverInfo driver = ResolveAsioDriver(clsid, null);
+            return new AsioHostAudioSource(new AsioCaptureOption(driver));
+        }
+
+        return new WasapiHostAudioSource(mode, deviceId);
     }
 
     public static IHostAudioSource Create(HostAudioCaptureOption? option)
@@ -70,6 +86,65 @@ public static class HostAudioSourceFactory
         {
             return new SilentHostAudioSource();
         }
+
+        if (option.Mode == HostAudioCaptureMode.Asio)
+        {
+            Guid? clsid = option.AsioDriverClsid ?? TryParseClsid(option.DeviceId);
+            AsioDriverInfo driver = ResolveAsioDriver(clsid, option.DisplayName);
+            return new AsioHostAudioSource(new AsioCaptureOption(driver, option.AsioFirstInputChannelIndex));
+        }
+
         return new WasapiHostAudioSource(option.Mode, option.DeviceId);
     }
+
+    /// <summary>
+    /// Maps a stored ASIO CLSID back onto a currently registered <see cref="AsioDriverInfo"/>.
+    /// Drivers can disappear (uninstalled, or simply not registered on this machine/user), so the
+    /// id is re-resolved through <see cref="AsioDriverEnumerator"/> rather than trusted blindly —
+    /// the dropdown only ever stores identity, never a live handle, because ASIO drivers grant
+    /// exclusive access. Throws <see cref="InvalidOperationException"/> when nothing resolves.
+    /// </summary>
+    private static AsioDriverInfo ResolveAsioDriver(Guid? clsid, string? displayName)
+    {
+        IReadOnlyList<AsioDriverInfo> drivers;
+        try
+        {
+            drivers = AsioDriverEnumerator.Enumerate();
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                "ASIO drivers could not be enumerated on this machine, so ASIO capture is unavailable.", ex);
+        }
+
+        if (clsid.HasValue)
+        {
+            foreach (AsioDriverInfo candidate in drivers)
+            {
+                if (candidate.Clsid == clsid.Value)
+                {
+                    return candidate;
+                }
+            }
+
+            throw new InvalidOperationException(
+                $"The selected ASIO driver '{displayName ?? clsid.Value.ToString("B")}' ({clsid.Value:B}) is not " +
+                "registered on this machine anymore. Pick another audio device or reinstall the driver.");
+        }
+
+        // No explicit driver (mode-only construction): only unambiguous when exactly one exists.
+        if (drivers.Count == 1)
+        {
+            return drivers[0];
+        }
+
+        throw new InvalidOperationException(
+            drivers.Count == 0
+                ? "No ASIO drivers are registered on this machine, so ASIO capture is unavailable."
+                : $"{drivers.Count} ASIO drivers are registered ({string.Join(", ", drivers.Select(d => d.DisplayName))}); " +
+                  "select one explicitly through a HostAudioCaptureOption.");
+    }
+
+    private static Guid? TryParseClsid(string? value) =>
+        value != null && Guid.TryParse(value, out Guid parsed) ? parsed : (Guid?)null;
 }

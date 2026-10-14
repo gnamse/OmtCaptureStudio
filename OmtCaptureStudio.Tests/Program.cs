@@ -125,6 +125,7 @@ class Program
         TestDesktopCapture();
         TestCaptureTargets();
         TestReceiverServiceTelemetry();
+        TestAsioHostAudio();
         TestAuditRemediationsAndRegressionSeams();
 
         Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
@@ -739,6 +740,9 @@ class Program
         float[] testPlanar = new float[2 * 1600]; // 30 fps @ 48 kHz = 1600 samples/ch
         foreach (HostAudioCaptureMode mode in Enum.GetValues<HostAudioCaptureMode>())
         {
+            // ASIO needs an explicit driver instance; it is covered by TestAsioHostAudio().
+            if (mode == HostAudioCaptureMode.Asio) continue;
+
             IHostAudioSource src = HostAudioSourceFactory.Create(mode);
             if (src.SampleRate != 48000 || src.Channels != 2)
             {
@@ -973,6 +977,129 @@ class Program
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> Host desktop capture (capture + OMT round-trip) verified!");
         Console.ResetColor();
+    }
+
+    /// <summary>
+    /// Exercises the ASIO host audio source against real registered ASIO drivers: registry
+    /// discovery, opening the driver through the hand-rolled COM vtable interop, sample-rate
+    /// negotiation (ask the driver for 48 kHz, resample only as a fallback), and continuous
+    /// planar fill at 48 kHz stereo without NaN/Infinity.
+    /// ASIO grants EXCLUSIVE driver access, so this must always dispose and release cleanly.
+    /// </summary>
+    static void TestAsioHostAudio()
+    {
+        Console.WriteLine("\n[Step 0.69] Verifying ASIO host audio capture (discovery, COM vtable, rate negotiation)...");
+
+        var drivers = AsioDriverEnumerator.Enumerate();
+        Console.WriteLine($" -> AsioDriverEnumerator resolved {drivers.Count} ASIO driver(s)");
+        if (drivers.Count == 0)
+        {
+            Console.WriteLine(" -> [SKIP] no registered ASIO drivers on this host");
+            return;
+        }
+
+        foreach (var d in drivers)
+        {
+            Console.WriteLine($"    * {d.DisplayName}");
+        }
+
+        AsioHostAudioSource? opened = null;
+        AsioDriverInfo? openedDriver = null;
+        foreach (var d in drivers)
+        {
+            AsioHostAudioSource? candidate = null;
+            try
+            {
+                candidate = new AsioHostAudioSource(new AsioCaptureOption(d, 0));
+
+                // A driver can construct yet be unusable (device not present, owned by another
+                // app). Require evidence it is genuinely streaming before accepting it.
+                bool streaming = false;
+                for (int probe = 0; probe < 16 && !streaming; probe++)
+                {
+                    Thread.Sleep(25);
+                    streaming = candidate.CallbacksInvoked > 0 &&
+                                !string.IsNullOrEmpty(candidate.DriverReportedName);
+                }
+
+                if (streaming)
+                {
+                    opened = candidate;
+                    openedDriver = d;
+                    break;
+                }
+
+                Console.WriteLine($"    [skip] {d.DisplayName}: opened but not streaming (error: {candidate.LastError ?? "none reported"})");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"    [skip] {d.DisplayName}: {ex.Message}");
+            }
+            finally
+            {
+                // Release the exclusive lock on any candidate we are not keeping.
+                if (!ReferenceEquals(opened, candidate))
+                {
+                    candidate?.Dispose();
+                }
+            }
+        }
+
+        if (opened == null)
+        {
+            Console.WriteLine(" -> [SKIP] no registered ASIO driver is currently streaming (all unavailable or held exclusively)");
+            return;
+        }
+
+        try
+        {
+            if (opened.SampleRate != 48000 || opened.Channels != 2)
+                throw new Exception($"AsioHostAudioSource contract violation: {opened.SampleRate}Hz, {opened.Channels}ch");
+
+            string path = opened.IsResamplingRequired
+                ? $"native {opened.DriverActualSampleRate} Hz -> resampled to 48 kHz"
+                : "running native 48 kHz (no resampling)";
+            Console.WriteLine($" -> Opened '{opened.DriverReportedName}' ({path})");
+            Console.WriteLine($" -> Latency: in {opened.InputLatencySamples} / out {opened.OutputLatencySamples} samples");
+            if (opened.SampleRateNegotiationNote != null)
+                Console.WriteLine($" -> Rate note: {opened.SampleRateNegotiationNote}");
+
+            // Prove the driver is really streaming (callbacks arriving) and check for signal.
+            int samplesPerChannel = opened.SampleRate / 30; // 30 fps cadence
+            float[] planar = new float[2 * samplesPerChannel];
+            float peak = 0f;
+
+            for (int i = 0; i < 40; i++)
+            {
+                opened.FillPlanarAudio(planar, samplesPerChannel);
+                foreach (float s in planar)
+                {
+                    if (float.IsNaN(s) || float.IsInfinity(s))
+                        throw new Exception("AsioHostAudioSource produced a NaN/Infinity sample!");
+                    float mag = Math.Abs(s);
+                    if (mag > peak) peak = mag;
+                }
+                Thread.Sleep(25);
+            }
+
+            long callbacks = opened.CallbacksInvoked;
+            if (callbacks <= 0)
+                throw new Exception($"ASIO driver '{openedDriver!.DisplayName}' opened but delivered no callbacks (not streaming).");
+
+            Console.WriteLine($" -> {callbacks} callbacks received; peak {peak:F6} ({(peak > 0f ? "non-silent" : "digital silence - no live signal into this driver")})");
+            if (opened.LastError != null)
+                Console.WriteLine($" -> Last driver error: {opened.LastError}");
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine(" -> ASIO host audio capture verified!");
+            Console.ResetColor();
+        }
+        finally
+        {
+            // Release the exclusive driver lock; double-dispose must be idempotent.
+            opened.Dispose();
+            opened.Dispose();
+        }
     }
 
     static void TestCaptureTargets()

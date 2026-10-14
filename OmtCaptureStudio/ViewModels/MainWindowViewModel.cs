@@ -148,7 +148,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _isCaptureTargetDropDownOpen;
 
-    // Host capture audio source selection (presets + individual WASAPI hardware endpoints)
+    // Grace period for an ASIO driver to finish its own startup before we snapshot its negotiated
+    // state (sample rate / resampler / latency) once, for logging.
+    private const int AsioTelemetryDelayMs = 600;
+
+    // Host capture audio source selection (presets + individual WASAPI hardware endpoints + ASIO drivers)
     private static readonly IReadOnlyList<HostAudioCaptureOption> DefaultCaptureAudioOptions = new[]
     {
         new HostAudioCaptureOption(HostAudioCaptureMode.SystemAudio, "System Audio (Default \u00B7 No Echo)", null),
@@ -463,7 +467,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             try
             {
-                activeBroadcast.SetAudioSource(HostAudioSourceFactory.Create(value));
+                // SetAudioSource disposes the outgoing source exactly once — critical for ASIO, which
+                // holds the driver exclusively; if this throws, the generator disposes the new one.
+                activeBroadcast.SetAudioSource(CreateCaptureAudioSource(value));
                 StatusText = $"Host broadcast audio switched to: {value.DisplayName}";
                 AppLogger.LogInfo($"Switched host broadcast audio to {value.Mode} ({value.DisplayName}).");
             }
@@ -672,7 +678,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 IHostAudioSource audioSource;
                 try
                 {
-                    audioSource = HostAudioSourceFactory.Create(SelectedCaptureAudioOption);
+                    audioSource = CreateCaptureAudioSource(SelectedCaptureAudioOption);
                 }
                 catch
                 {
@@ -681,13 +687,36 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 }
 
                 string? bindIp = SelectedBroadcastNetwork?.IpAddress;
-                _desktopCapture = new OmtDesktopCaptureGenerator(
-                    source,
-                    sourceName: "OmtCaptureStudio_DesktopCapture",
-                    fps: 30,
-                    audioSource: audioSource,
-                    bindIpAddress: bindIp);
-                _desktopCapture.Start();
+
+                // Once the generator is constructed it owns both sources and disposes each exactly
+                // once; anything thrown before that would leave an ASIO driver locked exclusively,
+                // so every failure branch below releases what it still owns.
+                OmtDesktopCaptureGenerator? generator = null;
+                try
+                {
+                    generator = new OmtDesktopCaptureGenerator(
+                        source,
+                        sourceName: "OmtCaptureStudio_DesktopCapture",
+                        fps: 30,
+                        audioSource: audioSource,
+                        bindIpAddress: bindIp);
+                    generator.Start();
+                    _desktopCapture = generator;
+                }
+                catch
+                {
+                    if (generator != null)
+                    {
+                        try { generator.Dispose(); } catch { }
+                    }
+                    else
+                    {
+                        try { source.Dispose(); } catch { }
+                        try { audioSource.Dispose(); } catch { }
+                    }
+                    throw;
+                }
+
                 _activeCaptureTarget = target;
                 IsDesktopCaptureActive = true;
                 DesktopCaptureBackground = TestSignalActiveBrush;
@@ -755,21 +784,134 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             list = DefaultCaptureAudioOptions;
         }
 
-        CaptureAudioOptions = list;
+        // Copy into a mutable list: the enumerator's result is shared state, and we splice the
+        // ASIO drivers in below the built-in presets without disturbing either order.
+        var options = new List<HostAudioCaptureOption>(list);
+        InsertAsioOptions(options);
+
+        CaptureAudioOptions = options;
 
         if (previous != null)
         {
-            var match = list.FirstOrDefault(o =>
+            var match = options.FirstOrDefault(o =>
                 o.Mode == previous.Mode &&
                 string.Equals(o.DeviceId, previous.DeviceId, StringComparison.OrdinalIgnoreCase))
-                ?? list.FirstOrDefault(o => o.Mode == previous.Mode && o.DeviceId == null)
-                ?? list[0];
+                ?? options.FirstOrDefault(o => o.Mode == previous.Mode && o.DeviceId == null)
+                ?? options[0];
             SelectedCaptureAudioOption = match;
         }
         else
         {
-            SelectedCaptureAudioOption = list[0];
+            SelectedCaptureAudioOption = options[0];
         }
+    }
+
+    /// <summary>
+    /// Splices one entry per registered ASIO driver into the broadcast-audio dropdown, keeping every
+    /// existing WASAPI entry and its position: they land after the built-in presets and before the
+    /// per-endpoint entries (or before "Mute" when no endpoints were enumerated).
+    /// ASIO drivers grant exclusive access, so this only ever reads the registry — a driver is never
+    /// opened here, only when the user actually selects it. Registry failures (headless, no drivers,
+    /// locked-down hive) leave the dropdown exactly as it was.
+    /// </summary>
+    private static void InsertAsioOptions(List<HostAudioCaptureOption> options)
+    {
+        IReadOnlyList<AsioDriverInfo> drivers;
+        try
+        {
+            drivers = AsioDriverEnumerator.Enumerate();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Could not enumerate ASIO drivers: {ex.Message}");
+            return;
+        }
+
+        if (drivers.Count == 0)
+        {
+            return;
+        }
+
+        int insertAt = options.FindIndex(o => o.DeviceId != null && o.Mode != HostAudioCaptureMode.Mute);
+        if (insertAt < 0)
+        {
+            int muteIndex = options.FindIndex(o => o.Mode == HostAudioCaptureMode.Mute);
+            insertAt = muteIndex >= 0 ? muteIndex : options.Count;
+        }
+
+        var entries = new List<HostAudioCaptureOption>(drivers.Count);
+        foreach (AsioDriverInfo driver in drivers)
+        {
+            // Default pair is input 1/2 (index 0). Pro interfaces expose more pairs, and
+            // AsioFirstInputChannelIndex carries the choice once the UI offers it.
+            entries.Add(HostAudioCaptureOption.ForAsio(driver.Clsid, $"ASIO · {driver.DisplayName} (In 1/2)"));
+        }
+
+        options.InsertRange(insertAt, entries);
+    }
+
+    /// <summary>
+    /// Builds the live source for a dropdown option and, for ASIO only, schedules one deferred
+    /// telemetry snapshot: the negotiated sample rate, whether we fell back to resampling, and the
+    /// driver's reported input latency. Those are published by the driver's own worker thread during
+    /// startup, so reading them straight after construction would always return zeros.
+    /// </summary>
+    private static IHostAudioSource CreateCaptureAudioSource(HostAudioCaptureOption option)
+    {
+        IHostAudioSource source = HostAudioSourceFactory.Create(option);
+        if (source is AsioHostAudioSource asio)
+        {
+            LogAsioStateDeferred(asio, option.DisplayName);
+        }
+
+        return source;
+    }
+
+    private static void LogAsioStateDeferred(AsioHostAudioSource asio, string displayName)
+    {
+        try
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(AsioTelemetryDelayMs).ConfigureAwait(false);
+                    AppLogger.LogInfo($"[ASIO] {displayName}: {DescribeAsioState(asio)}");
+                }
+                catch
+                {
+                    // Telemetry must never surface as a failure to the caller.
+                }
+            });
+        }
+        catch
+        {
+            // No thread pool available (headless shutdown); nothing to report.
+        }
+    }
+
+    /// <summary>One-line summary of an ASIO source's negotiated state, for logs and status text.</summary>
+    private static string DescribeAsioState(AsioHostAudioSource asio)
+    {
+        int sampleRate = asio.SampleRate > 0 ? asio.SampleRate : 48000;
+
+        string rate = asio.IsResamplingRequired
+            ? $"driver runs at {asio.DriverActualSampleRate} Hz, resampling to {sampleRate} Hz"
+            : $"native {sampleRate} Hz (no resampling)";
+
+        string note = string.IsNullOrWhiteSpace(asio.SampleRateNegotiationNote)
+            ? string.Empty
+            : $" [{asio.SampleRateNegotiationNote}]";
+
+        string latency = asio.InputLatencySamples > 0
+            ? $", input latency {asio.InputLatencySamples * 1000 / sampleRate} ms ({asio.InputLatencySamples} samples)"
+            : string.Empty;
+
+        string error = string.IsNullOrWhiteSpace(asio.LastError)
+            ? string.Empty
+            : $", ERROR: {asio.LastError}";
+
+        return $"{rate}{note}{latency}{error}";
     }
 
     private void PopulateBroadcastNetworks()
