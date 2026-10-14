@@ -1,4 +1,9 @@
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Threading;
 using libomtnet;
 
@@ -6,9 +11,8 @@ namespace OmtCaptureStudio.Services;
 
 /// <summary>
 /// Broadcasts a host capture target (a monitor or a window — any <see cref="IFrameSource"/>)
-/// over OMT by sending each captured frame through <see cref="OMTSend"/>. Mirrors
-/// <see cref="OmtTestPatternGenerator"/>'s paced send loop, but sources real screen content.
-/// Video only (audio is a later phase).
+/// and a host audio source (<see cref="IHostAudioSource"/>) over OMT by sending each captured
+/// video frame and lockstep 48 kHz stereo <c>FPA1</c> audio frame through <see cref="OMTSend"/>.
 /// </summary>
 public sealed class OmtDesktopCaptureGenerator : IDisposable
 {
@@ -18,7 +22,10 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
     private readonly int _fps;
     private readonly IFrameSource _frameSource;
     private readonly object _lock = new();
+    private readonly List<Socket> _interfaceBlockerSockets = new();
 
+    private IHostAudioSource? _audioSource;
+    private string? _bindIpAddress;
     private OMTSend? _sender;
     private IFrameSource? _capturer;
     private Thread? _sendThread;
@@ -31,12 +38,78 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
     public string? Url => _sender?.URL;
     public string? Address => _sender?.Address;
     public int Port => _sender?.Port ?? 0;
+    public string? BindIpAddress => _bindIpAddress;
 
-    public OmtDesktopCaptureGenerator(IFrameSource frameSource, string sourceName = "OmtCaptureStudio_DesktopCapture", int fps = 30)
+    /// <summary>
+    /// Direct OMT URL for the selected network interface (e.g. <c>omt://192.168.1.50:6400</c>),
+    /// or the default <see cref="OMTSend.URL"/> when broadcasting on all interfaces.
+    /// </summary>
+    public string? BroadcastEndpointUrl
     {
-        _frameSource = frameSource;
+        get
+        {
+            int port = Port;
+            string? ip = _bindIpAddress;
+            if (!string.IsNullOrWhiteSpace(ip) && port > 0)
+            {
+                return $"omt://{ip}:{port}";
+            }
+            return _sender?.URL;
+        }
+    }
+
+    public OmtDesktopCaptureGenerator(
+        IFrameSource frameSource,
+        string sourceName = "OmtCaptureStudio_DesktopCapture",
+        int fps = 30,
+        IHostAudioSource? audioSource = null,
+        string? bindIpAddress = null)
+    {
+        _frameSource = frameSource ?? throw new ArgumentNullException(nameof(frameSource));
         _sourceName = sourceName;
-        _fps = fps;
+        _fps = fps > 0 ? fps : 30;
+        _audioSource = audioSource ?? new SilentHostAudioSource();
+        _bindIpAddress = string.IsNullOrWhiteSpace(bindIpAddress) ? null : bindIpAddress;
+    }
+
+    /// <summary>
+    /// Hot-swaps the active <see cref="IHostAudioSource"/> while broadcasting (or before start)
+    /// without interrupting the video stream, and disposes the previous audio source.
+    /// </summary>
+    public void SetAudioSource(IHostAudioSource newAudioSource)
+    {
+        ArgumentNullException.ThrowIfNull(newAudioSource);
+
+        if (_disposed)
+        {
+            try { newAudioSource.Dispose(); } catch { }
+            return;
+        }
+
+        IHostAudioSource? previous = Interlocked.Exchange(ref _audioSource, newAudioSource);
+        if (previous != null && !ReferenceEquals(previous, newAudioSource))
+        {
+            try { previous.Dispose(); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Updates the network interface IPv4 address that OMT is allowed to accept connections on.
+    /// Pass <c>null</c> to allow connections on all network interfaces.
+    /// </summary>
+    public void SetBindIpAddress(string? bindIpAddress)
+    {
+        if (_disposed) return;
+
+        string? normalized = string.IsNullOrWhiteSpace(bindIpAddress) ? null : bindIpAddress.Trim();
+        lock (_lock)
+        {
+            _bindIpAddress = normalized;
+            if (_isRunning && _sender != null && _sender.Port > 0)
+            {
+                ApplyInterfaceBlockerSocketsLocked(_sender.Port, _bindIpAddress);
+            }
+        }
     }
 
     public void Start()
@@ -57,6 +130,11 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
                 _sender = sender;
                 _isRunning = true;
 
+                if (sender.Port > 0)
+                {
+                    ApplyInterfaceBlockerSocketsLocked(sender.Port, _bindIpAddress);
+                }
+
                 var thread = new Thread(() => SendLoop(source, sender))
                 {
                     Name = "OMT_DesktopCaptureThread",
@@ -76,14 +154,16 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
                 _capturer = null;
                 _sender = null;
                 _sendThread = null;
+                ReleaseInterfaceBlockerSocketsLocked();
             }
 
-            // The send loop owns disposal of the source + sender it runs. If it never
+            // The send loop owns disposal of the source + sender + audioSource it runs. If it never
             // started, dispose here so we don't leak the native handles.
             if (!threadStarted)
             {
                 try { sender?.Dispose(); } catch { }
                 try { source.Dispose(); } catch { }
+                try { Interlocked.Exchange(ref _audioSource, null)?.Dispose(); } catch { }
             }
 
             throw;
@@ -100,6 +180,7 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
             _sendThread = null;
             _capturer = null; // identity mismatch -> the loop exits and disposes its own source/sender
             _sender = null;
+            ReleaseInterfaceBlockerSocketsLocked();
         }
 
         // Bounded wait. We do NOT dispose here: if the join times out the loop is still
@@ -110,8 +191,81 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         }
     }
 
+    private void ApplyInterfaceBlockerSocketsLocked(int port, string? allowedIp)
+    {
+        ReleaseInterfaceBlockerSocketsLocked();
+
+        if (string.IsNullOrWhiteSpace(allowedIp) || port <= 0)
+            return;
+
+        IReadOnlyList<IPAddress> blockedIps = NetworkInterfaceEnumerator.GetOtherLocalIpv4Addresses(allowedIp);
+        foreach (IPAddress ip in blockedIps)
+        {
+            Socket? blocker = null;
+            try
+            {
+                // Binding and listening on a specific local IPv4 endpoint with ReuseAddress=true
+                // takes precedence in Windows tcpip.sys over OMTSend's wildcard [::]:port listener,
+                // intercepting incoming TCP connections on unselected NICs and immediately resetting
+                // them (TCP RST) while keeping the selected NIC (and 127.0.0.1) open for OMTSend.
+                blocker = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                blocker.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                blocker.Bind(new IPEndPoint(ip, port));
+                blocker.Listen(1);
+                _interfaceBlockerSockets.Add(blocker);
+                StartRejectLoop(blocker);
+            }
+            catch
+            {
+                try { blocker?.Dispose(); } catch { }
+            }
+        }
+    }
+
+    private static void StartRejectLoop(Socket blocker)
+    {
+        ThreadPool.UnsafeQueueUserWorkItem(static state =>
+        {
+            var listener = (Socket)state!;
+            while (true)
+            {
+                Socket? client = null;
+                try
+                {
+                    client = listener.Accept();
+                    client.LingerState = new LingerOption(enable: true, seconds: 0);
+                    client.Close();
+                }
+                catch
+                {
+                    try { client?.Dispose(); } catch { }
+                    break;
+                }
+            }
+        }, blocker);
+    }
+
+    private void ReleaseInterfaceBlockerSocketsLocked()
+    {
+        foreach (Socket s in _interfaceBlockerSockets)
+        {
+            try { s.Close(); } catch { }
+            try { s.Dispose(); } catch { }
+        }
+        _interfaceBlockerSockets.Clear();
+    }
+
     private void SendLoop(IFrameSource capturer, OMTSend sender)
     {
+        const int sampleRate = WasapiHostAudioSource.TargetSampleRate;
+        const int channels = WasapiHostAudioSource.TargetChannels;
+        int samplesPerFrame = sampleRate / _fps;
+        int audioSamplesTotal = channels * samplesPerFrame;
+
+        float[] audioBuffer = new float[audioSamplesTotal];
+        GCHandle audioHandle = GCHandle.Alloc(audioBuffer, GCHandleType.Pinned);
+        IntPtr pAudio = audioHandle.AddrOfPinnedObject();
+
         Stopwatch sw = Stopwatch.StartNew();
         long frameIndex = 0;
         bool hasFrame = false;
@@ -141,6 +295,7 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
                     continue; // no frame captured yet
                 }
 
+                // 1. Send Video Frame
                 OMTMediaFrame vFrame = new()
                 {
                     Type = OMTFrameType.Video,
@@ -155,11 +310,37 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
                     Timestamp = -1 // automatic timestamp throttling
                 };
                 sender.Send(vFrame);
+
+                // 2. Fill and Send Planar Audio Frame (FPA1, 48 kHz, 2ch) in lockstep with video
+                IHostAudioSource? activeAudio = Volatile.Read(ref _audioSource);
+                if (activeAudio != null)
+                {
+                    activeAudio.FillPlanarAudio(audioBuffer, samplesPerFrame);
+                }
+                else
+                {
+                    Array.Clear(audioBuffer, 0, audioBuffer.Length);
+                }
+
+                OMTMediaFrame aFrame = new()
+                {
+                    Type = OMTFrameType.Audio,
+                    Codec = (int)OMTCodec.FPA1,
+                    Channels = channels,
+                    SampleRate = sampleRate,
+                    SamplesPerChannel = samplesPerFrame,
+                    Data = pAudio,
+                    DataLength = audioSamplesTotal * sizeof(float),
+                    Timestamp = -1
+                };
+                sender.Send(aFrame);
             }
         }
         finally
         {
-            // The loop owns the source and sender it was handed: dispose exactly once.
+            if (audioHandle.IsAllocated) audioHandle.Free();
+            // The loop owns the source, audioSource, and sender it was handed: dispose each once.
+            try { Interlocked.Exchange(ref _audioSource, null)?.Dispose(); } catch { }
             try { capturer.Dispose(); } catch { }
             try { sender.Dispose(); } catch { }
         }
@@ -172,6 +353,7 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         Stop();
         if (!_started)
         {
+            try { Interlocked.Exchange(ref _audioSource, null)?.Dispose(); } catch { }
             try { _frameSource.Dispose(); } catch { }
         }
         GC.SuppressFinalize(this);

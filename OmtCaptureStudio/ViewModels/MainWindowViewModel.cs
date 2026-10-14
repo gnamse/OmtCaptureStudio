@@ -148,6 +148,54 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _isCaptureTargetDropDownOpen;
 
+    // Host capture audio source selection (presets + individual WASAPI hardware endpoints)
+    private static readonly IReadOnlyList<HostAudioCaptureOption> DefaultCaptureAudioOptions = new[]
+    {
+        new HostAudioCaptureOption(HostAudioCaptureMode.SystemAudio, "System Audio (Default \u00B7 No Echo)", null),
+        new HostAudioCaptureOption(HostAudioCaptureMode.Microphone, "Microphone (Default)", null),
+        new HostAudioCaptureOption(HostAudioCaptureMode.SystemAndMicrophone, "System Audio + Default Mic", null),
+        new HostAudioCaptureOption(HostAudioCaptureMode.Mute, "Mute (Silent 48 kHz Clock)", null)
+    };
+
+    [ObservableProperty]
+    private IReadOnlyList<HostAudioCaptureOption> _captureAudioOptions = DefaultCaptureAudioOptions;
+
+    [ObservableProperty]
+    private HostAudioCaptureOption _selectedCaptureAudioOption = DefaultCaptureAudioOptions[0];
+
+    [ObservableProperty]
+    private bool _isCaptureAudioDropDownOpen;
+
+    public HostAudioCaptureMode SelectedCaptureAudioMode
+    {
+        get => SelectedCaptureAudioOption?.Mode ?? HostAudioCaptureMode.SystemAudio;
+        set
+        {
+            var match = CaptureAudioOptions.FirstOrDefault(o => o.Mode == value && o.DeviceId == null)
+                ?? CaptureAudioOptions.FirstOrDefault(o => o.Mode == value);
+            if (match != null)
+            {
+                SelectedCaptureAudioOption = match;
+            }
+        }
+    }
+
+    // Host broadcast network interface selection
+    private static readonly IReadOnlyList<BroadcastNetworkOption> DefaultBroadcastNetworks = new[]
+    {
+        new BroadcastNetworkOption { DisplayName = "All Networks (Auto)", IpAddress = null, InterfaceIndex = 0 },
+        new BroadcastNetworkOption { DisplayName = "Localhost Only \u00B7 127.0.0.1", IpAddress = "127.0.0.1", InterfaceIndex = 0 }
+    };
+
+    [ObservableProperty]
+    private IReadOnlyList<BroadcastNetworkOption> _broadcastNetworks = DefaultBroadcastNetworks;
+
+    [ObservableProperty]
+    private BroadcastNetworkOption _selectedBroadcastNetwork = DefaultBroadcastNetworks[0];
+
+    [ObservableProperty]
+    private bool _isBroadcastNetworkDropDownOpen;
+
     // 6. Viewport HUD & Overlay
     [ObservableProperty]
     private bool _isNoSignalOverlayVisible = true;
@@ -292,7 +340,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         HookEvents();
         _discoveryService.Start();
 
-        // Seed the capture-target picker so it's populated before the user touches it.
+        // Seed the capture-target picker, audio device picker, and broadcast network picker
+        // so they are populated before the user touches them.
         // Monitor enumeration creates a D3D11 device, so it's guarded for headless/no-GPU.
         try
         {
@@ -301,6 +350,24 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         catch (Exception ex)
         {
             AppLogger.LogError($"Could not enumerate capture targets at startup: {ex.Message}");
+        }
+
+        try
+        {
+            PopulateCaptureAudioOptions();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Could not enumerate audio devices at startup: {ex.Message}");
+        }
+
+        try
+        {
+            PopulateBroadcastNetworks();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Could not enumerate network interfaces at startup: {ex.Message}");
         }
 
         // Live window tracking: windows open and close constantly, so re-enumerate the window
@@ -368,9 +435,63 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    partial void OnIsCaptureAudioDropDownOpenChanged(bool value)
+    {
+        if (value)
+        {
+            try { PopulateCaptureAudioOptions(); } catch { /* headless */ }
+        }
+    }
+
+    partial void OnIsBroadcastNetworkDropDownOpenChanged(bool value)
+    {
+        if (value)
+        {
+            try { PopulateBroadcastNetworks(); } catch { /* headless */ }
+        }
+    }
+
     partial void OnIsRecordingCloseOverlayVisibleChanged(bool value)
     {
         IsMainContentEnabled = !value;
+    }
+
+    partial void OnSelectedCaptureAudioOptionChanged(HostAudioCaptureOption value)
+    {
+        OnPropertyChanged(nameof(SelectedCaptureAudioMode));
+        if (_desktopCapture is { IsRunning: true } activeBroadcast && value != null)
+        {
+            try
+            {
+                activeBroadcast.SetAudioSource(HostAudioSourceFactory.Create(value));
+                StatusText = $"Host broadcast audio switched to: {value.DisplayName}";
+                AppLogger.LogInfo($"Switched host broadcast audio to {value.Mode} ({value.DisplayName}).");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.LogError($"Failed to switch host broadcast audio: {ex.Message}", ex);
+                StatusText = $"Host audio switch error: {ex.Message}";
+            }
+        }
+    }
+
+    partial void OnSelectedBroadcastNetworkChanged(BroadcastNetworkOption value)
+    {
+        if (_desktopCapture is { IsRunning: true } activeBroadcast && value != null)
+        {
+            try
+            {
+                activeBroadcast.SetBindIpAddress(value.IpAddress);
+                string endpoint = activeBroadcast.BroadcastEndpointUrl ?? activeBroadcast.Address ?? "OMT";
+                StatusText = $"Host broadcast network switched to: {value.DisplayName} ({endpoint})";
+                AppLogger.LogInfo($"Switched host broadcast network to {value.DisplayName} ({endpoint}).");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.LogError($"Failed to switch host broadcast network: {ex.Message}", ex);
+                StatusText = $"Host network switch error: {ex.Message}";
+            }
+        }
     }
 
     #endregion
@@ -548,16 +669,35 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                     ?? MonitorEnumerator.Enumerate().FirstOrDefault()
                     ?? throw new InvalidOperationException("No capture target available.");
                 IFrameSource source = FrameSourceFactory.Create(target);
+                IHostAudioSource audioSource;
+                try
+                {
+                    audioSource = HostAudioSourceFactory.Create(SelectedCaptureAudioOption);
+                }
+                catch
+                {
+                    source.Dispose();
+                    throw;
+                }
 
-                _desktopCapture = new OmtDesktopCaptureGenerator(source, sourceName: "OmtCaptureStudio_DesktopCapture", fps: 30);
+                string? bindIp = SelectedBroadcastNetwork?.IpAddress;
+                _desktopCapture = new OmtDesktopCaptureGenerator(
+                    source,
+                    sourceName: "OmtCaptureStudio_DesktopCapture",
+                    fps: 30,
+                    audioSource: audioSource,
+                    bindIpAddress: bindIp);
                 _desktopCapture.Start();
                 _activeCaptureTarget = target;
                 IsDesktopCaptureActive = true;
                 DesktopCaptureBackground = TestSignalActiveBrush;
                 DesktopCaptureForeground = StudioPalette.ButtonWhiteForeground;
                 DesktopCaptureAutomationName = "Disable Host Broadcast";
-                StatusText = "Broadcasting host capture over OMT — select it in the Source dropdown and Connect to record.";
-                AppLogger.LogInfo($"Started host desktop capture: {_desktopCapture.Address}");
+                string audioLabel = SelectedCaptureAudioOption?.DisplayName ?? "System Audio";
+                string networkLabel = SelectedBroadcastNetwork?.DisplayName ?? "All Networks (Auto)";
+                string endpointUrl = _desktopCapture.BroadcastEndpointUrl ?? _desktopCapture.Address ?? "OMT";
+                StatusText = $"Broadcasting host capture ({audioLabel}) on {networkLabel} ({endpointUrl}) — select it in Source and Connect.";
+                AppLogger.LogInfo($"Started host desktop capture: {endpointUrl} (Audio: {audioLabel}, Network: {networkLabel})");
             }
             else
             {
@@ -603,6 +743,58 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                            t.WindowHandle == SelectedCaptureTarget.WindowHandle))
         {
             SelectedCaptureTarget = list.FirstOrDefault();
+        }
+    }
+
+    private void PopulateCaptureAudioOptions()
+    {
+        var previous = SelectedCaptureAudioOption;
+        var list = AudioDeviceEnumerator.EnumerateOptions();
+        if (list.Count == 0)
+        {
+            list = DefaultCaptureAudioOptions;
+        }
+
+        CaptureAudioOptions = list;
+
+        if (previous != null)
+        {
+            var match = list.FirstOrDefault(o =>
+                o.Mode == previous.Mode &&
+                string.Equals(o.DeviceId, previous.DeviceId, StringComparison.OrdinalIgnoreCase))
+                ?? list.FirstOrDefault(o => o.Mode == previous.Mode && o.DeviceId == null)
+                ?? list[0];
+            SelectedCaptureAudioOption = match;
+        }
+        else
+        {
+            SelectedCaptureAudioOption = list[0];
+        }
+    }
+
+    private void PopulateBroadcastNetworks()
+    {
+        var previous = SelectedBroadcastNetwork;
+        var list = NetworkInterfaceEnumerator.Enumerate();
+        if (list.Count == 0)
+        {
+            list = DefaultBroadcastNetworks;
+        }
+
+        BroadcastNetworks = list;
+
+        if (previous != null)
+        {
+            var match = list.FirstOrDefault(n =>
+                n.IsAllNetworks == previous.IsAllNetworks &&
+                n.IsLoopbackOnly == previous.IsLoopbackOnly &&
+                string.Equals(n.IpAddress, previous.IpAddress, StringComparison.OrdinalIgnoreCase))
+                ?? list[0];
+            SelectedBroadcastNetwork = match;
+        }
+        else
+        {
+            SelectedBroadcastNetwork = list[0];
         }
     }
 
@@ -688,7 +880,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         try
         {
             PopulateCaptureTargets();
-            StatusText = $"Capture targets refreshed ({CaptureTargets.Count} available).";
+            PopulateCaptureAudioOptions();
+            PopulateBroadcastNetworks();
+            StatusText = $"Capture targets ({CaptureTargets.Count}), audio devices ({CaptureAudioOptions.Count}), and networks ({BroadcastNetworks.Count}) refreshed.";
         }
         catch (Exception ex)
         {

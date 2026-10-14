@@ -145,6 +145,21 @@ class Program
                 throw new Exception("ViewModel live status defaults mismatch!");
             }
 
+            if (vm.CaptureAudioOptions.Count < 4 || vm.SelectedCaptureAudioMode != HostAudioCaptureMode.SystemAudio)
+            {
+                throw new Exception($"ViewModel host audio capture defaults mismatch: count={vm.CaptureAudioOptions.Count}, mode={vm.SelectedCaptureAudioMode}");
+            }
+            if (vm.BroadcastNetworks.Count < 2 || !vm.SelectedBroadcastNetwork.IsAllNetworks)
+            {
+                throw new Exception($"ViewModel broadcast network defaults mismatch: count={vm.BroadcastNetworks.Count}, selected={vm.SelectedBroadcastNetwork?.DisplayName}");
+            }
+            vm.SelectedCaptureAudioMode = HostAudioCaptureMode.SystemAndMicrophone;
+            if (vm.SelectedCaptureAudioOption.Mode != HostAudioCaptureMode.SystemAndMicrophone)
+            {
+                throw new Exception($"SelectedCaptureAudioOption did not sync with SelectedCaptureAudioMode: {vm.SelectedCaptureAudioOption.Mode}");
+            }
+            vm.SelectedCaptureAudioMode = HostAudioCaptureMode.SystemAudio;
+
             // Test MOV auto-switches encoder to ProRes
             vm.SelectedContainerFormat = OutputContainerFormat.MOV;
             if (vm.SelectedEncoderChoice != VideoEncoderChoice.ProRes)
@@ -718,7 +733,174 @@ class Program
 
     static void TestDesktopCapture()
     {
-        Console.WriteLine("\n[Step 0.65] Verifying Host Desktop Capture (capture + OMT round-trip)...");
+        Console.WriteLine("\n[Step 0.65] Verifying Host Desktop & Audio Capture (WASAPI, live audio hot-swap + OMT round-trip)...");
+
+        // 0a. Verify HostAudioSourceFactory and WasapiHostAudioSource across all 4 modes + double-dispose idempotency.
+        float[] testPlanar = new float[2 * 1600]; // 30 fps @ 48 kHz = 1600 samples/ch
+        foreach (HostAudioCaptureMode mode in Enum.GetValues<HostAudioCaptureMode>())
+        {
+            IHostAudioSource src = HostAudioSourceFactory.Create(mode);
+            if (src.SampleRate != 48000 || src.Channels != 2)
+            {
+                throw new Exception($"HostAudioSourceFactory({mode}) returned invalid format: {src.SampleRate}Hz, {src.Channels}ch");
+            }
+            src.FillPlanarAudio(testPlanar, 1600);
+            for (int i = 0; i < testPlanar.Length; i++)
+            {
+                if (float.IsNaN(testPlanar[i]) || float.IsInfinity(testPlanar[i]))
+                {
+                    throw new Exception($"HostAudioSource({mode}) produced NaN/Infinity at sample {i}!");
+                }
+            }
+            src.Dispose();
+            src.Dispose(); // idempotent double-dispose
+        }
+        Console.WriteLine(" -> HostAudioSourceFactory & WasapiHostAudioSource verified across all 4 modes (SystemAudio, Microphone, SystemAndMicrophone, Mute)!");
+
+        // 0b. Headless OMT round-trip for OmtDesktopCaptureGenerator with video + lockstep 48 kHz stereo audio + live SetAudioSource hot-swap.
+        {
+            string synthSourceName = "OMT_Automated_HostAudio_Source";
+            using var synthGen = new OmtDesktopCaptureGenerator(
+                new SyntheticBgraFrameSource(640, 360),
+                synthSourceName,
+                fps: 30,
+                audioSource: new SilentHostAudioSource());
+            synthGen.Start();
+            Thread.Sleep(800);
+
+            string connectUrl = synthGen.Url ?? synthGen.Address ?? synthSourceName;
+            using var audioTestSession = new CaptureSession();
+            long synthVideoCount = 0;
+            long synthAudioLevelEvents = 0;
+            float maxObservedPeakDb = -100.0f;
+
+            audioTestSession.VideoFrameAvailable += (p, len, w, h, s, fps, ts) => Interlocked.Increment(ref synthVideoCount);
+            audioTestSession.AudioLevelsUpdated += levels =>
+            {
+                Interlocked.Increment(ref synthAudioLevelEvents);
+                if (levels.Channels.Length >= 2)
+                {
+                    float peak = (float)Math.Max(levels.Channels[0].PeakDb, levels.Channels[1].PeakDb);
+                    if (peak > maxObservedPeakDb) maxObservedPeakDb = peak;
+                }
+            };
+
+            audioTestSession.Connect(connectUrl);
+
+            int waitTicks = 0;
+            while ((synthVideoCount < 5 || synthAudioLevelEvents < 2) && waitTicks < 50)
+            {
+                Thread.Sleep(50);
+                waitTicks++;
+            }
+
+            if (synthVideoCount < 5 || !audioTestSession.CurrentFormat.HasAudio ||
+                audioTestSession.CurrentFormat.SampleRate != 48000 || audioTestSession.CurrentFormat.Channels != 2)
+            {
+                throw new Exception(
+                    $"OmtDesktopCaptureGenerator audio round-trip failed! Video={synthVideoCount}, HasAudio={audioTestSession.CurrentFormat.HasAudio}, " +
+                    $"Rate={audioTestSession.CurrentFormat.SampleRate}, Ch={audioTestSession.CurrentFormat.Channels}");
+            }
+
+            // Now hot-swap the audio source while broadcasting from SilentHostAudioSource to a 440Hz/880Hz tone generator
+            maxObservedPeakDb = -100.0f;
+            synthGen.SetAudioSource(new SyntheticToneHostAudioSource());
+
+            int toneWait = 0;
+            while (maxObservedPeakDb < -20.0f && toneWait < 40)
+            {
+                Thread.Sleep(50);
+                toneWait++;
+            }
+
+            if (maxObservedPeakDb < -20.0f)
+            {
+                throw new Exception($"Live SetAudioSource hot-swap did not deliver tone audio over OMT! MaxPeak={maxObservedPeakDb:F1} dBFS");
+            }
+
+            Console.WriteLine($" -> OmtDesktopCaptureGenerator 48kHz stereo audio + live SetAudioSource hot-swap verified (Peak: {maxObservedPeakDb:F1} dBFS)!");
+
+            // Verify WASAPI hardware audio device enumeration & specific device instantiation
+            var audioOptions = AudioDeviceEnumerator.EnumerateOptions();
+            if (audioOptions == null || audioOptions.Count < 4)
+            {
+                throw new Exception($"AudioDeviceEnumerator.EnumerateOptions() returned insufficient options ({audioOptions?.Count ?? 0}).");
+            }
+            var hwDeviceOption = audioOptions.FirstOrDefault(o => !string.IsNullOrWhiteSpace(o.DeviceId));
+            if (hwDeviceOption != null)
+            {
+                using var specificSrc = HostAudioSourceFactory.Create(hwDeviceOption);
+                float[] specBuf = new float[3200];
+                specificSrc.FillPlanarAudio(specBuf, 1600);
+                Console.WriteLine($" -> AudioDeviceEnumerator enumerated {audioOptions.Count} options (verified hardware device '{hwDeviceOption.DisplayName}')!");
+            }
+            else
+            {
+                Console.WriteLine($" -> AudioDeviceEnumerator enumerated {audioOptions.Count} preset options (no active hardware audio endpoints on host).");
+            }
+
+            // Verify NetworkInterfaceEnumerator & OmtDesktopCaptureGenerator network interface binding
+            var netOptions = NetworkInterfaceEnumerator.Enumerate();
+            if (netOptions == null || netOptions.Count < 2 || !netOptions[0].IsAllNetworks || !netOptions[^1].IsLoopbackOnly)
+            {
+                throw new Exception("NetworkInterfaceEnumerator.Enumerate() did not return expected All Networks and Localhost options!");
+            }
+
+            synthGen.SetBindIpAddress("127.0.0.1");
+            if (synthGen.BroadcastEndpointUrl == null || !synthGen.BroadcastEndpointUrl.StartsWith("omt://127.0.0.1:", StringComparison.Ordinal))
+            {
+                throw new Exception($"BroadcastEndpointUrl mismatch after SetBindIpAddress('127.0.0.1'): {synthGen.BroadcastEndpointUrl}");
+            }
+
+            // If this host has another local IPv4 address, verify that connecting to the blocked NIC IP on synthGen.Port
+            // is intercepted and immediately reset/closed (never receiving OMT stream data)
+            var blockedIps = NetworkInterfaceEnumerator.GetOtherLocalIpv4Addresses("127.0.0.1");
+            if (blockedIps.Count > 0 && synthGen.Port > 0)
+            {
+                using var probeSocket = new System.Net.Sockets.Socket(
+                    System.Net.Sockets.AddressFamily.InterNetwork,
+                    System.Net.Sockets.SocketType.Stream,
+                    System.Net.Sockets.ProtocolType.Tcp);
+                probeSocket.ReceiveTimeout = 300;
+                bool rejected = false;
+                try
+                {
+                    var ar = probeSocket.BeginConnect(new System.Net.IPEndPoint(blockedIps[0], synthGen.Port), null, null);
+                    if (ar.AsyncWaitHandle.WaitOne(400))
+                    {
+                        probeSocket.EndConnect(ar);
+                        byte[] probeBuf = new byte[16];
+                        int read = probeSocket.Receive(probeBuf);
+                        if (read == 0)
+                        {
+                            rejected = true;
+                        }
+                    }
+                    else
+                    {
+                        rejected = true;
+                    }
+                }
+                catch (System.Net.Sockets.SocketException)
+                {
+                    rejected = true;
+                }
+
+                if (!rejected)
+                {
+                    throw new Exception($"Expected non-selected interface {blockedIps[0]}:{synthGen.Port} to reject/reset connection when bound to 127.0.0.1!");
+                }
+                Console.WriteLine($" -> Network interface restriction verified: {synthGen.BroadcastEndpointUrl} active, non-selected NIC {blockedIps[0]}:{synthGen.Port} rejected ({netOptions.Count} network options)!");
+            }
+            else
+            {
+                Console.WriteLine($" -> Network interface enumeration & SetBindIpAddress verified ({netOptions.Count} network options)!");
+            }
+
+            synthGen.SetBindIpAddress(null);
+            audioTestSession.Disconnect();
+            synthGen.Stop();
+        }
 
         // 1. Capture sanity: dimensions + valid pinned BGRA buffer.
         using (var capturer = new DesktopFrameCapturer())
@@ -739,16 +921,20 @@ class Program
             }
             if (frames == 0)
             {
-                Console.WriteLine(" -> [SKIP] Host desktop capture skipped: display session access restricted in this environment.");
+                Console.WriteLine(" -> [SKIP] DXGI display capture skipped: display session access restricted in this environment.");
                 return;
             }
 
             Console.WriteLine($" -> Captured {frames} frame(s) at {capturer.Width}x{capturer.Height}, stride {capturer.Stride}");
         }
 
-        // 2. OMT round-trip: broadcast the desktop, discover it, receive video frames.
+        // 2. OMT round-trip: broadcast the desktop, discover it, receive video + audio frames.
         string sourceName = "OMT_Automated_Desktop_Source";
-        using var generator = new OmtDesktopCaptureGenerator(new DesktopFrameCapturer(), sourceName, fps: 30);
+        using var generator = new OmtDesktopCaptureGenerator(
+            new DesktopFrameCapturer(),
+            sourceName,
+            fps: 30,
+            audioSource: HostAudioSourceFactory.Create(HostAudioCaptureMode.SystemAudio));
         generator.Start();
         Console.WriteLine($" -> Broadcasting desktop as OMT source '{sourceName}' at {generator.Address}");
 
@@ -779,7 +965,7 @@ class Program
         if (videoFrames < 5)
             throw new Exception($"Received only {videoFrames} video frames from desktop OMT source in 6s.");
 
-        Console.WriteLine($" -> Received {videoFrames} desktop frames via OMT round-trip at {session.CurrentFormat.Width}x{session.CurrentFormat.Height}");
+        Console.WriteLine($" -> Received {videoFrames} desktop frames via OMT round-trip at {session.CurrentFormat.Width}x{session.CurrentFormat.Height} (Audio: {session.CurrentFormat.Channels}ch @ {session.CurrentFormat.SampleRate}Hz)");
 
         session.Disconnect();
         generator.Stop();
@@ -1471,5 +1657,66 @@ class Program
         public IntPtr BufferPtr => IntPtr.Zero;
         public bool TryCaptureFrame() => false;
         public void Dispose() => Disposed = true;
+    }
+
+    sealed class SyntheticBgraFrameSource : IFrameSource
+    {
+        private readonly byte[] _buffer;
+        private GCHandle _handle;
+        private bool _disposed;
+
+        public int Width { get; }
+        public int Height { get; }
+        public int Stride => Width * 4;
+        public IntPtr BufferPtr => _handle.IsAllocated ? _handle.AddrOfPinnedObject() : IntPtr.Zero;
+
+        public SyntheticBgraFrameSource(int width, int height)
+        {
+            Width = width;
+            Height = height;
+            _buffer = new byte[Stride * Height];
+            for (int i = 0; i < _buffer.Length; i += 4)
+            {
+                _buffer[i] = 0x40;
+                _buffer[i + 1] = 0x80;
+                _buffer[i + 2] = 0xC0;
+                _buffer[i + 3] = 0xFF;
+            }
+            _handle = GCHandle.Alloc(_buffer, GCHandleType.Pinned);
+        }
+
+        public bool TryCaptureFrame() => !_disposed;
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            if (_handle.IsAllocated) _handle.Free();
+        }
+    }
+
+    sealed class SyntheticToneHostAudioSource : IHostAudioSource
+    {
+        private double _phaseL;
+        private double _phaseR;
+        public int SampleRate => 48000;
+        public int Channels => 2;
+
+        public void FillPlanarAudio(Span<float> planarDestination, int samplesPerChannel)
+        {
+            Span<float> left = planarDestination.Slice(0, samplesPerChannel);
+            Span<float> right = planarDestination.Slice(samplesPerChannel, samplesPerChannel);
+            for (int i = 0; i < samplesPerChannel; i++)
+            {
+                left[i] = (float)(Math.Sin(_phaseL) * 0.5);
+                right[i] = (float)(Math.Sin(_phaseR) * 0.5);
+                _phaseL += 2.0 * Math.PI * 440.0 / SampleRate;
+                _phaseR += 2.0 * Math.PI * 880.0 / SampleRate;
+                if (_phaseL > 2.0 * Math.PI) _phaseL -= 2.0 * Math.PI;
+                if (_phaseR > 2.0 * Math.PI) _phaseR -= 2.0 * Math.PI;
+            }
+        }
+
+        public void Dispose() { }
     }
 }

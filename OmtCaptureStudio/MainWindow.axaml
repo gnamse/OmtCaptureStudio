@@ -22,106 +22,167 @@
             <RowDefinition Height="Auto"/> <!-- Dedicated Status Bar -->
         </Grid.RowDefinitions>
 
-        <!-- 1. TOP BAR: Source Discovery & Broadcast Controls -->
-        <Border Grid.Row="0" Background="{DynamicResource StudioSurface}" BorderBrush="{DynamicResource StudioBorder}" BorderThickness="0,0,0,1" Padding="12,8"
+        <!-- 1. TOP BAR: Source Discovery & Host Broadcast Studio Controls -->
+        <Border Grid.Row="0" Background="{DynamicResource StudioSurface}" BorderBrush="{DynamicResource StudioBorder}" BorderThickness="0,0,0,1" Padding="14,8"
                 IsEnabled="{CompiledBinding IsMainContentEnabled}">
-            <Grid VerticalAlignment="Center">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/> <!-- 0: App Branding -->
-                    <ColumnDefinition Width="Auto"/> <!-- 1: Source Label -->
-                    <ColumnDefinition Width="*" MinWidth="120"/> <!-- 2: Source ComboBox (elastic) -->
-                    <ColumnDefinition Width="Auto"/> <!-- 3: Refresh Sources Button -->
-                    <ColumnDefinition Width="Auto"/> <!-- 4: Connect / Disconnect Button -->
-                    <ColumnDefinition Width="Auto"/> <!-- 5: Divider -->
-                    <ColumnDefinition Width="Auto"/> <!-- 6: Test Signal Button -->
-                    <ColumnDefinition Width="Auto"/> <!-- 7: Capture Label -->
-                    <ColumnDefinition Width="1.15*" MinWidth="120"/> <!-- 8: Capture Target ComboBox (elastic) -->
-                    <ColumnDefinition Width="Auto"/> <!-- 9: Refresh Capture Targets Button -->
-                    <ColumnDefinition Width="Auto"/> <!-- 10: Broadcast Toggle Button -->
-                </Grid.ColumnDefinitions>
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/> <!-- Row 0: OMT Stream Receiver & Test Signal -->
+                    <RowDefinition Height="Auto"/> <!-- Row 1: Host Broadcast (Screen/Window, Audio Device, Network Interface) -->
+                </Grid.RowDefinitions>
 
-                <!-- 0: App Branding -->
-                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-                    <Border Background="{DynamicResource StudioAccentPrimary}" CornerRadius="{DynamicResource RadiusSm}" Padding="6,3" Margin="0,0,8,0" VerticalAlignment="Center">
-                        <TextBlock Text="OMT" Foreground="{DynamicResource StudioTextOnAccent}" FontWeight="Black" FontSize="13"/>
-                    </Border>
-                    <TextBlock Text="CAPTURE STUDIO" Foreground="{DynamicResource StudioTextPrimary}" FontWeight="Bold" FontSize="14" VerticalAlignment="Center"/>
-                </StackPanel>
+                <!-- Row 0: App Branding, OMT Source Receiver & Test Signal -->
+                <Grid Grid.Row="0" VerticalAlignment="Center">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/> <!-- 0: App Branding -->
+                        <ColumnDefinition Width="Auto"/> <!-- 1: Source Label -->
+                        <ColumnDefinition Width="*" MinWidth="160"/> <!-- 2: Source ComboBox (elastic) -->
+                        <ColumnDefinition Width="Auto"/> <!-- 3: Refresh Sources Button -->
+                        <ColumnDefinition Width="Auto"/> <!-- 4: Connect / Disconnect Button -->
+                        <ColumnDefinition Width="Auto"/> <!-- 5: Divider -->
+                        <ColumnDefinition Width="Auto"/> <!-- 6: Test Signal Button -->
+                    </Grid.ColumnDefinitions>
 
-                <!-- 1-4: Source Picker & Connection -->
-                <TextBlock Grid.Column="1" Text="Source:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <ComboBox x:Name="CmbSources" Grid.Column="2" Margin="0,0,6,0" HorizontalAlignment="Stretch" VerticalAlignment="Center"
-                          ItemsSource="{CompiledBinding DiscoveredSources}"
-                          SelectedItem="{CompiledBinding SelectedSource, Mode=TwoWay}"
-                          IsDropDownOpen="{CompiledBinding IsSourceDropDownOpen, Mode=TwoWay}"
-                          ToolTip.Tip="{CompiledBinding SelectedSourceToolTip}"
-                          AutomationProperties.Name="Source Stream Selection">
-                    <ComboBox.ItemTemplate>
-                        <DataTemplate x:DataType="models:OmtSourceInfo">
-                            <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis" />
-                        </DataTemplate>
-                    </ComboBox.ItemTemplate>
-                </ComboBox>
-                <Button x:Name="BtnRefreshSources" Grid.Column="3" Padding="8,0" Margin="0,0,6,0" MinHeight="30" VerticalAlignment="Center"
-                        HotKey="F5"
-                        AutomationProperties.Name="Refresh Discovered Sources"
-                        ToolTip.Tip="Scan network and refresh discovered OMT sources (F5)"
-                        Command="{CompiledBinding RefreshSourcesCommand}">
-                    <StackPanel Orientation="Horizontal" Spacing="5">
-                        <Path Data="{DynamicResource IconRefresh}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center"/>
-                        <TextBlock Text="Refresh" VerticalAlignment="Center"/>
+                    <!-- 0: App Branding -->
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,14,0">
+                        <Border Background="{DynamicResource StudioAccentPrimary}" CornerRadius="{DynamicResource RadiusSm}" Padding="6,3" Margin="0,0,8,0" VerticalAlignment="Center">
+                            <TextBlock Text="OMT" Foreground="{DynamicResource StudioTextOnAccent}" FontWeight="Black" FontSize="13"/>
+                        </Border>
+                        <TextBlock Text="CAPTURE STUDIO" Foreground="{DynamicResource StudioTextPrimary}" FontWeight="Bold" FontSize="14" VerticalAlignment="Center"/>
                     </StackPanel>
-                </Button>
-                <Button x:Name="BtnConnect" Grid.Column="4"
-                        Content="{CompiledBinding ConnectButtonText}"
-                        Background="{CompiledBinding ConnectButtonBackground}"
-                        Foreground="{CompiledBinding ConnectButtonForeground}"
-                        AutomationProperties.Name="{CompiledBinding ConnectButtonAutomationName}"
-                        MinWidth="84" MinHeight="30" Padding="10,5" Margin="0,0,10,0" VerticalAlignment="Center"
-                        FontWeight="Bold"
-                        HotKey="Ctrl+Enter"
-                        ToolTip.Tip="Connect to or disconnect from the selected OMT stream (Ctrl+Enter)"
-                        Command="{CompiledBinding ToggleConnectCommand}"/>
 
-                <!-- 5: Divider -->
-                <Rectangle Grid.Column="5" Width="1" Height="22" Fill="{DynamicResource StudioBorderSubtle}" Margin="0,0,10,0" VerticalAlignment="Center"/>
+                    <!-- 1-4: Source Picker & Connection -->
+                    <TextBlock Grid.Column="1" Text="Source:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <ComboBox x:Name="CmbSources" Grid.Column="2" Margin="0,0,6,0" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                              ItemsSource="{CompiledBinding DiscoveredSources}"
+                              SelectedItem="{CompiledBinding SelectedSource, Mode=TwoWay}"
+                              IsDropDownOpen="{CompiledBinding IsSourceDropDownOpen, Mode=TwoWay}"
+                              ToolTip.Tip="{CompiledBinding SelectedSourceToolTip}"
+                              AutomationProperties.Name="Source Stream Selection">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="models:OmtSourceInfo">
+                                <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                    <Button x:Name="BtnRefreshSources" Grid.Column="3" Padding="8,0" Margin="0,0,6,0" MinHeight="30" VerticalAlignment="Center"
+                            HotKey="F5"
+                            AutomationProperties.Name="Refresh Discovered Sources"
+                            ToolTip.Tip="Scan network and refresh discovered OMT sources (F5)"
+                            Command="{CompiledBinding RefreshSourcesCommand}">
+                        <StackPanel Orientation="Horizontal" Spacing="5">
+                            <Path Data="{DynamicResource IconRefresh}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center"/>
+                            <TextBlock Text="Refresh" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="BtnConnect" Grid.Column="4"
+                            Content="{CompiledBinding ConnectButtonText}"
+                            Background="{CompiledBinding ConnectButtonBackground}"
+                            Foreground="{CompiledBinding ConnectButtonForeground}"
+                            AutomationProperties.Name="{CompiledBinding ConnectButtonAutomationName}"
+                            MinWidth="88" MinHeight="30" Padding="10,5" Margin="0,0,10,0" VerticalAlignment="Center"
+                            FontWeight="Bold"
+                            HotKey="Ctrl+Enter"
+                            ToolTip.Tip="Connect to or disconnect from the selected OMT stream (Ctrl+Enter)"
+                            Command="{CompiledBinding ToggleConnectCommand}"/>
 
-                <!-- 6-10: Test Signal & Host Desktop Broadcast -->
-                <ToggleButton x:Name="BtnTestSignal" Grid.Column="6" Content="Test Signal" Padding="10,5" Margin="0,0,12,0" MinHeight="30" VerticalAlignment="Center"
-                              IsChecked="{CompiledBinding IsTestSignalActive, Mode=OneWay}"
-                              Background="{CompiledBinding TestSignalBackground}"
-                              Foreground="{CompiledBinding TestSignalForeground}"
-                              BorderBrush="{DynamicResource StudioAccentPrimary}" BorderThickness="1"
-                              AutomationProperties.Name="{CompiledBinding TestSignalAutomationName}"
-                              ToolTip.Tip="Toggle internal SMPTE color bars test generator"
-                              Command="{CompiledBinding ToggleTestSignalCommand}"/>
-                <TextBlock Grid.Column="7" Text="Capture:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <ComboBox x:Name="CmbCaptureTarget" Grid.Column="8" Margin="0,0,6,0" MinHeight="30" HorizontalAlignment="Stretch" VerticalAlignment="Center"
-                          ItemsSource="{CompiledBinding CaptureTargets}"
-                          SelectedItem="{CompiledBinding SelectedCaptureTarget, Mode=TwoWay}"
-                          IsDropDownOpen="{CompiledBinding IsCaptureTargetDropDownOpen, Mode=TwoWay}"
-                          AutomationProperties.Name="Host capture target"
-                          ToolTip.Tip="Select which screen or window to broadcast">
-                    <ComboBox.ItemTemplate>
-                        <DataTemplate x:DataType="models:CaptureTarget">
-                            <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis"/>
-                        </DataTemplate>
-                    </ComboBox.ItemTemplate>
-                </ComboBox>
-                <Button x:Name="BtnRefreshCaptureTargets" Grid.Column="9" Padding="7,0" Margin="0,0,6,0" MinHeight="30" VerticalAlignment="Center"
-                        AutomationProperties.Name="Refresh capture targets"
-                        ToolTip.Tip="Refresh monitor and window list"
-                        Command="{CompiledBinding RefreshCaptureTargetsCommand}">
-                    <Path Data="{DynamicResource IconRefresh}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center"/>
-                </Button>
-                <ToggleButton x:Name="BtnDesktopCapture" Grid.Column="10" Content="Broadcast" Padding="10,5" MinHeight="30" VerticalAlignment="Center"
-                              IsChecked="{CompiledBinding IsDesktopCaptureActive, Mode=OneWay}"
-                              Background="{CompiledBinding DesktopCaptureBackground}"
-                              Foreground="{CompiledBinding DesktopCaptureForeground}"
-                              BorderBrush="{DynamicResource StudioAccentPrimary}" BorderThickness="1"
-                              AutomationProperties.Name="{CompiledBinding DesktopCaptureAutomationName}"
-                              ToolTip.Tip="Broadcast the selected screen or window over OMT"
-                              Command="{CompiledBinding ToggleDesktopCaptureCommand}"/>
+                    <!-- 5: Divider -->
+                    <Rectangle Grid.Column="5" Width="1" Height="22" Fill="{DynamicResource StudioBorderSubtle}" Margin="0,0,10,0" VerticalAlignment="Center"/>
+
+                    <!-- 6: Test Signal -->
+                    <ToggleButton x:Name="BtnTestSignal" Grid.Column="6" Content="Test Signal" Padding="10,5" MinHeight="30" VerticalAlignment="Center"
+                                  IsChecked="{CompiledBinding IsTestSignalActive, Mode=OneWay}"
+                                  Background="{CompiledBinding TestSignalBackground}"
+                                  Foreground="{CompiledBinding TestSignalForeground}"
+                                  BorderBrush="{DynamicResource StudioAccentPrimary}" BorderThickness="1"
+                                  AutomationProperties.Name="{CompiledBinding TestSignalAutomationName}"
+                                  ToolTip.Tip="Toggle internal SMPTE color bars test generator"
+                                  Command="{CompiledBinding ToggleTestSignalCommand}"/>
+                </Grid>
+
+                <!-- Row 1: Host Broadcast Studio Bar (Screen/Window Target, Audio Device, Network Interface) -->
+                <Border Grid.Row="1" BorderBrush="{DynamicResource StudioBorderSubtle}" BorderThickness="0,1,0,0" Margin="0,7,0,0" Padding="0,7,0,0">
+                    <Grid VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/> <!-- 0: Broadcast Badge -->
+                            <ColumnDefinition Width="Auto"/> <!-- 1: Target Label -->
+                            <ColumnDefinition Width="1.15*" MinWidth="130"/> <!-- 2: Capture Target ComboBox -->
+                            <ColumnDefinition Width="Auto"/> <!-- 3: Audio Label -->
+                            <ColumnDefinition Width="1.25*" MinWidth="140"/> <!-- 4: Audio Device ComboBox -->
+                            <ColumnDefinition Width="Auto"/> <!-- 5: Network Label -->
+                            <ColumnDefinition Width="1*" MinWidth="130"/> <!-- 6: Network Adapter ComboBox -->
+                            <ColumnDefinition Width="Auto"/> <!-- 7: Refresh Targets/Devices/Networks Button -->
+                            <ColumnDefinition Width="Auto"/> <!-- 8: Broadcast Toggle Button -->
+                        </Grid.ColumnDefinitions>
+
+                        <Border Grid.Column="0" Background="{DynamicResource StudioSurfaceElevated}" BorderBrush="{DynamicResource StudioBorderSubtle}" BorderThickness="1" CornerRadius="{DynamicResource RadiusSm}" Padding="6,3" Margin="0,0,10,0" VerticalAlignment="Center">
+                            <TextBlock Text="HOST BROADCAST" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" VerticalAlignment="Center"/>
+                        </Border>
+
+                        <!-- Target (Monitor / Window) -->
+                        <TextBlock Grid.Column="1" Text="Target:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <ComboBox x:Name="CmbCaptureTarget" Grid.Column="2" Margin="0,0,10,0" MinHeight="30" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                  ItemsSource="{CompiledBinding CaptureTargets}"
+                                  SelectedItem="{CompiledBinding SelectedCaptureTarget, Mode=TwoWay}"
+                                  IsDropDownOpen="{CompiledBinding IsCaptureTargetDropDownOpen, Mode=TwoWay}"
+                                  AutomationProperties.Name="Host capture target"
+                                  ToolTip.Tip="Select which screen or window to broadcast over OMT">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate x:DataType="models:CaptureTarget">
+                                    <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+
+                        <!-- Audio Device (Presets + Specific WASAPI Output Loopback / Microphone Devices) -->
+                        <TextBlock Grid.Column="3" Text="Audio:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <ComboBox x:Name="CmbCaptureAudio" Grid.Column="4" Margin="0,0,10,0" MinHeight="30" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                  ItemsSource="{CompiledBinding CaptureAudioOptions}"
+                                  SelectedItem="{CompiledBinding SelectedCaptureAudioOption, Mode=TwoWay}"
+                                  IsDropDownOpen="{CompiledBinding IsCaptureAudioDropDownOpen, Mode=TwoWay}"
+                                  AutomationProperties.Name="Host broadcast audio device"
+                                  ToolTip.Tip="Select preset audio mode or specific WASAPI Output (loopback) / Microphone device">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate x:DataType="models:HostAudioCaptureOption">
+                                    <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+
+                        <!-- Network Interface (All Networks, Specific NIC IPv4, or Localhost) -->
+                        <TextBlock Grid.Column="5" Text="Network:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <ComboBox x:Name="CmbCaptureNetwork" Grid.Column="6" Margin="0,0,6,0" MinHeight="30" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                  ItemsSource="{CompiledBinding BroadcastNetworks}"
+                                  SelectedItem="{CompiledBinding SelectedBroadcastNetwork, Mode=TwoWay}"
+                                  IsDropDownOpen="{CompiledBinding IsBroadcastNetworkDropDownOpen, Mode=TwoWay}"
+                                  AutomationProperties.Name="Host broadcast network interface"
+                                  ToolTip.Tip="Select which network interface OMT broadcasts on">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate x:DataType="models:BroadcastNetworkOption">
+                                    <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+
+                        <!-- Refresh Capture Targets, Audio Devices & Networks -->
+                        <Button x:Name="BtnRefreshCaptureTargets" Grid.Column="7" Padding="7,0" Margin="0,0,6,0" MinHeight="30" VerticalAlignment="Center"
+                                AutomationProperties.Name="Refresh capture targets, audio devices, and networks"
+                                ToolTip.Tip="Refresh monitors, windows, audio devices, and network adapters"
+                                Command="{CompiledBinding RefreshCaptureTargetsCommand}">
+                            <Path Data="{DynamicResource IconRefresh}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center"/>
+                        </Button>
+
+                        <!-- Broadcast Toggle -->
+                        <ToggleButton x:Name="BtnDesktopCapture" Grid.Column="8" Content="Broadcast" Padding="10,5" MinHeight="30" VerticalAlignment="Center"
+                                      IsChecked="{CompiledBinding IsDesktopCaptureActive, Mode=OneWay}"
+                                      Background="{CompiledBinding DesktopCaptureBackground}"
+                                      Foreground="{CompiledBinding DesktopCaptureForeground}"
+                                      BorderBrush="{DynamicResource StudioAccentPrimary}" BorderThickness="1"
+                                      AutomationProperties.Name="{CompiledBinding DesktopCaptureAutomationName}"
+                                      ToolTip.Tip="Broadcast the selected screen or window and audio device over the selected OMT network"
+                                      Command="{CompiledBinding ToggleDesktopCaptureCommand}"/>
+                    </Grid>
+                </Border>
             </Grid>
         </Border>
 
