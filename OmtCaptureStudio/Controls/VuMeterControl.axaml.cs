@@ -28,12 +28,15 @@ public partial class VuMeterControl : UserControl
 
     private readonly TextBlock[] _scaleLabels;
     private readonly Rectangle[] _scaleTicks;
+    private readonly Action _processPendingLevelsDelegate;
 
     private float _peakHoldLeft = -60f;
     private float _peakHoldRight = -60f;
     private DateTime _lastClipLeft = DateTime.MinValue;
     private DateTime _lastClipRight = DateTime.MinValue;
     private long _lastMeterTick;
+    private volatile AudioLevelData? _stagedLevels;
+    private int _meterUpdatePending;
 
     public event Action<bool>? MonitoringToggled;
 
@@ -41,6 +44,7 @@ public partial class VuMeterControl : UserControl
     {
         InitializeComponent();
 
+        _processPendingLevelsDelegate = ProcessPendingLevels;
         _scaleLabels = new TextBlock[ScaleMarks.Length];
         _scaleTicks = new Rectangle[ScaleMarks.Length];
         InitializeScaleElements();
@@ -54,7 +58,7 @@ public partial class VuMeterControl : UserControl
     public static double DbToNormalized(float db)
     {
         // Broadcast standard dBFS scale (-60 dB to 0 dB)
-        if (db <= -60f) return 0.0;
+        if (float.IsNaN(db) || db <= -60f) return 0.0;
         if (db >= 0f) return 1.0;
         return (db + 60.0) / 60.0;
     }
@@ -132,8 +136,18 @@ public partial class VuMeterControl : UserControl
         if (now - _lastMeterTick < 25) return; // Cap meter UI refresh rate to ~40 fps
         _lastMeterTick = now;
 
-        Dispatcher.UIThread.Post(() =>
+        _stagedLevels = levelData;
+        if (System.Threading.Interlocked.CompareExchange(ref _meterUpdatePending, 1, 0) == 0)
         {
+            Dispatcher.UIThread.Post(_processPendingLevelsDelegate, DispatcherPriority.Normal);
+        }
+    }
+
+    private void ProcessPendingLevels()
+    {
+        try
+        {
+            var levelData = _stagedLevels;
             if (levelData == null || levelData.Channels.Length == 0)
             {
                 ResetMeters();
@@ -185,7 +199,11 @@ public partial class VuMeterControl : UserControl
 
             float maxCurrentPeak = Math.Max(chL?.PeakDb ?? -60f, chR?.PeakDb ?? -60f);
             TxtDbReadout.Text = maxCurrentPeak <= -59.5f ? "-inf dB" : $"{maxCurrentPeak:F1} dB";
-        });
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _meterUpdatePending, 0);
+        }
     }
 
     public void ResetMeters()

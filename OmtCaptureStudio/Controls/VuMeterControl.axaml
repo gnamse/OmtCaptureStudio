@@ -23,11 +23,13 @@
                 <ColumnDefinition Width="4"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            <Border x:Name="ClipLeft" Grid.Column="0" Background="{DynamicResource StudioBorderSubtle}" CornerRadius="2" Height="14">
-                <TextBlock Text="CLIP" Foreground="{DynamicResource StudioTextPrimary}" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Border x:Name="ClipLeft" Grid.Column="0" Background="{DynamicResource StudioBorderSubtle}" CornerRadius="2" Height="15"
+                    AutomationProperties.Name="Left Channel Clip Indicator">
+                <TextBlock Text="CLIP" Foreground="{DynamicResource StudioTextOnAccent}" FontSize="9" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
-            <Border x:Name="ClipRight" Grid.Column="2" Background="{DynamicResource StudioBorderSubtle}" CornerRadius="2" Height="14">
-                <TextBlock Text="CLIP" Foreground="{DynamicResource StudioTextPrimary}" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Border x:Name="ClipRight" Grid.Column="2" Background="{DynamicResource StudioBorderSubtle}" CornerRadius="2" Height="15"
+                    AutomationProperties.Name="Right Channel Clip Indicator">
+                <TextBlock Text="CLIP" Foreground="{DynamicResource StudioTextOnAccent}" FontSize="9" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
         </Grid>
 
@@ -48,21 +50,9 @@
                 <Grid x:Name="TrackLeft" Background="{DynamicResource StudioBg}">
                     <!-- Clipper reveals full-height gradient from bottom -->
                     <Border x:Name="BarClipperLeft" VerticalAlignment="Bottom" Height="0" ClipToBounds="True">
-                        <Rectangle x:Name="GradientBarLeft" VerticalAlignment="Bottom" Height="300">
-                            <Rectangle.Fill>
-                                <LinearGradientBrush StartPoint="0%,100%" EndPoint="0%,0%">
-                                    <GradientStop Color="#10B981" Offset="0.0"/>
-                                    <GradientStop Color="#22C55E" Offset="0.65"/>
-                                    <GradientStop Color="#84CC16" Offset="0.70"/>
-                                    <GradientStop Color="#EAB308" Offset="0.73"/>
-                                    <GradientStop Color="#F59E0B" Offset="0.88"/>
-                                    <GradientStop Color="#EF4444" Offset="0.90"/>
-                                    <GradientStop Color="#DC2626" Offset="1.00"/>
-                                </LinearGradientBrush>
-                            </Rectangle.Fill>
-                        </Rectangle>
+                        <Rectangle x:Name="GradientBarLeft" VerticalAlignment="Bottom" Height="300" Fill="{DynamicResource StudioVuMeterGradient}"/>
                     </Border>
-                    <Rectangle x:Name="PeakLineLeft" Height="2" Fill="#FFFFFF" VerticalAlignment="Bottom" Margin="0" Opacity="0.95"/>
+                    <Rectangle x:Name="PeakLineLeft" Height="2" Fill="{DynamicResource StudioTextOnAccent}" VerticalAlignment="Bottom" Margin="0" Opacity="0.95"/>
                 </Grid>
             </Border>
 
@@ -70,21 +60,9 @@
             <Border Grid.Column="3" Background="{DynamicResource StudioBg}" CornerRadius="3" BorderBrush="{DynamicResource StudioBorder}" BorderThickness="1" ClipToBounds="True">
                 <Grid x:Name="TrackRight" Background="{DynamicResource StudioBg}">
                     <Border x:Name="BarClipperRight" VerticalAlignment="Bottom" Height="0" ClipToBounds="True">
-                        <Rectangle x:Name="GradientBarRight" VerticalAlignment="Bottom" Height="300">
-                            <Rectangle.Fill>
-                                <LinearGradientBrush StartPoint="0%,100%" EndPoint="0%,0%">
-                                    <GradientStop Color="#10B981" Offset="0.0"/>
-                                    <GradientStop Color="#22C55E" Offset="0.65"/>
-                                    <GradientStop Color="#84CC16" Offset="0.70"/>
-                                    <GradientStop Color="#EAB308" Offset="0.73"/>
-                                    <GradientStop Color="#F59E0B" Offset="0.88"/>
-                                    <GradientStop Color="#EF4444" Offset="0.90"/>
-                                    <GradientStop Color="#DC2626" Offset="1.00"/>
-                                </LinearGradientBrush>
-                            </Rectangle.Fill>
-                        </Rectangle>
+                        <Rectangle x:Name="GradientBarRight" VerticalAlignment="Bottom" Height="300" Fill="{DynamicResource StudioVuMeterGradient}"/>
                     </Border>
-                    <Rectangle x:Name="PeakLineRight" Height="2" Fill="#FFFFFF" VerticalAlignment="Bottom" Margin="0" Opacity="0.95"/>
+                    <Rectangle x:Name="PeakLineRight" Height="2" Fill="{DynamicResource StudioTextOnAccent}" VerticalAlignment="Bottom" Margin="0" Opacity="0.95"/>
                 </Grid>
             </Border>
         </Grid>

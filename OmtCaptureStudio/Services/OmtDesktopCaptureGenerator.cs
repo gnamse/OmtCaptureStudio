@@ -23,6 +23,8 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
     private IFrameSource? _capturer;
     private Thread? _sendThread;
     private volatile bool _isRunning;
+    private bool _started;
+    private bool _disposed;
 
     public bool IsRunning => _isRunning;
     public string SourceName => _sourceName;
@@ -39,7 +41,8 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
 
     public void Start()
     {
-        if (_isRunning) return;
+        if (_isRunning || _disposed) return;
+        _started = true;
 
         IFrameSource source = _frameSource;
         OMTSend? sender = null;
@@ -162,5 +165,15 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         }
     }
 
-    public void Dispose() => Stop();
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        Stop();
+        if (!_started)
+        {
+            try { _frameSource.Dispose(); } catch { }
+        }
+        GC.SuppressFinalize(this);
+    }
 }

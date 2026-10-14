@@ -47,14 +47,16 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     // Monitors are effectively static (DXGI enumeration needs a D3D11 device) — cache them
     // and refresh only the window list on the live-tracking timer.
     private IReadOnlyList<CaptureTarget> _cachedMonitors = Array.Empty<CaptureTarget>();
+    private bool _monitorsEnumerated;
 
     private long _lastHudUpdateTick;
-    private int _lastWidth;
-    private int _lastHeight;
+    private volatile int _lastWidth;
+    private volatile int _lastHeight;
     private double _lastFps;
     private volatile bool _isLive;
     private volatile bool _isSafeExitConfirmed;
     private bool _disposed;
+    private readonly Action _updateVideoHudDelegate;
 
     #region Observable Properties
 
@@ -83,7 +85,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private IBrush _connectButtonBackground = ConnectBrush;
 
     [ObservableProperty]
-    private IBrush _connectButtonForeground = Brushes.Black;
+    private IBrush _connectButtonForeground = StudioPalette.ButtonDarkForeground;
 
     [ObservableProperty]
     private string _connectButtonAutomationName = "Connect Stream";
@@ -97,6 +99,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private bool _isRecordButtonEnabled = true;
+
+    [ObservableProperty]
+    private bool _isRecordingConfigEnabled = true;
 
     [ObservableProperty]
     private string _recordButtonText = "● START RECORDING";
@@ -115,7 +120,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private IBrush _testSignalBackground = TestSignalInactiveBrush;
 
     [ObservableProperty]
-    private IBrush _testSignalForeground = Brushes.WhiteSmoke;
+    private IBrush _testSignalForeground = StudioPalette.ButtonLightForeground;
 
     [ObservableProperty]
     private string _testSignalAutomationName = "Enable Test Signal Generator";
@@ -126,6 +131,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private IBrush _desktopCaptureBackground = TestSignalInactiveBrush;
+
+    [ObservableProperty]
+    private IBrush _desktopCaptureForeground = StudioPalette.ButtonLightForeground;
 
     [ObservableProperty]
     private string _desktopCaptureAutomationName = "Enable Host Broadcast";
@@ -193,6 +201,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private bool _isRecordingCloseOverlayVisible;
 
     [ObservableProperty]
+    private bool _isMainContentEnabled = true;
+
+    [ObservableProperty]
     private bool _isStopAndExitEnabled = true;
 
     [ObservableProperty]
@@ -236,6 +247,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _discoveryService = discoveryService ?? throw new ArgumentNullException(nameof(discoveryService));
         _ownsDependencies = ownsDependencies;
+        _updateVideoHudDelegate = UpdateVideoHudOnUIThread;
 
         // Load version info
         string version = "Unknown";
@@ -356,6 +368,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    partial void OnIsRecordingCloseOverlayVisibleChanged(bool value)
+    {
+        IsMainContentEnabled = !value;
+    }
+
     #endregion
 
     #region Relay Commands
@@ -375,6 +392,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void RefreshSources()
     {
+        if (IsRecordingCloseOverlayVisible) return;
+
         try
         {
             _discoveryService.RefreshNow();
@@ -390,6 +409,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task ToggleConnectAsync()
     {
+        if (IsRecordingCloseOverlayVisible) return;
+
         try
         {
             if (_session.IsConnected || ConnectButtonText == "Disconnect")
@@ -408,7 +429,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
                 IsTestSignalActive = false;
                 TestSignalBackground = TestSignalInactiveBrush;
-                TestSignalForeground = Brushes.WhiteSmoke;
+                TestSignalForeground = StudioPalette.ButtonLightForeground;
                 TestSignalAutomationName = "Enable Test Signal Generator";
             }
             else
@@ -424,7 +445,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 _session.Connect(info.Address);
                 ConnectButtonText = "Disconnect";
                 ConnectButtonBackground = DisconnectBrush;
-                ConnectButtonForeground = Brushes.White;
+                ConnectButtonForeground = StudioPalette.ButtonWhiteForeground;
                 ConnectButtonAutomationName = "Disconnect Stream";
             }
         }
@@ -438,6 +459,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task ToggleTestSignalAsync()
     {
+        if (IsRecordingCloseOverlayVisible) return;
         await SetTestSignalActiveAsync(!IsTestSignalActive);
     }
 
@@ -459,7 +481,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
                 IsTestSignalActive = true;
                 TestSignalBackground = TestSignalActiveBrush;
-                TestSignalForeground = Brushes.White;
+                TestSignalForeground = StudioPalette.ButtonWhiteForeground;
                 TestSignalAutomationName = "Disable Test Signal Generator";
                 SourceNameText = "Local Test Pattern (SMPTE)";
                 StatusText = "Connected to internal synthetic test generator.";
@@ -469,14 +491,14 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
                 ConnectButtonText = "Disconnect";
                 ConnectButtonBackground = DisconnectBrush;
-                ConnectButtonForeground = Brushes.White;
+                ConnectButtonForeground = StudioPalette.ButtonWhiteForeground;
                 ConnectButtonAutomationName = "Disconnect Stream";
             }
             else
             {
                 IsTestSignalActive = false;
                 TestSignalBackground = TestSignalInactiveBrush;
-                TestSignalForeground = Brushes.WhiteSmoke;
+                TestSignalForeground = StudioPalette.ButtonLightForeground;
                 TestSignalAutomationName = "Enable Test Signal Generator";
                 StatusText = "Test pattern stopped.";
 
@@ -507,6 +529,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task ToggleDesktopCaptureAsync()
     {
+        if (IsRecordingCloseOverlayVisible) return;
         await SetDesktopCaptureActiveAsync(!IsDesktopCaptureActive);
     }
 
@@ -531,17 +554,19 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 _activeCaptureTarget = target;
                 IsDesktopCaptureActive = true;
                 DesktopCaptureBackground = TestSignalActiveBrush;
+                DesktopCaptureForeground = StudioPalette.ButtonWhiteForeground;
                 DesktopCaptureAutomationName = "Disable Host Broadcast";
                 StatusText = "Broadcasting host capture over OMT — select it in the Source dropdown and Connect to record.";
                 AppLogger.LogInfo($"Started host desktop capture: {_desktopCapture.Address}");
             }
             else
             {
-                _desktopCapture?.Stop();
+                _desktopCapture?.Dispose();
                 _desktopCapture = null;
                 _activeCaptureTarget = null;
                 IsDesktopCaptureActive = false;
                 DesktopCaptureBackground = TestSignalInactiveBrush;
+                DesktopCaptureForeground = StudioPalette.ButtonLightForeground;
                 DesktopCaptureAutomationName = "Enable Host Broadcast";
                 StatusText = "Host capture stopped.";
                 AppLogger.LogInfo("Stopped host desktop capture.");
@@ -552,6 +577,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             AppLogger.LogError($"Error toggling desktop capture: {ex.Message}", ex);
             IsDesktopCaptureActive = false;
             DesktopCaptureBackground = TestSignalInactiveBrush;
+            DesktopCaptureForeground = StudioPalette.ButtonLightForeground;
             DesktopCaptureAutomationName = "Enable Host Broadcast";
             StatusText = $"Host capture error: {ex.Message}";
         }
@@ -559,11 +585,12 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private void PopulateCaptureTargets()
     {
-        // Monitors are cached after the first successful DXGI enumeration (it spins up a
-        // D3D11 device); only refresh them when the cache is empty.
-        if (_cachedMonitors.Count == 0)
+        // Monitors are cached after the first DXGI enumeration attempt (it spins up a
+        // D3D11 device); only refresh them when not yet enumerated.
+        if (!_monitorsEnumerated)
         {
             _cachedMonitors = MonitorEnumerator.Enumerate();
+            _monitorsEnumerated = true;
         }
 
         var list = new List<CaptureTarget>(_cachedMonitors);
@@ -673,6 +700,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task ToggleRecordAsync()
     {
+        if (IsRecordingCloseOverlayVisible) return;
+
         if (_session.IsRecording)
         {
             IsRecordButtonEnabled = false;
@@ -726,6 +755,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task BrowseOutputDirectoryAsync()
     {
+        if (IsRecordingCloseOverlayVisible || !IsRecordingConfigEnabled) return;
+
         if (PickFolderAsync != null)
         {
             try
@@ -891,15 +922,17 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             _lastHeight = height;
             _lastFps = fps;
 
-            PostToUIThread(() =>
-            {
-                if (!_session.IsConnected || _disposed) return;
-                IsNoSignalOverlayVisible = false;
-                LiveIndicatorBrush = LiveIndicatorActiveBrush;
-                LiveStatusText = "LIVE";
-                VideoSpecsText = $"{width}x{height} @ {fps:F2} fps";
-            }, DispatcherPriority.Normal);
+            PostToUIThread(_updateVideoHudDelegate, DispatcherPriority.Normal);
         }
+    }
+
+    private void UpdateVideoHudOnUIThread()
+    {
+        if (!_session.IsConnected || _disposed) return;
+        IsNoSignalOverlayVisible = false;
+        LiveIndicatorBrush = LiveIndicatorActiveBrush;
+        LiveStatusText = "LIVE";
+        VideoSpecsText = $"{_lastWidth}x{_lastHeight} @ {_lastFps:F2} fps";
     }
 
     private void OnAudioLevelsUpdated(AudioLevelData levels)
@@ -930,6 +963,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         PostToUIThread(() =>
         {
             IsRecordButtonEnabled = true;
+            IsRecordingConfigEnabled = false;
             RecordButtonText = "■ STOP RECORDING";
             RecordButtonBackground = RecordStopBrush;
             RecordButtonAutomationName = "Stop Recording Stream";
@@ -946,6 +980,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             IsRecordingCloseOverlayVisible = false;
             _recordUiTimer?.Stop();
             IsRecordButtonEnabled = true;
+            IsRecordingConfigEnabled = true;
             RecordButtonText = "● START RECORDING";
             RecordButtonBackground = RecordStartBrush;
             RecordButtonAutomationName = "Start Recording Stream";
@@ -966,6 +1001,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             IsRecordingCloseOverlayVisible = false;
             _recordUiTimer?.Stop();
             IsRecordButtonEnabled = true;
+            IsRecordingConfigEnabled = true;
             RecordButtonText = "● START RECORDING";
             RecordButtonBackground = RecordStartBrush;
             RecordButtonAutomationName = "Start Recording Stream";
@@ -999,9 +1035,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         _lastHeight = 0;
         _lastFps = 0;
         _lastHudUpdateTick = 0;
+        IsRecordingConfigEnabled = true;
         ConnectButtonText = "Connect";
         ConnectButtonBackground = ConnectBrush;
-        ConnectButtonForeground = Brushes.Black;
+        ConnectButtonForeground = StudioPalette.ButtonDarkForeground;
         ConnectButtonAutomationName = "Connect Stream";
         IsNoSignalOverlayVisible = true;
         LiveIndicatorBrush = LiveIndicatorInactiveBrush;
@@ -1051,7 +1088,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         MetersResetRequested = null;
         RequestClose = null;
 
-        _desktopCapture?.Stop();
+        _desktopCapture?.Dispose();
+        _desktopCapture = null;
 
         if (_ownsDependencies)
         {

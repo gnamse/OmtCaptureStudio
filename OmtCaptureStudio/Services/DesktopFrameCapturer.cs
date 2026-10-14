@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using SharpGen.Runtime;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
@@ -14,6 +15,8 @@ namespace OmtCaptureStudio.Services;
 public sealed class DesktopFrameCapturer : IFrameSource
 {
     private readonly int _monitorIndex;
+    private readonly int _left;
+    private readonly int _top;
     private readonly ID3D11Device _device;
     private ID3D11Texture2D? _staging;
     private IDXGIOutputDuplication? _duplication;
@@ -37,45 +40,73 @@ public sealed class DesktopFrameCapturer : IFrameSource
             DeviceCreationFlags.BgraSupport,
             new[] { FeatureLevel.Level_11_0 });
 
-        using IDXGIDevice dxgiDevice = _device.QueryInterface<IDXGIDevice>();
-        using IDXGIAdapter adapter = dxgiDevice.GetAdapter();
-        var enumResult = adapter.EnumOutputs((uint)_monitorIndex, out IDXGIOutput output);
-        if (enumResult.Failure)
+        try
         {
-            throw new InvalidOperationException($"Desktop capture: monitor index {_monitorIndex} not found.");
-        }
-
-        using (output)
-        {
-            var bounds = output.Description.DesktopCoordinates;
-            Width = bounds.Right - bounds.Left;
-            Height = bounds.Bottom - bounds.Top;
-            if (Width <= 0 || Height <= 0)
+            using IDXGIDevice dxgiDevice = _device.QueryInterface<IDXGIDevice>();
+            using IDXGIAdapter adapter = dxgiDevice.GetAdapter();
+            var enumResult = adapter.EnumOutputs((uint)_monitorIndex, out IDXGIOutput output);
+            if (enumResult.Failure)
             {
-                throw new InvalidOperationException("Desktop capture: invalid monitor bounds.");
+                throw new InvalidOperationException($"Desktop capture: monitor index {_monitorIndex} not found.");
             }
 
-            using IDXGIOutput1 output1 = output.QueryInterface<IDXGIOutput1>();
-            _duplication = output1.DuplicateOutput(_device);
+            using (output)
+            {
+                var bounds = output.Description.DesktopCoordinates;
+                _left = bounds.Left;
+                _top = bounds.Top;
+                Width = bounds.Right - bounds.Left;
+                Height = bounds.Bottom - bounds.Top;
+                if (Width <= 0 || Height <= 0)
+                {
+                    throw new InvalidOperationException("Desktop capture: invalid monitor bounds.");
+                }
+
+                using IDXGIOutput1 output1 = output.QueryInterface<IDXGIOutput1>();
+                try
+                {
+                    _duplication = output1.DuplicateOutput(_device);
+                }
+                catch (SharpGenException ex)
+                {
+                    AppLogger.LogInfo($"DXGI Desktop Duplication unavailable (HRESULT 0x{ex.HResult:X8}): falling back to GDI capture.");
+                    _duplication = null;
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.LogInfo($"DXGI Desktop Duplication unavailable ({ex.Message}): falling back to GDI capture.");
+                    _duplication = null;
+                }
+            }
+
+            if (_duplication != null)
+            {
+                // Staging texture for CPU readback in the exact desktop format.
+                _staging = _device.CreateTexture2D(new Texture2DDescription
+                {
+                    Width = (uint)Width,
+                    Height = (uint)Height,
+                    MipLevels = 1,
+                    ArraySize = 1,
+                    Format = Format.B8G8R8A8_UNorm,
+                    SampleDescription = new SampleDescription(1, 0),
+                    Usage = ResourceUsage.Staging,
+                    BindFlags = BindFlags.None,
+                    CPUAccessFlags = CpuAccessFlags.Read,
+                    MiscFlags = ResourceOptionFlags.None
+                });
+            }
+
+            _buffer = new byte[Width * Height * 4];
+            _bufferHandle = GCHandle.Alloc(_buffer, GCHandleType.Pinned);
         }
-
-        // Staging texture for CPU readback in the exact desktop format.
-        _staging = _device.CreateTexture2D(new Texture2DDescription
+        catch
         {
-            Width = (uint)Width,
-            Height = (uint)Height,
-            MipLevels = 1,
-            ArraySize = 1,
-            Format = Format.B8G8R8A8_UNorm,
-            SampleDescription = new SampleDescription(1, 0),
-            Usage = ResourceUsage.Staging,
-            BindFlags = BindFlags.None,
-            CPUAccessFlags = CpuAccessFlags.Read,
-            MiscFlags = ResourceOptionFlags.None
-        });
-
-        _buffer = new byte[Width * Height * 4];
-        _bufferHandle = GCHandle.Alloc(_buffer, GCHandleType.Pinned);
+            _staging?.Dispose();
+            _duplication?.Dispose();
+            _device.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -86,47 +117,52 @@ public sealed class DesktopFrameCapturer : IFrameSource
     /// </summary>
     public unsafe bool TryCaptureFrame()
     {
-        if (_disposed || _duplication == null || _staging == null) return false;
+        if (_disposed) return false;
 
-        var result = _duplication.AcquireNextFrame(50, out _, out IDXGIResource resource);
-        if (!result.Failure && resource != null)
+        if (_duplication != null && _staging != null)
         {
-            try
+            var result = _duplication.AcquireNextFrame(50, out _, out IDXGIResource resource);
+            if (!result.Failure && resource != null)
             {
-                using ID3D11Texture2D desktopImage = resource.QueryInterface<ID3D11Texture2D>();
-                _device.ImmediateContext.CopyResource(_staging, desktopImage);
-
-                var mapped = _device.ImmediateContext.Map(_staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
-                try
+                using (resource)
                 {
-                    byte* src = (byte*)mapped.DataPointer;
-                    byte* dst = (byte*)BufferPtr;
-                    int rowBytes = Width * 4;
-                    for (int y = 0; y < Height; y++)
+                    try
                     {
-                        Buffer.MemoryCopy(src, dst, rowBytes, rowBytes);
-                        src += mapped.RowPitch;
-                        dst += rowBytes;
+                        using ID3D11Texture2D desktopImage = resource.QueryInterface<ID3D11Texture2D>();
+                        _device.ImmediateContext.CopyResource(_staging, desktopImage);
+
+                        var mapped = _device.ImmediateContext.Map(_staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+                        try
+                        {
+                            byte* src = (byte*)mapped.DataPointer;
+                            byte* dst = (byte*)BufferPtr;
+                            int rowBytes = Width * 4;
+                            for (int y = 0; y < Height; y++)
+                            {
+                                Buffer.MemoryCopy(src, dst, rowBytes, rowBytes);
+                                src += mapped.RowPitch;
+                                dst += rowBytes;
+                            }
+                        }
+                        finally
+                        {
+                            _device.ImmediateContext.Unmap(_staging, 0);
+                        }
+                    }
+                    finally
+                    {
+                        _duplication.ReleaseFrame();
                     }
                 }
-                finally
-                {
-                    _device.ImmediateContext.Unmap(_staging, 0);
-                }
+                _hasFrame = true;
+                return true;
             }
-            finally
-            {
-                _duplication.ReleaseFrame();
-            }
-            _hasFrame = true;
-            return true;
+
+            // No new frame: WAIT_TIMEOUT (desktop unchanged) or ACCESS_LOST (session dead).
+            if (_hasFrame) return false; // buffer still holds the latest frame
         }
 
-        // No new frame: WAIT_TIMEOUT (desktop unchanged) or ACCESS_LOST (session dead).
-        if (_hasFrame) return false; // buffer still holds the latest frame
-
-        // First frame and the desktop is static — Desktop Duplication never fires until
-        // something changes, so seed the buffer with a GDI grab of the current screen.
+        // Fallback: static desktop or DXGI Desktop Duplication unavailable in the current session.
         _hasFrame = CaptureViaGdi();
         return _hasFrame;
     }
@@ -161,6 +197,7 @@ public sealed class DesktopFrameCapturer : IFrameSource
     private static extern int GetDIBits(IntPtr hdc, IntPtr hbm, uint start, uint lines, IntPtr bits, ref BITMAPINFO bmi, uint usage);
 
     private const uint SrcCopy = 0x00CC0020;
+    private const uint CaptureBlt = 0x40000000;
     private const uint DibRgbColors = 0;
     private const uint BiRgb = 0;
 
@@ -200,7 +237,7 @@ public sealed class DesktopFrameCapturer : IFrameSource
             if (hdcMem == IntPtr.Zero || hbm == IntPtr.Zero) return false;
 
             old = SelectObject(hdcMem, hbm);
-            if (!BitBlt(hdcMem, 0, 0, Width, Height, hdcScreen, 0, 0, SrcCopy)) return false;
+            if (!BitBlt(hdcMem, 0, 0, Width, Height, hdcScreen, _left, _top, SrcCopy | CaptureBlt)) return false;
 
             var bmi = new BITMAPINFO();
             bmi.Header.Size = (uint)sizeof(BitmapInfoHeader);

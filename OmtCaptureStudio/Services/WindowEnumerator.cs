@@ -17,23 +17,27 @@ public static class WindowEnumerator
 
     // EnumWindows callbacks cannot carry arbitrary state, so a single static slot is
     // used for the duration of the enumeration (Enumerate is not re-entrant by design).
+    private static readonly object s_lock = new();
     private static List<CaptureTarget>? _results;
     private static uint _currentProcessId;
 
     public static IReadOnlyList<CaptureTarget> Enumerate()
     {
-        var results = new List<CaptureTarget>();
-        _results = results;
-        _currentProcessId = GetCurrentProcessId();
-        try
+        lock (s_lock)
         {
-            EnumWindows(Callback, IntPtr.Zero);
+            var results = new List<CaptureTarget>();
+            _results = results;
+            _currentProcessId = GetCurrentProcessId();
+            try
+            {
+                EnumWindows(Callback, IntPtr.Zero);
+            }
+            finally
+            {
+                _results = null;
+            }
+            return results;
         }
-        finally
-        {
-            _results = null;
-        }
-        return results;
     }
 
     private static bool Callback(IntPtr hWnd, IntPtr lParam)

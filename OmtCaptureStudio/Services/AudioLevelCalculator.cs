@@ -27,9 +27,17 @@ public static class AudioLevelCalculator
 
             for (int i = 0; i < samplesPerChannel; i++)
             {
-                float val = MathF.Abs(channelBuffer[i]);
+                float s = channelBuffer[i];
+                if (float.IsNaN(s)) continue;
+                if (float.IsInfinity(s))
+                {
+                    maxSample = float.PositiveInfinity;
+                    sumSquares = double.PositiveInfinity;
+                    continue;
+                }
+                float val = MathF.Abs(s);
                 if (val > maxSample) maxSample = val;
-                sumSquares += channelBuffer[i] * channelBuffer[i];
+                sumSquares += (double)s * s;
             }
 
             double rms = Math.Sqrt(sumSquares / samplesPerChannel);
@@ -38,10 +46,11 @@ public static class AudioLevelCalculator
             float peakDb = maxSample > 0.00001f ? 20f * MathF.Log10(maxSample) : -60f;
             float rmsDb = rms > 0.00001 ? (float)(20.0 * Math.Log10(rms)) : -60f;
 
-            if (peakDb < -60f) peakDb = -60f;
-            if (peakDb > 0f) peakDb = 0f;
-            if (rmsDb < -60f) rmsDb = -60f;
-            if (rmsDb > 0f) rmsDb = 0f;
+            if (float.IsNaN(peakDb) || float.IsNegativeInfinity(peakDb) || peakDb < -60f) peakDb = -60f;
+            else if (float.IsPositiveInfinity(peakDb) || peakDb > 0f) peakDb = 0f;
+
+            if (float.IsNaN(rmsDb) || float.IsNegativeInfinity(rmsDb) || rmsDb < -60f) rmsDb = -60f;
+            else if (float.IsPositiveInfinity(rmsDb) || rmsDb > 0f) rmsDb = 0f;
 
             result.Channels[ch] = new ChannelAudioLevel
             {

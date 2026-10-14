@@ -30,10 +30,14 @@ public static class AppLogger
 
     static AppLogger()
     {
-        if (!Directory.Exists(LogDir))
+        try
         {
-            Directory.CreateDirectory(LogDir);
+            if (!Directory.Exists(LogDir))
+            {
+                Directory.CreateDirectory(LogDir);
+            }
         }
+        catch { }
 
         Task.Run(ProcessLogQueueAsync);
     }

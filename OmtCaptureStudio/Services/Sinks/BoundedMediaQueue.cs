@@ -13,11 +13,12 @@ public class BoundedMediaQueue<T> : IDisposable
     private readonly Action<T> _onDrop;
     private long _droppedCount;
     private bool _isAddingCompleted;
+    private bool _disposed;
 
     public BoundedMediaQueue(int capacity, Action<T> onDrop)
     {
         _capacity = capacity;
-        _onDrop = onDrop;
+        _onDrop = onDrop ?? throw new ArgumentNullException(nameof(onDrop));
     }
 
     public long DroppedCount => Interlocked.Read(ref _droppedCount);
@@ -26,21 +27,22 @@ public class BoundedMediaQueue<T> : IDisposable
     {
         lock (_lock)
         {
-            if (_isAddingCompleted)
+            if (_disposed || _isAddingCompleted)
             {
-                _onDrop(item);
+                try { _onDrop(item); } catch { }
+                Interlocked.Increment(ref _droppedCount);
                 return;
             }
 
             if (_queue.Count >= _capacity)
             {
                 var dropped = _queue.Dequeue();
-                _onDrop(dropped);
+                try { _onDrop(dropped); } catch { }
                 Interlocked.Increment(ref _droppedCount);
             }
 
             _queue.Enqueue(item);
-            _signal.Set();
+            try { _signal.Set(); } catch { }
         }
     }
 
@@ -62,8 +64,9 @@ public class BoundedMediaQueue<T> : IDisposable
     {
         lock (_lock)
         {
+            if (_disposed) return;
             _isAddingCompleted = true;
-            _signal.Set();
+            try { _signal.Set(); } catch { }
         }
     }
 
@@ -105,11 +108,18 @@ public class BoundedMediaQueue<T> : IDisposable
     {
         lock (_lock)
         {
+            if (_disposed) return;
+            _disposed = true;
             _isAddingCompleted = true;
-            _signal.Set();
+            try { _signal.Set(); } catch { }
             while (_queue.Count > 0)
             {
-                _onDrop(_queue.Dequeue());
+                var item = _queue.Dequeue();
+                try
+                {
+                    _onDrop(item);
+                }
+                catch { }
             }
         }
         try { _signal.Dispose(); } catch { }

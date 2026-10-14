@@ -13,6 +13,7 @@ public class OmtReceiverService : IDisposable
     private volatile bool _isRunning;
     private string? _currentAddress;
     private readonly object _lock = new();
+    private bool _disposed;
 
     public bool IsConnected => _receiver != null && _receiver.IsConnected();
     public string? CurrentAddress => _currentAddress;
@@ -205,6 +206,17 @@ public class OmtReceiverService : IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         Disconnect();
+
+        VideoFrameReceived = null;
+        AudioFrameReceived = null;
+        TelemetryUpdated = null;
+        ConnectionStatusChanged = null;
+        ErrorOccurred = null;
+
+        GC.SuppressFinalize(this);
     }
 }

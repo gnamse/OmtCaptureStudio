@@ -13,29 +13,36 @@ public static class MonitorEnumerator
     {
         var targets = new List<CaptureTarget>();
 
-        using var device = D3D11.D3D11CreateDevice(
-            DriverType.Hardware,
-            DeviceCreationFlags.BgraSupport,
-            new[] { FeatureLevel.Level_11_0 });
-        using IDXGIDevice dxgiDevice = device.QueryInterface<IDXGIDevice>();
-        using IDXGIAdapter adapter = dxgiDevice.GetAdapter();
-
-        for (int i = 0; ; i++)
+        try
         {
-            var result = adapter.EnumOutputs((uint)i, out IDXGIOutput output);
-            if (result.Failure) break;
-            using (output)
+            using var device = D3D11.D3D11CreateDevice(
+                DriverType.Hardware,
+                DeviceCreationFlags.BgraSupport,
+                new[] { FeatureLevel.Level_11_0 });
+            using IDXGIDevice dxgiDevice = device.QueryInterface<IDXGIDevice>();
+            using IDXGIAdapter adapter = dxgiDevice.GetAdapter();
+
+            for (int i = 0; ; i++)
             {
-                var bounds = output.Description.DesktopCoordinates;
-                int width = bounds.Right - bounds.Left;
-                int height = bounds.Bottom - bounds.Top;
-                targets.Add(new CaptureTarget
+                var result = adapter.EnumOutputs((uint)i, out IDXGIOutput output);
+                if (result.Failure) break;
+                using (output)
                 {
-                    Kind = CaptureTargetKind.Monitor,
-                    DisplayName = $"Screen {i + 1} · {width}×{height}",
-                    MonitorIndex = i
-                });
+                    var bounds = output.Description.DesktopCoordinates;
+                    int width = bounds.Right - bounds.Left;
+                    int height = bounds.Bottom - bounds.Top;
+                    targets.Add(new CaptureTarget
+                    {
+                        Kind = CaptureTargetKind.Monitor,
+                        DisplayName = $"Screen {i + 1} · {width}×{height}",
+                        MonitorIndex = i
+                    });
+                }
             }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Monitor enumeration failed: {ex.Message}");
         }
 
         return targets;

@@ -85,5 +85,7 @@ public class OmtDiscoveryService : IDisposable
         _disposed = true;
         _timer.Stop();
         _timer.Dispose();
+        SourcesUpdated = null;
+        GC.SuppressFinalize(this);
     }
 }
