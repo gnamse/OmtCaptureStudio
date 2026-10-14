@@ -170,6 +170,32 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _isCaptureAudioDropDownOpen;
 
+    // ---- ASIO input pair selection ------------------------------------------------------------
+    // ASIO interfaces routinely expose 8/16/32 inputs, so "In 1/2" must be a choice, not a given.
+    // The list of real pairs comes from opening the driver *briefly* (no buffers, no start), which
+    // is why every bit of this is lazy: nothing here may run during ViewModel construction, and a
+    // driver locked by another application (or absent entirely) must degrade to plain In 1/2.
+    private readonly Dictionary<Guid, AsioDriverInfo> _asioDriversByClsid = new();
+    private readonly Dictionary<Guid, AsioPairProbeResult> _asioPairCache = new();
+    private readonly Dictionary<Guid, int> _asioChosenPairIndex = new();
+    private readonly HashSet<Guid> _asioProbeInFlight = new();
+    private bool _suppressAsioPairSync;
+
+    [ObservableProperty]
+    private bool _isAsioInputPairVisible;
+
+    [ObservableProperty]
+    private IReadOnlyList<AsioInputPairOption> _asioInputPairOptions = Array.Empty<AsioInputPairOption>();
+
+    [ObservableProperty]
+    private AsioInputPairOption? _selectedAsioInputPair;
+
+    [ObservableProperty]
+    private bool _isAsioInputPairDropDownOpen;
+
+    [ObservableProperty]
+    private string? _asioInputPairHint;
+
     public HostAudioCaptureMode SelectedCaptureAudioMode
     {
         get => SelectedCaptureAudioOption?.Mode ?? HostAudioCaptureMode.SystemAudio;
@@ -254,6 +280,15 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private bool _isMainContentEnabled = true;
+
+    // Target / Audio / Network selectors are locked while a host broadcast is LIVE —
+    // changing any of them requires restarting the sender, which would drop receivers.
+    [ObservableProperty]
+    private bool _isCaptureSelectorEnabled = true;
+
+    // Source picker is locked while connected to a stream.
+    [ObservableProperty]
+    private bool _isSourceSelectorEnabled = true;
 
     [ObservableProperty]
     private bool _isStopAndExitEnabled = true;
@@ -460,9 +495,22 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         IsMainContentEnabled = !value;
     }
 
+    partial void OnIsDesktopCaptureActiveChanged(bool value)
+    {
+        IsCaptureSelectorEnabled = !value;
+    }
+
+    partial void OnConnectButtonTextChanged(string value)
+    {
+        // Every connect/disconnect path funnels through ConnectButtonText, so one handler
+        // keeps the Source picker lock in sync without touching each call site.
+        IsSourceSelectorEnabled = value != "Disconnect";
+    }
+
     partial void OnSelectedCaptureAudioOptionChanged(HostAudioCaptureOption value)
     {
         OnPropertyChanged(nameof(SelectedCaptureAudioMode));
+        SyncAsioInputPairSelection(value);
         if (_desktopCapture is { IsRunning: true } activeBroadcast && value != null)
         {
             try
@@ -814,7 +862,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// opened here, only when the user actually selects it. Registry failures (headless, no drivers,
     /// locked-down hive) leave the dropdown exactly as it was.
     /// </summary>
-    private static void InsertAsioOptions(List<HostAudioCaptureOption> options)
+    /// This never opens a driver: probing is deferred to <see cref="BeginAsioInputPairProbe"/>, which
+    /// only ever runs once the user selects (or opens the dropdown of) an ASIO entry.
+    /// </summary>
+    private void InsertAsioOptions(List<HostAudioCaptureOption> options)
     {
         IReadOnlyList<AsioDriverInfo> drivers;
         try
@@ -842,12 +893,297 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         var entries = new List<HostAudioCaptureOption>(drivers.Count);
         foreach (AsioDriverInfo driver in drivers)
         {
-            // Default pair is input 1/2 (index 0). Pro interfaces expose more pairs, and
-            // AsioFirstInputChannelIndex carries the choice once the UI offers it.
-            entries.Add(HostAudioCaptureOption.ForAsio(driver.Clsid, $"ASIO · {driver.DisplayName} (In 1/2)"));
+            _asioDriversByClsid[driver.Clsid] = driver;
+
+            // Remembered per driver (not per dropdown rebuild) so re-opening the audio picker never
+            // silently resets a chosen 3/4 back to 1/2. The first pair stays the default.
+            int first = _asioChosenPairIndex.TryGetValue(driver.Clsid, out int saved) ? saved : 0;
+            entries.Add(HostAudioCaptureOption.ForAsio(
+                driver.Clsid,
+                $"ASIO · {driver.DisplayName} ({AsioPairText(driver.Clsid, first)})",
+                first));
         }
 
         options.InsertRange(insertAt, entries);
+    }
+
+    // ============================================================================================
+    // ASIO input pair selection
+    // ============================================================================================
+
+    /// <summary>
+    /// Keeps the pair picker in step with the selected audio option. Purely reactive: the options
+    /// list hold real driver data only once <see cref="BeginAsioInputPairProbe"/> reports in, which
+    /// is what keeps this ViewModel constructible with no ASIO driver (and no Avalonia app) at all.
+    /// </summary>
+    private void SyncAsioInputPairSelection(HostAudioCaptureOption? value)
+    {
+        if (_suppressAsioPairSync) return;
+
+        Guid clsid = value != null && value.IsAsio && value.AsioDriverClsid.HasValue
+            ? value.AsioDriverClsid.Value
+            : Guid.Empty;
+
+        if (clsid == Guid.Empty)
+        {
+            ClearAsioInputPairState();
+            return;
+        }
+
+        // Visible immediately so the control exists while the probe is still running; the hint below
+        // tells the user what is happening (a driver can take a second to answer).
+        IsAsioInputPairVisible = true;
+
+        if (_asioPairCache.TryGetValue(clsid, out AsioPairProbeResult? cached))
+        {
+            ApplyAsioPairProbe(value!, clsid, cached, announce: false);
+            return;
+        }
+
+        AsioInputPairHint = "Probing driver for its input channels…";
+        BeginAsioInputPairProbe(clsid);
+    }
+
+    /// <summary>Re-arms the probe when the user opens the pair picker after an earlier failure.</summary>
+    partial void OnIsAsioInputPairDropDownOpenChanged(bool value)
+    {
+        if (!value) return;
+
+        if (SelectedCaptureAudioOption is { } option && option.IsAsio && option.AsioDriverClsid is Guid clsid)
+        {
+            bool usable = _asioPairCache.TryGetValue(clsid, out AsioPairProbeResult? cached) && cached.Channels.Count > 0;
+            if (!usable && !_asioProbeInFlight.Contains(clsid))
+            {
+                // A DAW may have released the driver since the last attempt, so allow one retry.
+                _asioPairCache.Remove(clsid);
+                AsioInputPairHint = "Re-probing driver for its input channels…";
+                BeginAsioInputPairProbe(clsid);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Applies the user's pair choice to the selected option. Mutating the dropdown entry in place
+    /// (rather than just setting a derived value) keeps the new instance a member of
+    /// <see cref="CaptureAudioOptions"/>, which is what the ComboBox's SelectedItem binding needs —
+    /// and re-selecting it lets the existing handler hand the rebuilt option to a live broadcast.
+    /// </summary>
+    partial void OnSelectedAsioInputPairChanged(AsioInputPairOption? value)
+    {
+        if (_suppressAsioPairSync || value == null) return;
+
+        HostAudioCaptureOption? current = SelectedCaptureAudioOption;
+        if (current == null || !current.IsAsio || current.AsioDriverClsid is not Guid clsid) return;
+        if (current.AsioFirstInputChannelIndex == value.FirstChannelIndex) return;
+
+        HostAudioCaptureOption updated = current with
+        {
+            AsioFirstInputChannelIndex = value.FirstChannelIndex,
+            DisplayName = $"ASIO · {DriverDisplayName(clsid)} ({value.DisplayName})"
+        };
+
+        _asioChosenPairIndex[clsid] = value.FirstChannelIndex;
+
+        try
+        {
+            // Keep the dropdown entry in sync, then deliberately re-select without suppressing so a
+            // running broadcast switches to the new pair immediately.
+            var list = new List<HostAudioCaptureOption>(CaptureAudioOptions ?? Array.Empty<HostAudioCaptureOption>());
+            int index = list.FindIndex(o => o.Mode == HostAudioCaptureMode.Asio && o.AsioDriverClsid == clsid);
+            if (index >= 0) list[index] = updated; else list.Add(updated);
+            CaptureAudioOptions = list;
+
+            _suppressAsioPairSync = true;
+            try { SelectedAsioInputPair = value; } finally { _suppressAsioPairSync = false; }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Could not apply ASIO input pair {value.DisplayName}: {ex.Message}", ex);
+            return;
+        }
+
+        SelectedCaptureAudioOption = updated;
+        AppLogger.LogInfo($"ASIO input pair set to {value.DisplayName} for '{updated.DisplayName}'.");
+    }
+
+    /// <summary>
+    /// Reads the driver's real input channels on a worker thread (the probe itself spins up its own
+    /// STA thread and never throws), then publishes the result back on the UI thread.
+    /// </summary>
+    private void BeginAsioInputPairProbe(Guid clsid)
+    {
+        if (_asioProbeInFlight.Contains(clsid)) return;
+
+        if (!_asioDriversByClsid.TryGetValue(clsid, out AsioDriverInfo? driver))
+        {
+            try
+            {
+                driver = AsioDriverEnumerator.Enumerate().FirstOrDefault(d => d.Clsid == clsid);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.LogInfo($"[ASIO] could not resolve driver {clsid:B} for probing: {ex.Message}");
+                driver = null;
+            }
+        }
+
+        if (driver == null)
+        {
+            AsioInputPairHint = "Driver is no longer registered on this machine; using input pair 1/2.";
+            return;
+        }
+
+        _asioProbeInFlight.Add(clsid);
+        AsioDriverInfo target = driver;
+
+        try
+        {
+            _ = Task.Run(() =>
+            {
+                IReadOnlyList<AsioInputChannel> channels = AsioInputChannelProbe.Probe(target, out string? reason);
+                PostToUIThreadSafely(() => CompleteAsioInputPairProbe(clsid, new AsioPairProbeResult(channels, reason)));
+            });
+        }
+        catch (Exception ex)
+        {
+            _asioProbeInFlight.Remove(clsid);
+            AppLogger.LogInfo($"[ASIO] input probe could not be scheduled: {ex.Message}");
+            AsioInputPairHint = "Input probe could not run; using input pair 1/2.";
+        }
+    }
+
+    private void CompleteAsioInputPairProbe(Guid clsid, AsioPairProbeResult result)
+    {
+        _asioProbeInFlight.Remove(clsid);
+        _asioPairCache[clsid] = result;
+
+        HostAudioCaptureOption? option = SelectedCaptureAudioOption;
+        if (option == null || !option.IsAsio || option.AsioDriverClsid != clsid)
+        {
+            return; // The user moved on to another device meanwhile; the cache serves them later.
+        }
+
+        ApplyAsioPairProbe(option, clsid, result, announce: true);
+    }
+
+    /// <summary>Populates the pair list from the probe result and degrades gracefully when it failed.</summary>
+    private void ApplyAsioPairProbe(HostAudioCaptureOption option, Guid clsid, AsioPairProbeResult result, bool announce)
+    {
+        try
+        {
+            var pairs = BuildAsioPairs(result.Channels);
+            try
+            {
+                _suppressAsioPairSync = true;
+                AsioInputPairOptions = pairs;
+                SelectedAsioInputPair =
+                    pairs.FirstOrDefault(p => p.FirstChannelIndex == option.AsioFirstInputChannelIndex)
+                    ?? pairs.FirstOrDefault();
+            }
+            finally
+            {
+                _suppressAsioPairSync = false;
+            }
+
+            if (pairs.Count == 0)
+            {
+                // Degrade exactly as before: the single "ASIO · name (In 1/2)" entry keeps working,
+                // the picker hides itself, and the reason is surfaced without breaking anything.
+                IsAsioInputPairVisible = false;
+                string reason = string.IsNullOrWhiteSpace(result.Reason)
+                    ? "the driver reported no input channels"
+                    : result.Reason!;
+                AsioInputPairHint = $"Input pairs unavailable: {reason}. Using input pair 1/2.";
+                AppLogger.LogInfo($"[ASIO] input channel probe failed for '{option.DisplayName}': {reason}");
+                if (announce) StatusText = $"ASIO input probe unavailable ({reason}); keeping input pair 1/2.";
+                return;
+            }
+
+            IsAsioInputPairVisible = true;
+            if (announce)
+            {
+                StatusText = $"ASIO driver exposes {result.Channels.Count} input channel(s): {pairs.Count} pair(s) available.";
+                AppLogger.LogInfo($"[ASIO] {DriverDisplayName(clsid)} exposes {result.Channels.Count} input channel(s).");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Could not apply ASIO input pairs: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    /// Derives the selectable stereo pairs from the driver's input channel count: channels 0+1, 2+3,
+    /// 4+5 … with a trailing odd channel offered on its own (the capture source duplicates it to L+R).
+    /// </summary>
+    private static IReadOnlyList<AsioInputPairOption> BuildAsioPairs(IReadOnlyList<AsioInputChannel> channels)
+    {
+        var pairs = new List<AsioInputPairOption>();
+        if (channels == null) return pairs;
+
+        int count = channels.Count;
+        for (int i = 0; i + 1 < count; i += 2)
+        {
+            pairs.Add(new AsioInputPairOption(i, $"In {i + 1}/{i + 2}"));
+        }
+
+        if (count % 2 == 1)
+        {
+            pairs.Add(new AsioInputPairOption(count - 1, $"In {count}"));
+        }
+
+        return pairs;
+    }
+
+    private string DriverDisplayName(Guid clsid) =>
+        _asioDriversByClsid.TryGetValue(clsid, out AsioDriverInfo? driver) ? driver.DisplayName : "ASIO driver";
+
+    /// <summary>Human label for a remembered pair index, used while rebuilding the audio dropdown.</summary>
+    private string AsioPairText(Guid clsid, int firstChannelIndex)
+    {
+        if (_asioPairCache.TryGetValue(clsid, out AsioPairProbeResult? result))
+        {
+            foreach (AsioInputPairOption pair in BuildAsioPairs(result.Channels))
+            {
+                if (pair.FirstChannelIndex == firstChannelIndex) return pair.DisplayName;
+            }
+        }
+
+        return firstChannelIndex % 2 == 0
+            ? $"In {firstChannelIndex + 1}/{firstChannelIndex + 2}"
+            : $"In {firstChannelIndex + 1}";
+    }
+
+    private void ClearAsioInputPairState()
+    {
+        try
+        {
+            _suppressAsioPairSync = true;
+            IsAsioInputPairVisible = false;
+            AsioInputPairOptions = Array.Empty<AsioInputPairOption>();
+            SelectedAsioInputPair = null;
+            AsioInputPairHint = null;
+        }
+        finally
+        {
+            _suppressAsioPairSync = false;
+        }
+    }
+
+    /// <summary>
+    /// Like <see cref="PostToUIThread"/> but headless-safe: with no Avalonia platform there is no UI
+    /// dispatcher to hand the callback to, so it runs inline rather than being lost.
+    /// </summary>
+    private static void PostToUIThreadSafely(Action action)
+    {
+        try
+        {
+            PostToUIThread(action);
+        }
+        catch
+        {
+            try { action(); } catch { /* Nothing left to try; the probe is best-effort. */ }
+        }
     }
 
     /// <summary>
@@ -1434,3 +1770,21 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 }
+
+/// <summary>
+/// One selectable ASIO stereo pair offered by the input-pair dropdown, e.g. <c>In 3/4</c>.
+/// <paramref name="FirstChannelIndex"/> is the zero-based ASIO input channel that becomes Left;
+/// the next one becomes Right (the capture source duplicates it for a trailing mono channel).
+/// </summary>
+public sealed record AsioInputPairOption(int FirstChannelIndex, string DisplayName)
+{
+    public override string ToString() => DisplayName;
+}
+
+/// <summary>
+/// Outcome of one <see cref="OmtCaptureStudio.Services.AsioInputChannelProbe"/> run, cached per driver
+/// <see cref="Guid"/> in the view model so re-opening the dropdown never re-opens the driver.
+/// </summary>
+/// <param name="Channels">Input channels the driver reported (empty when the probe failed).</param>
+/// <param name="Reason">Why the probe failed, or <c>null</c> on success.</param>
+internal sealed record AsioPairProbeResult(IReadOnlyList<AsioInputChannel> Channels, string? Reason);

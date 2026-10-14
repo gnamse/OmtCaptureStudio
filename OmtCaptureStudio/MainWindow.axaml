@@ -54,6 +54,7 @@
                     <!-- 1-4: Source Picker & Connection -->
                     <TextBlock Grid.Column="1" Text="Source:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,6,0"/>
                     <ComboBox x:Name="CmbSources" Grid.Column="2" Margin="0,0,6,0" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                              IsEnabled="{CompiledBinding IsSourceSelectorEnabled}"
                               ItemsSource="{CompiledBinding DiscoveredSources}"
                               SelectedItem="{CompiledBinding SelectedSource, Mode=TwoWay}"
                               IsDropDownOpen="{CompiledBinding IsSourceDropDownOpen, Mode=TwoWay}"
@@ -122,6 +123,7 @@
                         <!-- Target (Monitor / Window) -->
                         <TextBlock Grid.Column="1" Text="Target:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,5,0"/>
                         <ComboBox x:Name="CmbCaptureTarget" Grid.Column="2" Margin="0,0,10,0" MinHeight="30" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                  IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
                                   ItemsSource="{CompiledBinding CaptureTargets}"
                                   SelectedItem="{CompiledBinding SelectedCaptureTarget, Mode=TwoWay}"
                                   IsDropDownOpen="{CompiledBinding IsCaptureTargetDropDownOpen, Mode=TwoWay}"
@@ -136,22 +138,48 @@
 
                         <!-- Audio Device (Presets + Specific WASAPI Output Loopback / Microphone Devices) -->
                         <TextBlock Grid.Column="3" Text="Audio:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                        <ComboBox x:Name="CmbCaptureAudio" Grid.Column="4" Margin="0,0,10,0" MinHeight="30" HorizontalAlignment="Stretch" VerticalAlignment="Center"
-                                  ItemsSource="{CompiledBinding CaptureAudioOptions}"
-                                  SelectedItem="{CompiledBinding SelectedCaptureAudioOption, Mode=TwoWay}"
-                                  IsDropDownOpen="{CompiledBinding IsCaptureAudioDropDownOpen, Mode=TwoWay}"
-                                  AutomationProperties.Name="Host broadcast audio device"
-                                  ToolTip.Tip="Select preset audio mode or specific WASAPI Output (loopback) / Microphone device">
-                            <ComboBox.ItemTemplate>
-                                <DataTemplate x:DataType="models:HostAudioCaptureOption">
-                                    <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis"/>
-                                </DataTemplate>
-                            </ComboBox.ItemTemplate>
-                        </ComboBox>
+
+                        <!-- Column 4 hosts the audio picker; the ASIO input-pair picker docks to its right and
+                             collapses (IsVisible=false) for every non-ASIO option, so it costs no width normally.
+                             The right margin that used to sit on the audio ComboBox now sits on this DockPanel,
+                             leaving the spacing to the Network label unchanged. -->
+                        <DockPanel Grid.Column="4" Margin="0,0,10,0" VerticalAlignment="Center" LastChildFill="True">
+                            <!-- ASIO input pair (In 1/2, 3/4, …), built from the driver's real input channel count -->
+                            <ComboBox x:Name="CmbAsioInputPair" DockPanel.Dock="Right" Margin="5,0,0,0" MinHeight="30" MinWidth="84" MaxWidth="130"
+                                      VerticalAlignment="Center"
+                                      IsVisible="{CompiledBinding IsAsioInputPairVisible}"
+                                      IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
+                                      ItemsSource="{CompiledBinding AsioInputPairOptions}"
+                                      SelectedItem="{CompiledBinding SelectedAsioInputPair, Mode=TwoWay}"
+                                      IsDropDownOpen="{CompiledBinding IsAsioInputPairDropDownOpen, Mode=TwoWay}"
+                                      ToolTip.Tip="{CompiledBinding AsioInputPairHint}"
+                                      AutomationProperties.Name="ASIO input channel pair">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:AsioInputPairOption">
+                                        <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+
+                            <ComboBox x:Name="CmbCaptureAudio" HorizontalAlignment="Stretch" MinHeight="30" VerticalAlignment="Center"
+                                      IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
+                                      ItemsSource="{CompiledBinding CaptureAudioOptions}"
+                                      SelectedItem="{CompiledBinding SelectedCaptureAudioOption, Mode=TwoWay}"
+                                      IsDropDownOpen="{CompiledBinding IsCaptureAudioDropDownOpen, Mode=TwoWay}"
+                                      AutomationProperties.Name="Host broadcast audio device"
+                                      ToolTip.Tip="Select preset audio mode or specific WASAPI Output (loopback) / Microphone device">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate x:DataType="models:HostAudioCaptureOption">
+                                        <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+                        </DockPanel>
 
                         <!-- Network Interface (All Networks, Specific NIC IPv4, or Localhost) -->
                         <TextBlock Grid.Column="5" Text="Network:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,5,0"/>
                         <ComboBox x:Name="CmbCaptureNetwork" Grid.Column="6" Margin="0,0,6,0" MinHeight="30" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                  IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
                                   ItemsSource="{CompiledBinding BroadcastNetworks}"
                                   SelectedItem="{CompiledBinding SelectedBroadcastNetwork, Mode=TwoWay}"
                                   IsDropDownOpen="{CompiledBinding IsBroadcastNetworkDropDownOpen, Mode=TwoWay}"
