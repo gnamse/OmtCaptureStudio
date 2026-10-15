@@ -20,6 +20,23 @@ public class CaptureSession : IDisposable
     private readonly AudioClockResampler _audioResampler = new();
     private bool _disposed;
 
+    // ---- ADR-0002 input-loss resilience ----------------------------------------------------------
+    private readonly Func<long> _clock;
+    private readonly InputHealthWatchdog _inputWatchdog;
+
+    // A "take" spans one StartRecording…StopRecording, possibly across several segments when an
+    // input-loss outage forces a finalize/resume. Config/format are retained so the take can resume
+    // into the next …_partNN segment; _takeInProgress stays true through an outage (recording is not
+    // active, but the take is) so the watchdog keeps watching for restored frames.
+    private RecordingConfig? _activeRecordingConfig;
+    private StreamFormat? _activeRecordingFormat;
+    private bool _takeInProgress;
+    private long _outageStartMs;
+    private int _reconnectAttempt;
+    private long _nextReconnectMs;
+    private bool _recoveryExpired;
+    private volatile bool _reconnectInFlight;
+
     private readonly Action<AudioLevelData> _onLevelsCalculated;
     private readonly Action<byte[], int> _onAudioInterleavedAvailable;
     private readonly Action<string> _onRecordingStarted;
@@ -36,6 +53,31 @@ public class CaptureSession : IDisposable
     public long RecordingFramesWritten => _recorder.FramesWritten;
     public long RecordingFramesDropped => _recorder.VideoFramesDropped;
     public long RecordingAudioChunksDropped => _recorder.AudioChunksDropped;
+
+    /// <summary>1-based segment index of the active take (ADR-0002 segment-per-outage).</summary>
+    public int RecordingSegmentIndex => _recorder.CurrentSegmentIndex;
+
+    /// <summary>True while the input-health watchdog is armed (a take is active over a watched source).</summary>
+    public bool IsInputHealthWatched => _inputWatchdog.IsArmed;
+
+    /// <summary>True while the watchdog currently reports a frame-absence outage.</summary>
+    public bool IsInputLost => _inputWatchdog.IsLost;
+
+    /// <summary>
+    /// Wall-clock window with no video frame that counts as input loss. Operator-configurable;
+    /// default 5 s, applied per take from <see cref="RecordingConfig.InputLossThresholdSeconds"/>.
+    /// </summary>
+    public TimeSpan InputLossThreshold
+    {
+        get => TimeSpan.FromMilliseconds(_inputWatchdog.ThresholdMs);
+        set => _inputWatchdog.ThresholdMs = (long)Math.Max(1, value.TotalMilliseconds);
+    }
+
+    /// <summary>
+    /// Bounded grace period to keep attempting auto-reconnect before giving up. Default 30 s,
+    /// applied per take from <see cref="RecordingConfig.InputRecoveryGraceSeconds"/>.
+    /// </summary>
+    public TimeSpan InputRecoveryGracePeriod { get; set; } = TimeSpan.FromSeconds(30);
 
     public bool IsAudioMonitoringEnabled
     {
@@ -56,6 +98,12 @@ public class CaptureSession : IDisposable
     public event Action<string, TimeSpan, long>? RecordingStopped;
     public event Action<string>? RecordingError;
 
+    // Input-loss resilience events (ADR-0002). Raised on the thread that calls CheckInputHealth()
+    // (the UI health tick in production), so subscribers may touch presentation state directly.
+    public event Action? InputLost;             // outage detected; take finalized at the boundary
+    public event Action? InputRecovered;        // frames returned within grace; next segment resumed
+    public event Action? InputRecoveryFailed;   // bounded grace expired; take stopped, alarm persists
+
     /// <summary>
     /// Default constructor initializing the production engine stack.
     /// </summary>
@@ -70,11 +118,16 @@ public class CaptureSession : IDisposable
     public CaptureSession(
         AudioEngine audio,
         StreamRecorderService recorder,
-        bool ownsDependencies = false)
+        bool ownsDependencies = false,
+        Func<long>? healthClock = null)
     {
         _audio = audio ?? throw new ArgumentNullException(nameof(audio));
         _recorder = recorder ?? throw new ArgumentNullException(nameof(recorder));
         _ownsDependencies = ownsDependencies;
+
+        // Injected clock so the headless suite can drive input-loss timing directly (no real sleeps).
+        _clock = healthClock ?? (static () => Environment.TickCount64);
+        _inputWatchdog = new InputHealthWatchdog(InputHealthWatchdog.DefaultThresholdMs, _clock);
 
         _onLevelsCalculated = levels => AudioLevelsUpdated?.Invoke(levels);
         _onAudioInterleavedAvailable = (buffer, count) =>
@@ -158,6 +211,10 @@ public class CaptureSession : IDisposable
 
     private void OnSourceVideoFrameReceived(IntPtr pData, int length, int width, int height, int stride, double fps, long timestamp)
     {
+        // Feed the input-health watchdog. Hot path: this only exchanges a long timestamp when armed
+        // (no allocation, no lock), so it is safe to run once per frame (ADR-0002).
+        _inputWatchdog.NotifyVideoFrame();
+
         // Track the true delivery rate so recording can stamp video at its actual
         // rate (the source-reported "fps" is a nominal maximum, e.g. vMix's "30").
         _fpsMeter.OnVideoFrame();
@@ -211,6 +268,9 @@ public class CaptureSession : IDisposable
     /// </summary>
     public void Disconnect()
     {
+        // A caller-initiated disconnect ends the take — this is not an outage to recover from.
+        EndTake();
+
         if (_recorder.IsRecording)
         {
             _recorder.StopRecording();
@@ -295,7 +355,13 @@ public class CaptureSession : IDisposable
         _audioResampler.Reset(fmt.SampleRate, effectiveFps, fmt.Channels);
 
         var effectiveFormat = fmt with { FrameRate = effectiveFps };
-        return _recorder.StartRecording(config, effectiveFormat);
+        bool started = _recorder.StartRecording(config, effectiveFormat);
+        if (started)
+        {
+            BeginTake(config, effectiveFormat);
+        }
+
+        return started;
     }
 
     /// <summary>
@@ -303,6 +369,7 @@ public class CaptureSession : IDisposable
     /// </summary>
     public void StopRecording()
     {
+        EndTake();
         _recorder.StopRecording();
     }
 
@@ -311,6 +378,7 @@ public class CaptureSession : IDisposable
     /// </summary>
     public Task StopRecordingAsync()
     {
+        EndTake();
         return _recorder.StopRecordingAsync();
     }
 
@@ -320,6 +388,171 @@ public class CaptureSession : IDisposable
     public void CheckDiskSpaceAndProtect()
     {
         _recorder.CheckDiskSpaceAndProtect();
+    }
+
+    /// <summary>
+    /// Periodic input-health poll (ADR-0002). Call from the UI tick loop while a take is in progress,
+    /// mirroring <see cref="CheckDiskSpaceAndProtect"/>. Detection is allocation-free; only at an
+    /// outage boundary does it finalize the current segment synchronously, consistent with the existing
+    /// <see cref="Disconnect"/> path. It is deliberately distinct from the FFmpeg stall watchdog in
+    /// <c>Services/Sinks/FfmpegProcessHost.cs</c>, which only fires when data is queued but writes stall
+    /// — a dead feed leaves the queue empty and reads to that watchdog as idle.
+    /// </summary>
+    public void CheckInputHealth()
+    {
+        if (_disposed) return;
+
+        UpdateWatchdogArming();
+
+        switch (_inputWatchdog.Poll())
+        {
+            case InputHealthTransition.Lost:
+                HandleOutageBoundary();
+                break;
+            case InputHealthTransition.Restored:
+                HandleRecovery();
+                break;
+        }
+
+        if (!_inputWatchdog.IsLost) return;
+
+        long now = _clock();
+        if (now >= _nextReconnectMs)
+        {
+            _reconnectAttempt++;
+            _nextReconnectMs = now + (long)ReconnectBackoff.DelayFor(_reconnectAttempt).TotalMilliseconds;
+            RequestSourceReconnect();
+        }
+
+        if (!_recoveryExpired && now - _outageStartMs >= (long)InputRecoveryGracePeriod.TotalMilliseconds)
+        {
+            _recoveryExpired = true;
+            AppLogger.LogError(
+                $"Input lost for over {InputRecoveryGracePeriod.TotalSeconds:0}s with no frames; giving up " +
+                "auto-reconnect and stopping the take. The finalized segment remains playable.");
+            EndTake();
+            InputRecoveryFailed?.Invoke();
+        }
+    }
+
+    /// <summary>Starts a take: remembers how to resume it and applies the operator's health policy.</summary>
+    private void BeginTake(RecordingConfig config, StreamFormat format)
+    {
+        _activeRecordingConfig = config;
+        _activeRecordingFormat = format;
+        _takeInProgress = true;
+        _recoveryExpired = false;
+
+        InputLossThreshold = TimeSpan.FromSeconds(
+            config.InputLossThresholdSeconds > 0 ? config.InputLossThresholdSeconds : 5.0);
+        InputRecoveryGracePeriod = TimeSpan.FromSeconds(
+            config.InputRecoveryGraceSeconds > 0 ? config.InputRecoveryGraceSeconds : 30.0);
+
+        UpdateWatchdogArming();
+    }
+
+    /// <summary>Ends the take and disarms the watchdog. A no-op on the segment-resume path.</summary>
+    private void EndTake()
+    {
+        _takeInProgress = false;
+        _activeRecordingConfig = null;
+        _activeRecordingFormat = null;
+        _recoveryExpired = false;
+        _reconnectAttempt = 0;
+        _nextReconnectMs = 0;
+        _outageStartMs = 0;
+        _inputWatchdog.Disarm();
+    }
+
+    /// <summary>
+    /// Arms the watchdog only while a take is in progress over a recoverable (network) source.
+    /// In-process sources — test signal, host desktop capture — are never watched (ADR-0002).
+    /// </summary>
+    private void UpdateWatchdogArming()
+    {
+        bool shouldArm = _takeInProgress
+            && _currentSource is IRecoverableMediaSource { RequiresInputHealthWatch: true };
+
+        if (shouldArm && !_inputWatchdog.IsArmed)
+        {
+            _inputWatchdog.Arm();
+        }
+        else if (!shouldArm && _inputWatchdog.IsArmed)
+        {
+            _inputWatchdog.Disarm();
+        }
+    }
+
+    private void HandleOutageBoundary()
+    {
+        long now = _clock();
+        _outageStartMs = now;
+        _reconnectAttempt = 0;
+        _nextReconnectMs = now;
+        _recoveryExpired = false;
+
+        AppLogger.LogError(
+            $"Input lost: no video frame for {InputLossThreshold.TotalSeconds:0.#}s while recording. " +
+            "Finalizing the current segment before attempting to reconnect.");
+
+        // Finalize AT the boundary, before anything else: the frozen last frame can never be written
+        // again, and the outage becomes an explicit named discontinuity on disk rather than a silent
+        // stitch (ADR-0002 decision 3). Recording resumes into the next …_partNN segment only if frames
+        // return within the grace period.
+        if (_recorder.IsRecording)
+        {
+            _recorder.StopRecording();
+        }
+
+        InputLost?.Invoke();
+    }
+
+    private void HandleRecovery()
+    {
+        _recoveryExpired = false;
+        _reconnectAttempt = 0;
+
+        bool resumed = false;
+        if (_takeInProgress && _activeRecordingConfig != null && _activeRecordingFormat != null)
+        {
+            resumed = _recorder.StartNextSegment(_activeRecordingConfig, _activeRecordingFormat);
+        }
+
+        AppLogger.LogInfo(resumed
+            ? $"Input restored; recording resumed into segment {_recorder.CurrentSegmentIndex}: {_recorder.CurrentRecordingPath}"
+            : "Input restored; recording was not resumed (take is no longer active).");
+
+        InputRecovered?.Invoke();
+    }
+
+    private void RequestSourceReconnect()
+    {
+        if (_reconnectInFlight) return;
+        if (_currentSource is not IRecoverableMediaSource { RequiresInputHealthWatch: true } recoverable) return;
+
+        _reconnectInFlight = true;
+        AppLogger.LogInfo($"Auto-reconnect attempt {_reconnectAttempt} for the network feed.");
+
+        // Off the calling (UI health-tick) thread: OmtReceiverService.Connect bounds-joins the previous
+        // receive loop, and blocking the UI thread on media teardown is forbidden (CODING_STANDARDS §2.3).
+        Task.Run(() =>
+        {
+            try
+            {
+                if (!_disposed)
+                {
+                    recoverable.EnsureConnected();
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLogger.LogError($"Auto-reconnect attempt failed: {ex.Message}", ex);
+            }
+            finally
+            {
+                _reconnectInFlight = false;
+            }
+        });
     }
 
     public void Dispose()
@@ -339,6 +572,9 @@ public class CaptureSession : IDisposable
         RecordingStarted = null;
         RecordingStopped = null;
         RecordingError = null;
+        InputLost = null;
+        InputRecovered = null;
+        InputRecoveryFailed = null;
 
         if (_ownsDependencies)
         {

@@ -36,6 +36,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private readonly OmtDiscoveryService _discoveryService;
     private readonly DispatcherTimer? _recordUiTimer;
     private readonly DispatcherTimer? _captureTargetsTimer;
+    private readonly DispatcherTimer? _inputHealthTimer;
     private readonly bool _ownsDependencies;
 
     // The broadcast-mode state machine (ADR-0001). Headless-constructible; presentation below is a
@@ -247,6 +248,13 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string _videoSpecsText = "-- x -- @ -- fps";
 
+    // Input-loss alarm banner (ADR-0002) — a projection of the Reconnecting / InputLost states.
+    [ObservableProperty]
+    private bool _isInputLossBannerVisible;
+
+    [ObservableProperty]
+    private string _inputLossBannerText = "";
+
     // 7. Recording Configuration Choices
     public IReadOnlyList<OutputContainerFormat> ContainerFormats { get; } = Enum.GetValues<OutputContainerFormat>();
 
@@ -435,6 +443,20 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             // Headless testing environment without Avalonia dispatcher
         }
+
+        // Input-loss watchdog tick (ADR-0002). Always running, like the capture-targets tick, so it
+        // also covers the outage window when no recording is active. Runs on the UI thread, so the
+        // state/banner mutations it triggers need no extra marshaling.
+        try
+        {
+            _inputHealthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            _inputHealthTimer.Tick += InputHealthTimer_Tick;
+            _inputHealthTimer.Start();
+        }
+        catch
+        {
+            // Headless testing environment without Avalonia dispatcher
+        }
     }
 
     private void HookEvents()
@@ -451,7 +473,21 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         _session.RecordingStarted += OnRecordingStarted;
         _session.RecordingStopped += OnRecordingStopped;
         _session.RecordingError += OnRecordingError;
+
+        _session.InputLost += OnSessionInputLost;
+        _session.InputRecovered += OnSessionInputRecovered;
+        _session.InputRecoveryFailed += OnSessionInputRecoveryFailed;
     }
+
+    /// <summary>
+    /// ADR-0002 outage transitions. Raised from the UI health tick, so the state change (and the
+    /// banner projection it triggers) already happens on the UI thread.
+    /// </summary>
+    private void OnSessionInputLost() => _broadcastState.BeginReconnecting();
+
+    private void OnSessionInputRecovered() => _broadcastState.EndReconnecting();
+
+    private void OnSessionInputRecoveryFailed() => _broadcastState.MarkInputLost();
 
     public void SetAudioMonitoring(bool enabled)
     {
@@ -591,7 +627,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
         try
         {
-            if (_broadcastState.IsReceiving)
+            if (_broadcastState.IsSessionActive)
             {
                 if (_session.IsRecording)
                 {
@@ -636,7 +672,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (active)
             {
-                if (_broadcastState.IsReceiving && _session.IsRecording)
+                if (_broadcastState.IsSessionActive && _session.IsRecording)
                 {
                     StatusText = "Finalizing active recording before switching source...";
                 }
@@ -656,12 +692,12 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             {
                 StatusText = "Test pattern stopped.";
 
-                if (_broadcastState.IsReceiving && _session.IsRecording)
+                if (_broadcastState.IsSessionActive && _session.IsRecording)
                 {
                     StatusText = "Finalizing active recording before disconnecting...";
                 }
 
-                bool wasReceiving = _broadcastState.IsReceiving;
+                bool wasReceiving = _broadcastState.IsSessionActive;
                 await _broadcastState.LeaveReceiveModeAsync(_broadcastEffects);
                 if (wasReceiving)
                 {
@@ -1319,6 +1355,23 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>
+    /// Periodic input-health poll driving the ADR-0002 watchdog. On the UI thread, so the state and
+    /// banner mutations it triggers need no extra marshaling.
+    /// </summary>
+    private void InputHealthTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_disposed) return;
+        try
+        {
+            _session.CheckInputHealth();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Input-health poll failed: {ex.Message}");
+        }
+    }
+
     [RelayCommand]
     private void RefreshCaptureTargets()
     {
@@ -1675,7 +1728,15 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private void ApplyBroadcastStateProjection()
     {
         BroadcastState state = _broadcastState.State;
-        bool receiving = IsReceiveMode(state);
+        bool receiving = _broadcastState.IsSessionActive;
+
+        // ADR-0002 input-loss alarm banner — part of this single projection, not set ad hoc.
+        bool reconnecting = state == BroadcastState.Reconnecting;
+        bool inputLost = state == BroadcastState.InputLost;
+        IsInputLossBannerVisible = reconnecting || inputLost;
+        InputLossBannerText = inputLost
+            ? "INPUT LOST — no video arrived within the input-loss window. The take was finalized and auto-reconnect has given up; reconnect the source to continue."
+            : "INPUT LOST — no video is arriving. Finalized the current segment; reconnecting automatically…";
 
         // Connect / Disconnect action button.
         ConnectButtonText = receiving ? "Disconnect" : "Connect";
@@ -1711,7 +1772,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     {
         ApplyBroadcastStateProjection();
 
-        if (IsReceiveMode(e.OldState) && !IsReceiveMode(e.NewState))
+        if (IsSessionMode(e.OldState) && !IsSessionMode(e.NewState))
         {
             ViewportClearRequested?.Invoke();
             MetersResetRequested?.Invoke();
@@ -1719,8 +1780,13 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
-    private static bool IsReceiveMode(BroadcastState state) =>
-        state is BroadcastState.NetworkConnected or BroadcastState.TestSignal;
+    /// <summary>
+    /// True for any state in which a session is attached — the two receiving modes plus the ADR-0002
+    /// outage states (frames have stopped, but the session is still attached, so nothing is torn down).
+    /// </summary>
+    private static bool IsSessionMode(BroadcastState state) =>
+        state is BroadcastState.NetworkConnected or BroadcastState.TestSignal
+               or BroadcastState.Reconnecting or BroadcastState.InputLost;
 
     /// <summary>
     /// Resets the viewport HUD and telemetry readouts shown while no stream is being received.
@@ -1758,6 +1824,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         _session.RecordingStarted -= OnRecordingStarted;
         _session.RecordingStopped -= OnRecordingStopped;
         _session.RecordingError -= OnRecordingError;
+
+        _session.InputLost -= OnSessionInputLost;
+        _session.InputRecovered -= OnSessionInputRecovered;
+        _session.InputRecoveryFailed -= OnSessionInputRecoveryFailed;
     }
 
     public void Dispose()
@@ -1774,6 +1844,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         if (_captureTargetsTimer != null)
         {
             _captureTargetsTimer.Tick -= CaptureTargetsTimer_Tick;
+        }
+        _inputHealthTimer?.Stop();
+        if (_inputHealthTimer != null)
+        {
+            _inputHealthTimer.Tick -= InputHealthTimer_Tick;
         }
         UnhookEvents();
         PickFolderAsync = null;

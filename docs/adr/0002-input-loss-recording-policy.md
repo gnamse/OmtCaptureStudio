@@ -25,10 +25,13 @@ transient 5-second outage ends the session until the operator notices.
    `OmtReceiverService`. Host desktop/window capture is out of scope for auto-reconnect —
    local capture failure is a different fault class and stays an error.
 3. **Segment-per-outage:** a recording interrupted by input loss never stitches the gap
-   invisibly. The take is finalized at the outage boundary (or after a bounded grace
-   period if frames never return) and, on reconnect, recording resumes into a new
-   sequential segment (`…_partNN` suffix). Policy order: frames return within grace →
-   continue into a new segment; they do not → finalize and stop.
+   invisibly. The take is finalized **immediately at the outage boundary** — the point is
+   to stop writing the frozen last frame — and the grace period governs *resume-vs-stop*,
+   not container lifetime: frames return within grace → resume recording into a new
+   sequential segment (`…_partNN` suffix); they do not → the take ends at that final
+   segment. (Clarified 2026-10-15 during implementation review; the implementation
+   finalizes synchronously on the health-tick thread, consistent with the existing
+   Disconnect → StopRecording path — offloading is a recorded follow-up, not a defect.)
 4. **Alarm surface:** banner + log. No audible alarm in this pass.
 
 ## Consequences

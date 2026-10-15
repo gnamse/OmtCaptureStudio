@@ -128,6 +128,10 @@ class Program
         TestAsioHostAudio();
         TestAuditRemediationsAndRegressionSeams();
         TestBroadcastSessionState();
+        TestInputLossWatchdog();
+        TestReconnectBackoff();
+        TestRecordingSegments();
+        TestRecordingOutageRecovery();
 
         Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
         using (var vmSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(new NullRecordingSink())))
@@ -228,6 +232,12 @@ class Program
                 throw new Exception("ViewModel IsRecordingConfigEnabled and IsMainContentEnabled should default to true!");
             }
 
+            // ADR-0002: the input-loss banner is part of the state projection and starts hidden.
+            if (vm.IsInputLossBannerVisible || vm.BroadcastState != BroadcastState.Offline)
+            {
+                throw new Exception($"ViewModel must start Offline with the input-loss banner hidden: state={vm.BroadcastState}, banner={vm.IsInputLossBannerVisible}");
+            }
+
             // Test ToggleTestSignalCommand (Turn ON)
             vm.ToggleTestSignalCommand.ExecuteAsync(null).GetAwaiter().GetResult();
             if (!vm.IsTestSignalActive || !vm.IsConnected || vm.ConnectButtonText != "Disconnect")
@@ -250,6 +260,10 @@ class Program
             {
                 throw new Exception("ViewModel ConnectButtonForeground connected state is not StudioPalette.ButtonWhiteForeground!");
             }
+            if (vm.BroadcastState != BroadcastState.TestSignal)
+            {
+                throw new Exception($"ViewModel state must be TestSignal while the test signal is active: {vm.BroadcastState}");
+            }
 
             // Test ToggleTestSignalCommand (Turn OFF)
             vm.ToggleTestSignalCommand.ExecuteAsync(null).GetAwaiter().GetResult();
@@ -264,6 +278,10 @@ class Program
             if (vm.ConnectButtonForeground != StudioPalette.ButtonDarkForeground)
             {
                 throw new Exception("ViewModel ConnectButtonForeground disconnected state is not StudioPalette.ButtonDarkForeground!");
+            }
+            if (vm.BroadcastState != BroadcastState.Offline || vm.IsInputLossBannerVisible)
+            {
+                throw new Exception($"ViewModel must return Offline with the banner hidden: state={vm.BroadcastState}, banner={vm.IsInputLossBannerVisible}");
             }
 
             // Test Folder Picker seam & exception resilience
@@ -610,7 +628,8 @@ class Program
         foreach (BroadcastState required in new[]
                  {
                      BroadcastState.Offline, BroadcastState.Connecting, BroadcastState.NetworkConnected,
-                     BroadcastState.TestSignal, BroadcastState.Broadcasting, BroadcastState.Reconnecting
+                     BroadcastState.TestSignal, BroadcastState.Broadcasting, BroadcastState.Reconnecting,
+                     BroadcastState.InputLost
                  })
         {
             if (!states.Contains(required))
@@ -618,9 +637,9 @@ class Program
                 throw new Exception($"BroadcastState is missing the required member '{required}'.");
             }
         }
-        if (states.Length != 6)
+        if (states.Length != 7)
         {
-            throw new Exception($"BroadcastState exposed {states.Length} members; expected exactly 6: {string.Join(",", states)}");
+            throw new Exception($"BroadcastState exposed {states.Length} members; expected exactly 7: {string.Join(",", states)}");
         }
 
         // --- Defaults: headless construct, Offline, both selectors unlocked. ---
@@ -705,9 +724,441 @@ class Program
             throw new Exception($"StopBroadcasting failed to return Offline: State={broadcastModule.State}, Broadcasting={broadcastModule.IsBroadcasting}");
         }
 
+        // --- ADR-0002 outage states: NetworkConnected -> Reconnecting -> (NetworkConnected | InputLost). ---
+        var outage = new BroadcastSessionState();
+        int outageEvents = 0;
+        outage.StateChanged += (_, __) => outageEvents++;
+        outage.EnterNetworkConnectedAsync(new BroadcastTestEffects(new List<string>()), () => { }).GetAwaiter().GetResult();
+        outageEvents = 0;
+
+        outage.BeginReconnecting();
+        if (outage.State != BroadcastState.Reconnecting || !outage.IsSessionActive ||
+            outage.IsSourceSelectorEnabled || outageEvents != 1)
+        {
+            throw new Exception($"BeginReconnecting failed: State={outage.State}, sourceSelector={outage.IsSourceSelectorEnabled}, events={outageEvents}");
+        }
+
+        outage.EndReconnecting();
+        if (outage.State != BroadcastState.NetworkConnected || outageEvents != 2)
+        {
+            throw new Exception($"EndReconnecting failed: State={outage.State}, events={outageEvents}");
+        }
+
+        outage.BeginReconnecting();
+        outage.MarkInputLost();
+        if (outage.State != BroadcastState.InputLost || !outage.IsSessionActive || outage.IsSourceSelectorEnabled)
+        {
+            throw new Exception($"MarkInputLost failed: State={outage.State}, sourceSelector={outage.IsSourceSelectorEnabled}");
+        }
+
+        // Leaving the session from the InputLost state still runs stop-recording-first, then disconnects.
+        var outageCalls = new List<string>();
+        outage.LeaveReceiveModeAsync(new BroadcastTestEffects(outageCalls) { IsRecording = true }).GetAwaiter().GetResult();
+        if (string.Join(",", outageCalls) != "stop-recording,disconnect" || outage.State != BroadcastState.Offline)
+        {
+            throw new Exception($"Leaving an InputLost session failed: calls={string.Join(",", outageCalls)}, State={outage.State}");
+        }
+
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> BroadcastSessionState transitions, stop-first ordering, and selector-lock derivation verified!");
         Console.ResetColor();
+    }
+
+    /// <summary>
+    /// Exercises the input-loss watchdog directly with a controllable clock (ADR-0002) — no real
+    /// 5 s sleeps. Verifies the threshold edge, the arm/disarm gate, and single-shot transitions.
+    /// </summary>
+    static void TestInputLossWatchdog()
+    {
+        Console.WriteLine("\n[Step 0.67] Verifying InputHealthWatchdog (threshold, arming, edges)...");
+
+        long now = 10_000;
+        var watchdog = new InputHealthWatchdog(thresholdMs: 5000, clock: () => now);
+
+        // Not armed => never fires, however long the silence.
+        now += 60_000;
+        if (watchdog.Poll() != InputHealthTransition.None || watchdog.IsLost)
+        {
+            throw new Exception("A disarmed watchdog must never report input loss.");
+        }
+
+        watchdog.Arm();
+        if (!watchdog.IsArmed || watchdog.IsLost)
+        {
+            throw new Exception("Arm() failed to arm the watchdog.");
+        }
+
+        // Just under the threshold => still healthy.
+        now += 4999;
+        if (watchdog.Poll() != InputHealthTransition.None)
+        {
+            throw new Exception("Watchdog fired before the threshold elapsed.");
+        }
+
+        // At the threshold => Lost, exactly once.
+        now += 1;
+        if (watchdog.Poll() != InputHealthTransition.Lost || !watchdog.IsLost)
+        {
+            throw new Exception("Watchdog failed to fire at the threshold.");
+        }
+        if (watchdog.Poll() != InputHealthTransition.None)
+        {
+            throw new Exception("Watchdog must report Lost only on the transition edge.");
+        }
+
+        // A frame arrives => Restored, exactly once.
+        watchdog.NotifyVideoFrame();
+        if (watchdog.Poll() != InputHealthTransition.Restored || watchdog.IsLost)
+        {
+            throw new Exception("Watchdog failed to report restore when frames returned.");
+        }
+        if (watchdog.Poll() != InputHealthTransition.None)
+        {
+            throw new Exception("Watchdog must report Restored only on the transition edge.");
+        }
+
+        // The threshold is operator-configurable.
+        var custom = new InputHealthWatchdog(thresholdMs: 1500, clock: () => now);
+        custom.Arm();
+        now += 1500;
+        if (custom.Poll() != InputHealthTransition.Lost)
+        {
+            throw new Exception("A configured threshold was not honoured.");
+        }
+
+        // Disarm clears the state.
+        custom.Disarm();
+        if (custom.IsArmed || custom.IsLost || custom.Poll() != InputHealthTransition.None)
+        {
+            throw new Exception("Disarm() must clear the armed/lost state.");
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> InputHealthWatchdog threshold, arming, and edge transitions verified!");
+        Console.ResetColor();
+    }
+
+    /// <summary>Verifies the deterministic reconnect backoff schedule (ADR-0002, no reconnect storms).</summary>
+    static void TestReconnectBackoff()
+    {
+        Console.WriteLine("\n[Step 0.671] Verifying ReconnectBackoff schedule...");
+
+        double[] expectedMs = { 250, 500, 1000, 2000, 4000, 5000, 5000, 5000 };
+        for (int attempt = 1; attempt <= expectedMs.Length; attempt++)
+        {
+            double actual = ReconnectBackoff.DelayFor(attempt).TotalMilliseconds;
+            if (Math.Abs(actual - expectedMs[attempt - 1]) > 0.001)
+            {
+                throw new Exception($"Backoff attempt {attempt}: expected {expectedMs[attempt - 1]} ms, got {actual} ms");
+            }
+        }
+
+        for (int attempt = 2; attempt <= 6; attempt++)
+        {
+            if (ReconnectBackoff.DelayFor(attempt) < ReconnectBackoff.DelayFor(attempt - 1))
+            {
+                throw new Exception($"Backoff must never decrease (attempt {attempt}).");
+            }
+        }
+
+        if (ReconnectBackoff.DelayFor(99) != ReconnectBackoff.MaxDelay)
+        {
+            throw new Exception("Backoff must stay capped at MaxDelay.");
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> ReconnectBackoff 250ms -> 500ms -> 1s -> 2s -> 4s -> 5s(cap) verified!");
+        Console.ResetColor();
+    }
+
+    /// <summary>Verifies sequential segment naming (ADR-0002 segment-per-outage).</summary>
+    static void TestRecordingSegments()
+    {
+        Console.WriteLine("\n[Step 0.672] Verifying RecordingSegments _partNN naming...");
+
+        string basePath = Path.Combine(Path.GetTempPath(), "OMT_Capture_2026-10-15_13-08-43.mp4");
+        int[] indices = { 1, 2, 3, 10 };
+        string[] suffixes = { "", "_part02", "_part03", "_part10" };
+        string stem = Path.Combine(Path.GetTempPath(), "OMT_Capture_2026-10-15_13-08-43");
+
+        for (int i = 0; i < indices.Length; i++)
+        {
+            string expected = $"{stem}{suffixes[i]}.mp4";
+            string actual = RecordingSegments.SegmentFilePath(basePath, indices[i]);
+            if (actual != expected)
+            {
+                throw new Exception($"Segment {indices[i]}: expected '{expected}', got '{actual}'");
+            }
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> Segment naming verified: base, _part02, _part03, _part10!");
+        Console.ResetColor();
+    }
+
+    /// <summary>
+    /// Headless verification of the ADR-0002 outage policy at the CaptureSession level: the watchdog
+    /// arms only for a recording over a recoverable (network) source, the current segment is finalized
+    /// at the outage boundary before anything else, frames returning within grace resume recording into
+    /// the next _partNN segment, and reconnect attempts follow the backoff schedule. Clock-driven — no
+    /// real 5 s sleeps.
+    /// </summary>
+    static void TestRecordingOutageRecovery()
+    {
+        Console.WriteLine("\n[Step 0.673] Verifying recording input-loss watchdog, auto-reconnect & segment-per-outage (headless)...");
+
+        long now = 1_000_000;
+        Func<long> clock = () => now;
+
+        string outDir = Path.Combine(Path.GetTempPath(), "OMT_Outage_Test");
+        if (Directory.Exists(outDir))
+        {
+            try { Directory.Delete(outDir, true); } catch { }
+        }
+        Directory.CreateDirectory(outDir);
+
+        var config = new RecordingConfig
+        {
+            OutputDirectory = outDir,
+            FilenamePrefix = "Outage_Test",
+            ContainerFormat = OutputContainerFormat.MP4,
+            EncoderChoice = VideoEncoderChoice.CpuX264,
+            Quality = QualityPreset.High,
+            InputLossThresholdSeconds = 5.0,
+            InputRecoveryGraceSeconds = 30.0
+        };
+
+        // --- (a) An in-process source (test signal / synthetic) is never watched, even while recording. ---
+        using (var sink = new NullRecordingSink())
+        using (var recorder = new StreamRecorderService(sink))
+        using (var audio = new AudioEngine())
+        using (var session = new CaptureSession(audio, recorder, ownsDependencies: false, healthClock: clock))
+        {
+            session.Connect(new SyntheticPatternSource());
+            WaitForFormat(session, "synthetic source");
+
+            if (!session.StartRecording(config))
+            {
+                throw new Exception("Failed to start recording on the synthetic source.");
+            }
+
+            bool lostFired = false;
+            session.InputLost += () => lostFired = true;
+
+            now += 60_000; // a full minute of simulated silence
+            session.CheckInputHealth();
+
+            if (lostFired || session.IsInputLost || !session.IsRecording)
+            {
+                throw new Exception("The watchdog must not watch in-process sources (test signal / synthetic).");
+            }
+
+            session.StopRecording();
+        }
+
+        Console.WriteLine(" -> In-process sources are correctly excluded from the input-health watchdog.");
+
+        // --- (b) A recoverable (network-like) source: outage -> finalize -> reconnect -> resume segment. ---
+        using (var sink = new NullRecordingSink())
+        using (var recorder = new StreamRecorderService(sink))
+        using (var audio = new AudioEngine())
+        using (var session = new CaptureSession(audio, recorder, ownsDependencies: false, healthClock: clock))
+        {
+            var source = new RecoverableTestSource();
+
+            long frames = 0;
+            session.VideoFrameAvailable += (p, l, w, h, s, fps, ts) => Interlocked.Increment(ref frames);
+
+            var order = new List<string>();
+            session.RecordingStopped += (path, dur, size) => order.Add("finalize");
+            session.InputLost += () => order.Add("input-lost");
+            session.InputRecovered += () => order.Add("input-recovered");
+
+            session.Connect(source);
+            WaitForFormat(session, "recoverable source");
+
+            // Not recording => not watched, even with the feed dead.
+            source.Suspend();
+            Thread.Sleep(80);
+            now += 60_000;
+            session.CheckInputHealth();
+            if (session.IsInputLost || session.IsInputHealthWatched)
+            {
+                throw new Exception("The watchdog must not arm unless a recording is in progress.");
+            }
+
+            // Connect the take.
+            source.Resume();
+            long framesBeforeTake = Interlocked.Read(ref frames);
+            WaitFor(() => Interlocked.Read(ref frames) > framesBeforeTake, "frames before starting the take");
+            now += 1000;
+            session.CheckInputHealth();
+
+            if (!session.StartRecording(config))
+            {
+                throw new Exception("Failed to start recording on the recoverable source.");
+            }
+            if (session.RecordingSegmentIndex != 1 || !session.IsInputHealthWatched)
+            {
+                throw new Exception($"Take must open segment 1 and arm the watchdog: segment={session.RecordingSegmentIndex}, watched={session.IsInputHealthWatched}");
+            }
+            string? firstSegment = session.CurrentRecordingPath;
+
+            if (session.IsInputLost)
+            {
+                throw new Exception("Watchdog reported loss while frames were flowing.");
+            }
+
+            // --- Outage boundary: silence past the threshold. ---
+            source.Suspend();
+            Thread.Sleep(80);
+            now += 6000; // > 5 s threshold
+            session.CheckInputHealth();
+
+            if (session.IsRecording)
+            {
+                throw new Exception("Recording must be stopped (segment finalized) at the outage boundary.");
+            }
+            if (order.Count < 2 || order[0] != "finalize" || order[1] != "input-lost")
+            {
+                throw new Exception($"Segment must be finalized BEFORE the alarm is raised: [{string.Join(",", order)}]");
+            }
+
+            // --- Reconnect attempts follow the backoff schedule (250 ms, then 500 ms). ---
+            WaitFor(() => source.ReconnectCount >= 1, "first auto-reconnect attempt");
+            now += 250;
+            session.CheckInputHealth();
+            WaitFor(() => source.ReconnectCount >= 2, "second auto-reconnect attempt");
+
+            now += 100; // only 100 ms of the 500 ms window elapsed
+            session.CheckInputHealth();
+            Thread.Sleep(80);
+            if (source.ReconnectCount != 2)
+            {
+                throw new Exception($"Reconnect attempts must honour the backoff schedule; got {source.ReconnectCount} after 350 ms.");
+            }
+
+            // The second attempt (at T+250) schedules the third at T+750; advance to exactly that.
+            now += 400;
+            session.CheckInputHealth();
+            WaitFor(() => source.ReconnectCount >= 3, "third auto-reconnect attempt");
+
+            // --- Frames return within the grace period: resume into the next _partNN segment. ---
+            long framesBeforeResume = Interlocked.Read(ref frames);
+            source.Resume();
+            WaitFor(() => Interlocked.Read(ref frames) > framesBeforeResume, "frames after resume");
+            now += 100;
+            session.CheckInputHealth();
+
+            if (!session.IsRecording)
+            {
+                throw new Exception("Recording must resume when frames return within the grace period.");
+            }
+            if (session.RecordingSegmentIndex != 2)
+            {
+                throw new Exception($"Resume must open segment 2, got {session.RecordingSegmentIndex}.");
+            }
+            string? second = session.CurrentRecordingPath;
+            if (second == null || !second.EndsWith("_part02" + Path.GetExtension(firstSegment ?? ".mp4"), StringComparison.Ordinal))
+            {
+                throw new Exception($"Resumed segment must be named …_part02: got '{second}' (from '{firstSegment}')");
+            }
+            if (!order.SequenceEqual(new[] { "finalize", "input-lost", "input-recovered" }))
+            {
+                throw new Exception($"Unexpected transition order: [{string.Join(",", order)}]");
+            }
+
+            session.StopRecording();
+        }
+
+        Console.WriteLine(" -> Outage finalize-before-alarm, backoff reconnect, and _part02 resume verified!");
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> Input-loss watchdog, auto-reconnect, and segment-per-outage verified!");
+        Console.ResetColor();
+    }
+
+    private static void WaitForFormat(CaptureSession session, string what)
+    {
+        int tries = 0;
+        while (!session.CurrentFormat.HasVideo && tries < 100)
+        {
+            Thread.Sleep(50);
+            tries++;
+        }
+        if (!session.CurrentFormat.HasVideo)
+        {
+            throw new Exception($"{what} failed to deliver a video format in time.");
+        }
+    }
+
+    private static void WaitFor(Func<bool> condition, string what)
+    {
+        int tries = 0;
+        while (!condition() && tries < 100)
+        {
+            Thread.Sleep(25);
+            tries++;
+        }
+        if (!condition())
+        {
+            throw new Exception($"{what} did not happen in time.");
+        }
+    }
+
+    /// <summary>
+    /// A network-like test source: wraps a real <see cref="SyntheticPatternSource"/> (so frames carry
+    /// genuine buffers the video/audio pipeline can consume) but presents itself as a recoverable
+    /// remote feed whose frames can be suspended, and counts auto-reconnect attempts.
+    /// </summary>
+    private sealed class RecoverableTestSource : IMediaSource, IRecoverableMediaSource
+    {
+        private readonly SyntheticPatternSource _inner = new();
+        private volatile bool _forwarding = true;
+        private int _reconnectCount;
+
+        public RecoverableTestSource()
+        {
+            _inner.VideoFrameReceived += (p, l, w, h, s, fps, ts) =>
+            {
+                if (_forwarding) VideoFrameReceived?.Invoke(p, l, w, h, s, fps, ts);
+            };
+            _inner.AudioFrameReceived += (p, ch, smp, rate, ts) =>
+            {
+                if (_forwarding) AudioFrameReceived?.Invoke(p, ch, smp, rate, ts);
+            };
+            _inner.TelemetryUpdated += t => TelemetryUpdated?.Invoke(t);
+            _inner.StatusChanged += s => StatusChanged?.Invoke(s);
+            _inner.ErrorOccurred += e => ErrorOccurred?.Invoke(e);
+        }
+
+        public string Name => "Recoverable Test Source";
+        public string Address => "test://recoverable";
+
+        /// <summary>The socket stays up during an outage — only the frames stop (the ADR-0002 failure mode).</summary>
+        public bool IsConnected => true;
+
+        public bool RequiresInputHealthWatch => true;
+
+        public int ReconnectCount => Volatile.Read(ref _reconnectCount);
+
+        public event Action<IntPtr, int, int, int, int, double, long>? VideoFrameReceived;
+        public event Action<IntPtr, int, int, int, long>? AudioFrameReceived;
+        public event Action<StreamTelemetry>? TelemetryUpdated;
+        public event Action<string>? StatusChanged;
+        public event Action<string>? ErrorOccurred;
+
+        public void Connect() => _inner.Connect();
+
+        public void Disconnect() => _inner.Disconnect();
+
+        /// <summary>Counts the attempt; deliberately does NOT resume frames (the test drives Resume).</summary>
+        public void EnsureConnected() => Interlocked.Increment(ref _reconnectCount);
+
+        public void Suspend() => _forwarding = false;
+
+        public void Resume() => _forwarding = true;
+
+        public void Dispose() => _inner.Dispose();
     }
 
     /// <summary>Records the effect calls the state machine makes, so their order can be asserted.</summary>

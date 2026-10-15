@@ -4,10 +4,11 @@ using System.Threading.Tasks;
 namespace OmtCaptureStudio.Services;
 
 /// <summary>
-/// The named operating modes of the broadcast session (ADR-0001 decision 1).
-/// <see cref="Reconnecting"/> is reserved for the input-loss watchdog
-/// (docs/adr/0002-input-loss-recording-policy.md) and compiles from day one so adding the
-/// state later is a rename-free addition.
+/// The named operating modes of the broadcast session (ADR-0001 decision 1). <see cref="Reconnecting"/>
+/// and <see cref="InputLost"/> are the ADR-0002 outage states: a live network feed that has gone quiet
+/// moves to <see cref="Reconnecting"/> while auto-reconnect is attempted, and to
+/// <see cref="InputLost"/> once the bounded grace period expires
+/// (docs/adr/0002-input-loss-recording-policy.md).
 /// </summary>
 public enum BroadcastState
 {
@@ -16,7 +17,8 @@ public enum BroadcastState
     NetworkConnected,
     TestSignal,
     Broadcasting,
-    Reconnecting
+    Reconnecting,
+    InputLost
 }
 
 /// <summary>
@@ -79,11 +81,21 @@ public sealed class BroadcastSessionState
     /// <summary>True while the host desktop/window is being broadcast as an OMT source.</summary>
     public bool IsBroadcasting => _isBroadcasting;
 
-    /// <summary>True while the capture session is attached to a receive source (network or test signal).</summary>
+    /// <summary>True while the capture session is actively receiving frames (network or test signal).</summary>
     public bool IsReceiving => State is BroadcastState.NetworkConnected or BroadcastState.TestSignal;
 
-    /// <summary>The Source picker is locked while a stream is being received (DESIGN §7).</summary>
-    public bool IsSourceSelectorEnabled => !IsReceiving;
+    /// <summary>
+    /// True whenever a receive session is attached — including the ADR-0002 outage states
+    /// (<see cref="BroadcastState.Reconnecting"/>, <see cref="BroadcastState.InputLost"/>), where the
+    /// source is still attached but frames have stopped. It is leaving the *session* (not merely the
+    /// frames) that runs stop-recording-first and disconnects.
+    /// </summary>
+    public bool IsSessionActive =>
+        State is BroadcastState.NetworkConnected or BroadcastState.TestSignal
+               or BroadcastState.Reconnecting or BroadcastState.InputLost;
+
+    /// <summary>The Source picker is locked while a session is attached — including during an outage (DESIGN §7).</summary>
+    public bool IsSourceSelectorEnabled => !IsSessionActive;
 
     /// <summary>Target/Audio/Network selectors are locked while a host broadcast is live (DESIGN §7).</summary>
     public bool IsCaptureSelectorEnabled => !_isBroadcasting;
@@ -143,7 +155,7 @@ public sealed class BroadcastSessionState
     {
         ArgumentNullException.ThrowIfNull(effects);
 
-        if (!IsReceiving)
+        if (!IsSessionActive)
         {
             return;
         }
@@ -190,9 +202,56 @@ public sealed class BroadcastSessionState
         }
     }
 
+    // ---- ADR-0002 input-loss outage transitions (driven by the recording watchdog) ----
+
+    /// <summary>
+    /// The network feed has gone quiet and auto-reconnect is being attempted:
+    /// <see cref="BroadcastState.NetworkConnected"/> → <see cref="BroadcastState.Reconnecting"/>.
+    /// The session stays attached, so the source picker remains locked and leaving it still runs
+    /// stop-recording-first.
+    /// </summary>
+    public void BeginReconnecting()
+    {
+        if (State != BroadcastState.NetworkConnected)
+        {
+            return;
+        }
+
+        SetState(BroadcastState.Reconnecting);
+    }
+
+    /// <summary>
+    /// Frames returned within the grace period: <see cref="BroadcastState.Reconnecting"/> →
+    /// <see cref="BroadcastState.NetworkConnected"/> (recording has resumed into a new segment).
+    /// </summary>
+    public void EndReconnecting()
+    {
+        if (State != BroadcastState.Reconnecting)
+        {
+            return;
+        }
+
+        SetState(BroadcastState.NetworkConnected);
+    }
+
+    /// <summary>
+    /// The bounded grace period expired with no frames: <see cref="BroadcastState.Reconnecting"/> →
+    /// <see cref="BroadcastState.InputLost"/>. The take has been finalized; the alarm persists until
+    /// the operator reconnects.
+    /// </summary>
+    public void MarkInputLost()
+    {
+        if (State != BroadcastState.Reconnecting)
+        {
+            return;
+        }
+
+        SetState(BroadcastState.InputLost);
+    }
+
     private async Task StopAndReleaseReceiveAsync(IBroadcastSessionEffects effects)
     {
-        if (!IsReceiving)
+        if (!IsSessionActive)
         {
             return;
         }

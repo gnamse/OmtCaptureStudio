@@ -5,11 +5,17 @@ namespace OmtCaptureStudio.Services.Sources;
 /// <summary>
 /// Network media source adapter receiving real OMT video/audio streams via libomtnet.
 /// </summary>
-public class OmtNetworkSource : IMediaSource
+public class OmtNetworkSource : IMediaSource, IRecoverableMediaSource
 {
     private readonly OmtReceiverService _receiver;
     private string _address;
     private bool _disposed;
+
+    /// <summary>
+    /// A network OMT feed is delivered by a remote peer, so it can go dead mid-recording.
+    /// The input-loss watchdog watches exactly these feeds (ADR-0002).
+    /// </summary>
+    public bool RequiresInputHealthWatch => true;
 
     private readonly Action<IntPtr, int, int, int, int, double, long> _onVideoReceived;
     private readonly Action<IntPtr, int, int, int, long> _onAudioReceived;
@@ -61,6 +67,18 @@ public class OmtNetworkSource : IMediaSource
     public void Disconnect()
     {
         _receiver.Disconnect();
+    }
+
+    /// <summary>
+    /// Re-establishes the network feed after an input-loss gap. Delegates to
+    /// <see cref="OmtReceiverService.EnsureConnected"/>, which tears the old receiver down and joins a
+    /// fresh one using the service's identity-check disposal pattern — a bounded join that times out
+    /// never disposes a receiver a live loop still holds.
+    /// </summary>
+    public void EnsureConnected()
+    {
+        if (_disposed) return;
+        _receiver.EnsureConnected(_address);
     }
 
     public void Dispose()

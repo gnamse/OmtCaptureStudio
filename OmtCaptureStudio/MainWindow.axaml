@@ -240,6 +240,16 @@
                         </StackPanel>
                     </Border>
 
+                    <!-- Input-loss alarm banner (ADR-0002). Visibility and text are projections of the
+                         BroadcastState outage states (Reconnecting / InputLost), not set ad hoc. -->
+                    <Border x:Name="InputLossBanner" VerticalAlignment="Top" HorizontalAlignment="Stretch" Margin="8,44,8,0"
+                            Background="{DynamicResource StudioAccentDanger}" CornerRadius="{DynamicResource RadiusSm}" Padding="10,6"
+                            IsVisible="{CompiledBinding IsInputLossBannerVisible}">
+                        <TextBlock Text="{CompiledBinding InputLossBannerText}" Foreground="{DynamicResource StudioTextOnAccent}"
+                                   FontSize="12" FontWeight="Bold" TextWrapping="Wrap" TextAlignment="Center"
+                                   AutomationProperties.LiveSetting="Assertive"/>
+                    </Border>
+
                     <!-- Video Viewport HUD Overlay (Top-Left) -->
                     <Border Background="{DynamicResource StudioHudScrim}" CornerRadius="{DynamicResource RadiusSm}" Padding="8,4" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8">
                         <StackPanel Orientation="Horizontal">

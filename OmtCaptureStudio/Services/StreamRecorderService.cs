@@ -33,8 +33,19 @@ public class StreamRecorderService : IDisposable
     private DateTime _lastDiskCheckUtc = DateTime.MinValue;
     private bool _disposed;
 
+    // Multi-segment take state (ADR-0002): segment 1 is the take's timestamped base file; a resume
+    // after an input-loss outage appends the next …_partNN segment under the same base name.
+    private string? _takeBasePath;
+    private int _segmentIndex;
+
     public bool IsRecording => _isRecording;
     public string? CurrentRecordingPath => _currentRecordingPath;
+
+    /// <summary>1-based index of the active take's current (or most recent) segment.</summary>
+    public int CurrentSegmentIndex => _segmentIndex;
+
+    /// <summary>Segment-1 base file path of the active take, or null when no take has started.</summary>
+    public string? CurrentTakeBasePath => _takeBasePath;
     public TimeSpan ElapsedTime => _isRecording ? Stopwatch.GetElapsedTime(_recordStartTimestamp) : TimeSpan.Zero;
     public long FramesWritten => _framesWritten;
     public long AudioBytesWritten => _audioBytesWritten;
@@ -84,91 +95,125 @@ public class StreamRecorderService : IDisposable
         {
             if (_disposed || _isRecording) return false;
 
-            try
+            // A caller-initiated start begins a new take: segment 1, fresh timestamped base name.
+            _takeBasePath = null;
+            _segmentIndex = 0;
+            return StartSegmentLocked(config, format, isNewTake: true);
+        }
+    }
+
+    /// <summary>
+    /// Resumes the active take after an input-loss outage into the next sequential segment
+    /// (…_partNN), reusing the take's original base name and timestamp so all segments of one take
+    /// sort together and the outage boundary is explicit on disk (ADR-0002 decision 3). Falls back to
+    /// starting a fresh take when no base name is known yet.
+    /// </summary>
+    public bool StartNextSegment(RecordingConfig config, StreamFormat format)
+    {
+        lock (_recordLock)
+        {
+            if (_disposed || _isRecording) return false;
+            return StartSegmentLocked(config, format, isNewTake: _takeBasePath == null);
+        }
+    }
+
+    private bool StartSegmentLocked(RecordingConfig config, StreamFormat format, bool isNewTake)
+    {
+        try
+        {
+            if (config == null || string.IsNullOrWhiteSpace(config.OutputDirectory))
             {
-                if (config == null || string.IsNullOrWhiteSpace(config.OutputDirectory))
-                {
-                    RecordingError?.Invoke("Cannot record: Output destination directory is not specified.");
-                    return false;
-                }
-
-                if (format.Width <= 0 || format.Height <= 0)
-                {
-                    RecordingError?.Invoke("Cannot record: Invalid video dimensions.");
-                    return false;
-                }
-
-                if (!Directory.Exists(config.OutputDirectory))
-                {
-                    Directory.CreateDirectory(config.OutputDirectory);
-                }
-
-                string ext = config.ContainerFormat switch
-                {
-                    OutputContainerFormat.MKV => ".mkv",
-                    OutputContainerFormat.MOV => ".mov",
-                    _ => ".mp4"
-                };
-
-                string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
-                string filename = $"{config.FilenamePrefix}_{timestamp}{ext}";
-                _currentRecordingPath = Path.Combine(config.OutputDirectory, filename);
-
-                // Preflight: refuse to start a doomed recording before any bytes are written.
-                if (!TryGetFreeSpace(_currentRecordingPath, out string driveName, out string driveFormat, out long freeBytes))
-                {
-                    // Drive status could not be determined (e.g. a mapped/UNC path offline).
-                    // Surfacing a clear warning is safer than faking a PASS or FAIL — proceed,
-                    // the periodic guard will still protect the session once storage is reachable.
-                    AppLogger.LogError($"Disk preflight could not determine free space for {_currentRecordingPath}; proceeding without preflight check.");
-                }
-                else
-                {
-                    if (IsFattishFileSystem(driveFormat))
-                    {
-                        RecordingError?.Invoke(
-                            $"Cannot record: {driveName} is formatted as {driveFormat}, which has a 4 GB single-file limit. " +
-                            "Choose an output folder on an NTFS (or exFAT) volume for long recordings.");
-                        _currentRecordingPath = null;
-                        return false;
-                    }
-
-                    long estimated = EstimateSessionSize(config, format);
-                    long requiredFloor = Math.Max(estimated * 4L, MinimumPreflightFreeBytes);
-                    if (freeBytes < requiredFloor)
-                    {
-                        RecordingError?.Invoke(
-                            $"Cannot record: only {FormatBytes(freeBytes)} free on {driveName}, but a {PreflightWindow.TotalMinutes:0}-minute " +
-                            $"capture at the selected quality needs about {FormatBytes(requiredFloor)} free. " +
-                            "Free up disk space or choose a different output folder.");
-                        _currentRecordingPath = null;
-                        return false;
-                    }
-                }
-
-                bool initialized = _sink.Initialize(config, format, _currentRecordingPath);
-                if (!initialized)
-                {
-                    AppLogger.LogError("Failed to initialize recording sink.");
-                    RecordingError?.Invoke("Failed to initialize recording sink.");
-                    return false;
-                }
-
-                _recordStartTimestamp = Stopwatch.GetTimestamp();
-                _framesWritten = 0;
-                _audioBytesWritten = 0;
-                _isRecording = true;
-
-                AppLogger.LogInfo($"Recording started internally: {_currentRecordingPath}");
-                RecordingStarted?.Invoke(_currentRecordingPath);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                AppLogger.LogError($"Failed to start recording: {ex.Message}", ex);
-                RecordingError?.Invoke($"Failed to start recording: {ex.Message}");
+                RecordingError?.Invoke("Cannot record: Output destination directory is not specified.");
                 return false;
             }
+
+            if (format.Width <= 0 || format.Height <= 0)
+            {
+                RecordingError?.Invoke("Cannot record: Invalid video dimensions.");
+                return false;
+            }
+
+            if (!Directory.Exists(config.OutputDirectory))
+            {
+                Directory.CreateDirectory(config.OutputDirectory);
+            }
+
+            string ext = config.ContainerFormat switch
+            {
+                OutputContainerFormat.MKV => ".mkv",
+                OutputContainerFormat.MOV => ".mov",
+                _ => ".mp4"
+            };
+
+            // Segment 1 uses the take's timestamped base name; later segments suffix the same stem
+            // with _partNN so a post-outage gap is a named discontinuity, never an invisible stitch.
+            bool startNewTake = isNewTake || _takeBasePath == null;
+            string takeBasePath = startNewTake
+                ? Path.Combine(config.OutputDirectory, $"{config.FilenamePrefix}_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}{ext}")
+                : _takeBasePath!;
+            int segmentIndex = startNewTake ? 1 : _segmentIndex + 1;
+
+            _currentRecordingPath = RecordingSegments.SegmentFilePath(takeBasePath, segmentIndex);
+
+            // Preflight: refuse to start a doomed recording before any bytes are written.
+            if (!TryGetFreeSpace(_currentRecordingPath, out string driveName, out string driveFormat, out long freeBytes))
+            {
+                // Drive status could not be determined (e.g. a mapped/UNC path offline).
+                // Surfacing a clear warning is safer than faking a PASS or FAIL — proceed,
+                // the periodic guard will still protect the session once storage is reachable.
+                AppLogger.LogError($"Disk preflight could not determine free space for {_currentRecordingPath}; proceeding without preflight check.");
+            }
+            else
+            {
+                if (IsFattishFileSystem(driveFormat))
+                {
+                    RecordingError?.Invoke(
+                        $"Cannot record: {driveName} is formatted as {driveFormat}, which has a 4 GB single-file limit. " +
+                        "Choose an output folder on an NTFS (or exFAT) volume for long recordings.");
+                    _currentRecordingPath = null;
+                    return false;
+                }
+
+                long estimated = EstimateSessionSize(config, format);
+                long requiredFloor = Math.Max(estimated * 4L, MinimumPreflightFreeBytes);
+                if (freeBytes < requiredFloor)
+                {
+                    RecordingError?.Invoke(
+                        $"Cannot record: only {FormatBytes(freeBytes)} free on {driveName}, but a {PreflightWindow.TotalMinutes:0}-minute " +
+                        $"capture at the selected quality needs about {FormatBytes(requiredFloor)} free. " +
+                        "Free up disk space or choose a different output folder.");
+                    _currentRecordingPath = null;
+                    return false;
+                }
+            }
+
+            bool initialized = _sink.Initialize(config, format, _currentRecordingPath);
+            if (!initialized)
+            {
+                AppLogger.LogError("Failed to initialize recording sink.");
+                RecordingError?.Invoke("Failed to initialize recording sink.");
+                return false;
+            }
+
+            // Commit the segment bookkeeping only once the sink is live (a failed start must not
+            // advance the segment sequence).
+            _takeBasePath = takeBasePath;
+            _segmentIndex = segmentIndex;
+
+            _recordStartTimestamp = Stopwatch.GetTimestamp();
+            _framesWritten = 0;
+            _audioBytesWritten = 0;
+            _isRecording = true;
+
+            AppLogger.LogInfo($"Recording started internally (segment {segmentIndex}): {_currentRecordingPath}");
+            RecordingStarted?.Invoke(_currentRecordingPath);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Failed to start recording: {ex.Message}", ex);
+            RecordingError?.Invoke($"Failed to start recording: {ex.Message}");
+            return false;
         }
     }
 
