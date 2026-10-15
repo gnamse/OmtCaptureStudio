@@ -67,7 +67,7 @@
                         </ComboBox.ItemTemplate>
                     </ComboBox>
                     <Button x:Name="BtnRefreshSources" Grid.Column="3" Padding="8,0" Margin="0,0,6,0" MinHeight="30" VerticalAlignment="Center"
-                            HotKey="F5"
+                            HotKey="F5" IsEnabled="{CompiledBinding IsSourceSelectorEnabled}"
                             AutomationProperties.Name="Refresh Discovered Sources"
                             ToolTip.Tip="Scan network and refresh discovered OMT sources (F5)"
                             Command="{CompiledBinding RefreshSourcesCommand}">
@@ -194,6 +194,7 @@
 
                         <!-- Refresh Capture Targets, Audio Devices & Networks -->
                         <Button x:Name="BtnRefreshCaptureTargets" Grid.Column="7" Padding="7,0" Margin="0,0,6,0" MinHeight="30" VerticalAlignment="Center"
+								IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
                                 AutomationProperties.Name="Refresh capture targets, audio devices, and networks"
                                 ToolTip.Tip="Refresh monitors, windows, audio devices, and network adapters"
                                 Command="{CompiledBinding RefreshCaptureTargetsCommand}">
