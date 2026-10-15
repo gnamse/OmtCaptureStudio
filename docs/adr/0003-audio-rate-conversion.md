@@ -113,6 +113,9 @@ part and the ring extraction is independently valuable and independently testabl
 - Option A changes WASAPI's mismatch-path output from linear-interpolated to sinc-interpolated:
   user-audible, strictly an improvement (less aliasing on the 44.1→48 conversion), and it adds ~1 ms
   of latency on that path only; the 48 kHz path is bit-exact passthrough in both options.
+  Measured: sinc **57.8 dB SER** vs linear **40.5 dB SER** on a 200 Hz–8 kHz sweep at 44.1→48
+  (a 17.3 dB improvement); matched-rate identity deviation **3.48e-17** over 2048 frames (float
+  rounding).
 - Option B leaves a documented quality gap between the two drivers on rate-mismatched devices.
 - Risk: both adapters contain COM interop whose threading and buffer ownership must not change; the
   ring extraction must preserve each caller's existing lock discipline (ASIO locks outside its
