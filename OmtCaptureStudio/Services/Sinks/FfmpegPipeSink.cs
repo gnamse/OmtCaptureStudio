@@ -66,7 +66,7 @@ public class FfmpegPipeSink : IRecordingSink
         var videoQueue = _videoQueue;
         if (_disposed || videoQueue == null || pData == IntPtr.Zero || dataLength <= 0) return;
 
-        byte[] rented;
+        byte[]? rented = null;
         try
         {
             rented = LargeArrayPool.Shared.Rent(dataLength);
@@ -77,6 +77,10 @@ public class FfmpegPipeSink : IRecordingSink
         }
         catch (Exception ex)
         {
+            if (rented != null)
+            {
+                LargeArrayPool.Shared.Return(rented);
+            }
             AppLogger.LogError($"[Video MemoryCopy Error] {ex.Message}", ex);
             return;
         }
@@ -92,7 +96,15 @@ public class FfmpegPipeSink : IRecordingSink
             return;
         }
 
-        videoQueue.Enqueue(new VideoFramePacket(rented, dataLength));
+        try
+        {
+            videoQueue.Enqueue(new VideoFramePacket(rented, dataLength));
+        }
+        catch
+        {
+            LargeArrayPool.Shared.Return(rented);
+            throw;
+        }
     }
 
     public void WriteAudio(byte[] buffer, int offset, int count)
@@ -100,7 +112,7 @@ public class FfmpegPipeSink : IRecordingSink
         var audioQueue = _audioQueue;
         if (!_hasAudio || _disposed || audioQueue == null || buffer == null || count <= 0) return;
 
-        byte[] rented;
+        byte[]? rented = null;
         try
         {
             rented = ArrayPool<byte>.Shared.Rent(count);
@@ -108,6 +120,10 @@ public class FfmpegPipeSink : IRecordingSink
         }
         catch (Exception ex)
         {
+            if (rented != null)
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
             AppLogger.LogError($"[Audio Buffer Copy Error] {ex.Message}", ex);
             return;
         }
@@ -119,7 +135,15 @@ public class FfmpegPipeSink : IRecordingSink
             return;
         }
 
-        audioQueue.Enqueue(new AudioDataPacket(rented, count));
+        try
+        {
+            audioQueue.Enqueue(new AudioDataPacket(rented, count));
+        }
+        catch
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+            throw;
+        }
     }
 
     public void FinalizeSink(out long totalBytesWritten)
@@ -188,6 +212,7 @@ public class FfmpegPipeSink : IRecordingSink
     public void Dispose()
     {
         Cleanup();
+        SinkError = null;
         GC.SuppressFinalize(this);
     }
 }

@@ -115,16 +115,15 @@ public partial class MainWindow : Window
             }
             else if (e.Key == Key.Tab)
             {
-                // Focus trap: with only two actions in the dialog, cycle focus
-                // between them so it never escapes onto controls behind the overlay.
-                bool backwards = (e.KeyModifiers & KeyModifiers.Shift) != 0;
-                if (backwards)
+                // Focus trap: toggle focus between the two modal buttons so Tab / Shift+Tab
+                // cycles cleanly inside the dialog and never escapes to background controls.
+                if (BtnKeepRecording.IsFocused)
                 {
-                    BtnKeepRecording.Focus();
+                    BtnStopAndExit.Focus();
                 }
                 else
                 {
-                    BtnStopAndExit.Focus();
+                    BtnKeepRecording.Focus();
                 }
             }
             e.Handled = true;

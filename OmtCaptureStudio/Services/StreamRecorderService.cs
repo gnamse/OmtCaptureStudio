@@ -31,6 +31,7 @@ public class StreamRecorderService : IDisposable
     private long _audioBytesWritten;
     private readonly object _recordLock = new();
     private DateTime _lastDiskCheckUtc = DateTime.MinValue;
+    private bool _disposed;
 
     public bool IsRecording => _isRecording;
     public string? CurrentRecordingPath => _currentRecordingPath;
@@ -81,10 +82,16 @@ public class StreamRecorderService : IDisposable
     {
         lock (_recordLock)
         {
-            if (_isRecording) return false;
+            if (_disposed || _isRecording) return false;
 
             try
             {
+                if (config == null || string.IsNullOrWhiteSpace(config.OutputDirectory))
+                {
+                    RecordingError?.Invoke("Cannot record: Output destination directory is not specified.");
+                    return false;
+                }
+
                 if (format.Width <= 0 || format.Height <= 0)
                 {
                     RecordingError?.Invoke("Cannot record: Invalid video dimensions.");
@@ -322,7 +329,7 @@ public class StreamRecorderService : IDisposable
     /// </summary>
     public void WriteVideoFrame(IntPtr pData, int dataLength)
     {
-        if (!_isRecording || pData == IntPtr.Zero || dataLength <= 0) return;
+        if (_disposed || !_isRecording || pData == IntPtr.Zero || dataLength <= 0) return;
 
         _sink.WriteVideo(pData, dataLength);
         Interlocked.Increment(ref _framesWritten);
@@ -344,7 +351,7 @@ public class StreamRecorderService : IDisposable
     /// </summary>
     public void WriteAudioData(byte[] buffer, int offset, int count)
     {
-        if (!_isRecording || buffer == null || count <= 0) return;
+        if (_disposed || !_isRecording || buffer == null || count <= 0) return;
 
         _sink.WriteAudio(buffer, offset, count);
         Interlocked.Add(ref _audioBytesWritten, count);
@@ -387,8 +394,16 @@ public class StreamRecorderService : IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         StopRecording();
         _sink.SinkError -= OnSinkError;
+
+        RecordingStarted = null;
+        RecordingStopped = null;
+        RecordingError = null;
+
         if (_ownsSink)
         {
             _sink.Dispose();

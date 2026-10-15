@@ -21,6 +21,7 @@ public class XAudio2Monitor : IAudioMonitor
     private readonly IntPtr[] _ringBuffers = new IntPtr[RingSlotCount];
     private int _ringWriteIndex = 0;
     private readonly object _lock = new();
+    private bool _disposed;
 
     public XAudio2Monitor()
     {
@@ -34,6 +35,7 @@ public class XAudio2Monitor : IAudioMonitor
     {
         lock (_lock)
         {
+            if (_disposed || sampleRate <= 0 || channels <= 0) return;
             StopInternal();
             try
             {
@@ -59,6 +61,7 @@ public class XAudio2Monitor : IAudioMonitor
     {
         lock (_lock)
         {
+            if (_disposed) return;
             try
             {
                 if (_sourceVoice != null)
@@ -104,6 +107,7 @@ public class XAudio2Monitor : IAudioMonitor
     {
         lock (_lock)
         {
+            if (_disposed) return;
             StopInternal();
         }
     }
@@ -141,6 +145,9 @@ public class XAudio2Monitor : IAudioMonitor
     {
         lock (_lock)
         {
+            if (_disposed) return;
+            _disposed = true;
+
             StopInternal();
 
             for (int i = 0; i < RingSlotCount; i++)

@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 
 namespace OmtCaptureStudio.Services;
 
@@ -50,8 +51,9 @@ public sealed class AudioClockResampler
     private static float[]? s_filter;
     private static readonly object s_filterLock = new();
 
-    private int _channels;
-    private int _sampleRate;
+    private readonly object _processLock = new();
+    private int _channels = 2;
+    private int _sampleRate = 48000;
 
     // Rate-PLL state (cumulative video frames vs cumulative audio input frames).
     private long _videoFrames;
@@ -77,7 +79,7 @@ public sealed class AudioClockResampler
     /// <summary>Current resample ratio (output frames per input frame).</summary>
     public double Ratio => _ratio;
 
-    public long VideoFramesSeen => _videoFrames;
+    public long VideoFramesSeen => Interlocked.Read(ref _videoFrames);
 
     /// <summary>
     /// Re-arms the resampler for a new recording session, using the (measured) true
@@ -85,29 +87,32 @@ public sealed class AudioClockResampler
     /// </summary>
     public void Reset(int sampleRate, double frameRate, int channels)
     {
-        _sampleRate = sampleRate > 0 ? sampleRate : 48000;
-        _channels = channels > 0 ? channels : 2;
-        SamplesPerFrame = _sampleRate / (frameRate > 0 ? frameRate : 30.0);
-        _videoFrames = 0;
-        _audioInFrames = 0;
-        _ratio = 1.0;
-        _outAcc = 0.0;
-
-        // Prime the FIFO with HalfWidth frames of silence so the FIR has its left-edge
-        // history for the first real sample, and start reading at the first real frame.
-        _fifoCount = HalfWidth;
-        if (_fifo.Length < HalfWidth * _channels)
+        lock (_processLock)
         {
-            Array.Resize(ref _fifo, HalfWidth * _channels);
+            _sampleRate = sampleRate > 0 ? sampleRate : 48000;
+            _channels = channels > 0 ? channels : 2;
+            SamplesPerFrame = _sampleRate / (frameRate > 0 ? frameRate : 30.0);
+            Interlocked.Exchange(ref _videoFrames, 0);
+            _audioInFrames = 0;
+            _ratio = 1.0;
+            _outAcc = 0.0;
+
+            // Prime the FIFO with HalfWidth frames of silence so the FIR has its left-edge
+            // history for the first real sample, and start reading at the first real frame.
+            _fifoCount = HalfWidth;
+            if (_fifo.Length < HalfWidth * _channels)
+            {
+                Array.Resize(ref _fifo, HalfWidth * _channels);
+            }
+            Array.Clear(_fifo, 0, HalfWidth * _channels);
+            _readPos = HalfWidth;
         }
-        Array.Clear(_fifo, 0, HalfWidth * _channels);
-        _readPos = HalfWidth;
     }
 
     /// <summary>Report one video frame received (keeps the running clock in step).</summary>
     public void OnVideoFrame()
     {
-        _videoFrames++;
+        Interlocked.Increment(ref _videoFrames);
     }
 
     /// <summary>
@@ -117,100 +122,110 @@ public sealed class AudioClockResampler
     /// </summary>
     public byte[] Process(byte[] interleaved, int count, out int outCount)
     {
-        int ch = _channels;
-        int inFrames = count / (ch * 4);
-        if (inFrames <= 0)
+        lock (_processLock)
         {
-            outCount = 0;
+            int ch = _channels;
+            if (ch <= 0 || interleaved == null || count <= 0 || count > interleaved.Length)
+            {
+                outCount = 0;
+                return _outBytes;
+            }
+
+            int inFrames = count / (ch * 4);
+            if (inFrames <= 0)
+            {
+                outCount = 0;
+                return _outBytes;
+            }
+
+            // 1. Re-estimate the true clock ratio from cumulative counts and smooth it.
+            //    Converges exactly to trueFps/nominalFps once enough audio has flowed.
+            _audioInFrames += inFrames;
+            long videoFrames = Interlocked.Read(ref _videoFrames);
+            if (_audioInFrames >= (long)(_sampleRate * MeasureStartSeconds) && videoFrames > 0)
+            {
+                double measured = (videoFrames * SamplesPerFrame) / _audioInFrames;
+                _ratio += (measured - _ratio) * RatioSmoothing;
+                if (_ratio < MinRatio) _ratio = MinRatio;
+                else if (_ratio > MaxRatio) _ratio = MaxRatio;
+            }
+
+            // 2. Append the incoming chunk to the FIFO.
+            int needFrames = _fifoCount + inFrames;
+            if (_fifo.Length < needFrames * ch)
+            {
+                Array.Resize(ref _fifo, Math.Max(needFrames * ch, Math.Max(4096, _fifo.Length * 2)));
+            }
+            Buffer.BlockCopy(interleaved, 0, _fifo, _fifoCount * ch * 4, inFrames * ch * 4);
+            _fifoCount += inFrames;
+
+            // 3. Exact output count from a fractional accumulator (no float drift).
+            _outAcc += inFrames * _ratio;
+            int want = (int)_outAcc;
+            _outAcc -= want;
+
+            // 4. Produce output frames by polyphase windowed-sinc convolution.
+            if (_out.Length < want * ch)
+            {
+                Array.Resize(ref _out, want * ch);
+                Array.Resize(ref _outBytes, want * ch * 4);
+            }
+
+            float[] filter = GetFilter();
+            double step = 1.0 / _ratio; // input frames consumed per output frame
+            int produced = 0;
+            while (produced < want)
+            {
+                int i = (int)_readPos;
+                // Need HalfWidth-1 frames of history before i and HalfWidth of lookahead after.
+                if (i - HalfWidth + 1 < 0 || i + HalfWidth >= _fifoCount) break;
+
+                int phase = (int)((_readPos - i) * PhaseCount + 0.5);
+                if (phase >= PhaseCount) phase = PhaseCount - 1;
+
+                int baseIdx = (i - HalfWidth + 1) * ch;
+                int p = phase * TapCount;
+                for (int c = 0; c < ch; c++)
+                {
+                    double acc = 0.0;
+                    for (int t = 0; t < TapCount; t++)
+                    {
+                        acc += filter[p + t] * _fifo[baseIdx + t * ch + c];
+                    }
+                    _out[produced * ch + c] = (float)acc;
+                }
+                produced++;
+                _readPos += step;
+            }
+
+            // 5. Carry any deferred output so the long-run rate stays exact.
+            if (produced < want)
+            {
+                _outAcc += want - produced;
+            }
+
+            // 6. Drop frames fully consumed by the FIR, retaining HalfWidth-1 frames of
+            //    history before the read position for the next convolution.
+            int dropCount = (int)_readPos - (HalfWidth - 1);
+            int maxDrop = _fifoCount - (HalfWidth + 1); // always retain HalfWidth+1 frames
+            if (dropCount < 0) dropCount = 0;
+            if (dropCount > maxDrop) dropCount = maxDrop;
+            if (dropCount > 0)
+            {
+                int remain = _fifoCount - dropCount;
+                Array.Copy(_fifo, dropCount * ch, _fifo, 0, remain * ch);
+                _fifoCount = remain;
+                _readPos -= dropCount;
+            }
+
+            // 7. Copy produced floats out to the reusable byte buffer.
+            outCount = produced * ch * 4;
+            if (outCount > 0)
+            {
+                Buffer.BlockCopy(_out, 0, _outBytes, 0, outCount);
+            }
             return _outBytes;
         }
-
-        // 1. Re-estimate the true clock ratio from cumulative counts and smooth it.
-        //    Converges exactly to trueFps/nominalFps once enough audio has flowed.
-        _audioInFrames += inFrames;
-        if (_audioInFrames >= (long)(_sampleRate * MeasureStartSeconds) && _videoFrames > 0)
-        {
-            double measured = (_videoFrames * SamplesPerFrame) / _audioInFrames;
-            _ratio += (measured - _ratio) * RatioSmoothing;
-            if (_ratio < MinRatio) _ratio = MinRatio;
-            else if (_ratio > MaxRatio) _ratio = MaxRatio;
-        }
-
-        // 2. Append the incoming chunk to the FIFO.
-        int needFrames = _fifoCount + inFrames;
-        if (_fifo.Length < needFrames * ch)
-        {
-            Array.Resize(ref _fifo, Math.Max(needFrames * ch, Math.Max(4096, _fifo.Length * 2)));
-        }
-        Buffer.BlockCopy(interleaved, 0, _fifo, _fifoCount * ch * 4, inFrames * ch * 4);
-        _fifoCount += inFrames;
-
-        // 3. Exact output count from a fractional accumulator (no float drift).
-        _outAcc += inFrames * _ratio;
-        int want = (int)_outAcc;
-        _outAcc -= want;
-
-        // 4. Produce output frames by polyphase windowed-sinc convolution.
-        if (_out.Length < want * ch)
-        {
-            Array.Resize(ref _out, want * ch);
-            Array.Resize(ref _outBytes, want * ch * 4);
-        }
-
-        float[] filter = GetFilter();
-        double step = 1.0 / _ratio; // input frames consumed per output frame
-        int produced = 0;
-        while (produced < want)
-        {
-            int i = (int)_readPos;
-            // Need HalfWidth-1 frames of history before i and HalfWidth of lookahead after.
-            if (i - HalfWidth + 1 < 0 || i + HalfWidth >= _fifoCount) break;
-
-            int phase = (int)((_readPos - i) * PhaseCount + 0.5);
-            if (phase >= PhaseCount) phase = PhaseCount - 1;
-
-            int baseIdx = (i - HalfWidth + 1) * ch;
-            int p = phase * TapCount;
-            for (int c = 0; c < ch; c++)
-            {
-                double acc = 0.0;
-                for (int t = 0; t < TapCount; t++)
-                {
-                    acc += filter[p + t] * _fifo[baseIdx + t * ch + c];
-                }
-                _out[produced * ch + c] = (float)acc;
-            }
-            produced++;
-            _readPos += step;
-        }
-
-        // 5. Carry any deferred output so the long-run rate stays exact.
-        if (produced < want)
-        {
-            _outAcc += want - produced;
-        }
-
-        // 6. Drop frames fully consumed by the FIR, retaining HalfWidth-1 frames of
-        //    history before the read position for the next convolution.
-        int dropCount = (int)_readPos - (HalfWidth - 1);
-        int maxDrop = _fifoCount - (HalfWidth + 1); // always retain HalfWidth+1 frames
-        if (dropCount < 0) dropCount = 0;
-        if (dropCount > maxDrop) dropCount = maxDrop;
-        if (dropCount > 0)
-        {
-            int remain = _fifoCount - dropCount;
-            Array.Copy(_fifo, dropCount * ch, _fifo, 0, remain * ch);
-            _fifoCount = remain;
-            _readPos -= dropCount;
-        }
-
-        // 7. Copy produced floats out to the reusable byte buffer.
-        outCount = produced * ch * 4;
-        if (outCount > 0)
-        {
-            Buffer.BlockCopy(_out, 0, _outBytes, 0, outCount);
-        }
-        return _outBytes;
     }
 
     private static float[] GetFilter()

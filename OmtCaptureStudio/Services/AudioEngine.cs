@@ -12,6 +12,7 @@ public class AudioEngine : IDisposable
     private int _currentSampleRate;
     private int _currentChannels;
     private readonly object _lock = new();
+    private bool _disposed;
 
     public AudioEngine()
     {
@@ -26,6 +27,7 @@ public class AudioEngine : IDisposable
         {
             lock (_lock)
             {
+                if (_disposed) return;
                 _isMonitoringEnabled = value;
                 if (!_isMonitoringEnabled)
                 {
@@ -44,7 +46,7 @@ public class AudioEngine : IDisposable
 
     public unsafe void IngestAudioFrame(IntPtr planarData, int channels, int samplesPerChannel, int sampleRate, long timestamp)
     {
-        if (planarData == IntPtr.Zero || channels <= 0 || samplesPerChannel <= 0) return;
+        if (_disposed || planarData == IntPtr.Zero || channels <= 0 || samplesPerChannel <= 0) return;
 
         // 1. Calculate VU meter levels
         var levelData = AudioLevelCalculator.ComputeLevels(planarData, channels, samplesPerChannel);
@@ -57,7 +59,7 @@ public class AudioEngine : IDisposable
         // 3. Feed local monitoring if active
         lock (_lock)
         {
-            if (_isMonitoringEnabled)
+            if (_isMonitoringEnabled && !_disposed)
             {
                 if (_currentSampleRate != sampleRate || _currentChannels != channels)
                 {
@@ -85,6 +87,17 @@ public class AudioEngine : IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
+        LevelsCalculated = null;
+        AudioInterleavedAvailable = null;
+
+        lock (_lock)
+        {
+            _isMonitoringEnabled = false;
+        }
+
         _monitor.Dispose();
         GC.SuppressFinalize(this);
     }

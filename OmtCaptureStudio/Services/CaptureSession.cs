@@ -18,6 +18,13 @@ public class CaptureSession : IDisposable
     private readonly object _stateLock = new();
     private readonly FrameRateMeter _fpsMeter = new();
     private readonly AudioClockResampler _audioResampler = new();
+    private bool _disposed;
+
+    private readonly Action<AudioLevelData> _onLevelsCalculated;
+    private readonly Action<byte[], int> _onAudioInterleavedAvailable;
+    private readonly Action<string> _onRecordingStarted;
+    private readonly Action<string, TimeSpan, long> _onRecordingStopped;
+    private readonly Action<string> _onRecordingError;
 
     public StreamFormat CurrentFormat { get; private set; } = StreamFormat.Empty;
     public bool IsConnected => _currentSource != null && _currentSource.IsConnected;
@@ -69,18 +76,8 @@ public class CaptureSession : IDisposable
         _recorder = recorder ?? throw new ArgumentNullException(nameof(recorder));
         _ownsDependencies = ownsDependencies;
 
-        HookInternalAudioAndRecorder();
-    }
-
-    private void HookInternalAudioAndRecorder()
-    {
-        // Audio Engine Taps
-        _audio.LevelsCalculated += levels =>
-        {
-            AudioLevelsUpdated?.Invoke(levels);
-        };
-
-        _audio.AudioInterleavedAvailable += (buffer, count) =>
+        _onLevelsCalculated = levels => AudioLevelsUpdated?.Invoke(levels);
+        _onAudioInterleavedAvailable = (buffer, count) =>
         {
             if (_recorder.IsRecording)
             {
@@ -91,11 +88,29 @@ public class CaptureSession : IDisposable
                 }
             }
         };
+        _onRecordingStarted = path => RecordingStarted?.Invoke(path);
+        _onRecordingStopped = (path, dur, sz) => RecordingStopped?.Invoke(path, dur, sz);
+        _onRecordingError = err => RecordingError?.Invoke(err);
 
-        // Recorder Events Forwarding
-        _recorder.RecordingStarted += path => RecordingStarted?.Invoke(path);
-        _recorder.RecordingStopped += (path, dur, sz) => RecordingStopped?.Invoke(path, dur, sz);
-        _recorder.RecordingError += err => RecordingError?.Invoke(err);
+        HookInternalAudioAndRecorder();
+    }
+
+    private void HookInternalAudioAndRecorder()
+    {
+        _audio.LevelsCalculated += _onLevelsCalculated;
+        _audio.AudioInterleavedAvailable += _onAudioInterleavedAvailable;
+        _recorder.RecordingStarted += _onRecordingStarted;
+        _recorder.RecordingStopped += _onRecordingStopped;
+        _recorder.RecordingError += _onRecordingError;
+    }
+
+    private void UnhookInternalAudioAndRecorder()
+    {
+        _audio.LevelsCalculated -= _onLevelsCalculated;
+        _audio.AudioInterleavedAvailable -= _onAudioInterleavedAvailable;
+        _recorder.RecordingStarted -= _onRecordingStarted;
+        _recorder.RecordingStopped -= _onRecordingStopped;
+        _recorder.RecordingError -= _onRecordingError;
     }
 
     /// <summary>
@@ -112,6 +127,7 @@ public class CaptureSession : IDisposable
     public void Connect(IMediaSource source)
     {
         if (source == null) throw new ArgumentNullException(nameof(source));
+        if (_disposed) throw new ObjectDisposedException(nameof(CaptureSession));
 
         Disconnect();
 
@@ -123,13 +139,21 @@ public class CaptureSession : IDisposable
 
             _currentSource.VideoFrameReceived += OnSourceVideoFrameReceived;
             _currentSource.AudioFrameReceived += OnSourceAudioFrameReceived;
-            _currentSource.TelemetryUpdated += t => TelemetryUpdated?.Invoke(t);
-            _currentSource.StatusChanged += s => StatusChanged?.Invoke(s);
-            _currentSource.ErrorOccurred += err => { AppLogger.LogError($"Media source error: {err}"); ErrorOccurred?.Invoke(err); };
+            _currentSource.TelemetryUpdated += OnSourceTelemetryUpdated;
+            _currentSource.StatusChanged += OnSourceStatusChanged;
+            _currentSource.ErrorOccurred += OnSourceErrorOccurred;
 
             AppLogger.LogInfo($"Connecting to media source: {_currentSource.Name ?? _currentSource.Address}");
             _currentSource.Connect();
         }
+    }
+
+    private void OnSourceTelemetryUpdated(StreamTelemetry t) => TelemetryUpdated?.Invoke(t);
+    private void OnSourceStatusChanged(string s) => StatusChanged?.Invoke(s);
+    private void OnSourceErrorOccurred(string err)
+    {
+        AppLogger.LogError($"Media source error: {err}");
+        ErrorOccurred?.Invoke(err);
     }
 
     private void OnSourceVideoFrameReceived(IntPtr pData, int length, int width, int height, int stride, double fps, long timestamp)
@@ -199,6 +223,11 @@ public class CaptureSession : IDisposable
                 try
                 {
                     AppLogger.LogInfo("Disconnecting current media source.");
+                    _currentSource.VideoFrameReceived -= OnSourceVideoFrameReceived;
+                    _currentSource.AudioFrameReceived -= OnSourceAudioFrameReceived;
+                    _currentSource.TelemetryUpdated -= OnSourceTelemetryUpdated;
+                    _currentSource.StatusChanged -= OnSourceStatusChanged;
+                    _currentSource.ErrorOccurred -= OnSourceErrorOccurred;
                     _currentSource.Disconnect();
                     _currentSource.Dispose();
                 }
@@ -228,6 +257,8 @@ public class CaptureSession : IDisposable
     /// </summary>
     public bool StartRecording(RecordingConfig config)
     {
+        if (_disposed) return false;
+
         if (!IsConnected)
         {
             RecordingError?.Invoke("Cannot record: Media source is not connected.");
@@ -293,7 +324,21 @@ public class CaptureSession : IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         Disconnect();
+        UnhookInternalAudioAndRecorder();
+
+        VideoFrameAvailable = null;
+        AudioLevelsUpdated = null;
+        TelemetryUpdated = null;
+        FormatChanged = null;
+        StatusChanged = null;
+        ErrorOccurred = null;
+        RecordingStarted = null;
+        RecordingStopped = null;
+        RecordingError = null;
 
         if (_ownsDependencies)
         {

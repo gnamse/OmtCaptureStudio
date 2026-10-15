@@ -62,8 +62,10 @@ public class FfmpegProcessHost : IDisposable
 
     public bool Start(RecordingConfig config, StreamFormat format, string outputPath)
     {
-        _outputPath = outputPath;
-        bool hasAudio = _audioQueue != null;
+        try
+        {
+            _outputPath = outputPath;
+            bool hasAudio = _audioQueue != null;
 
         lock (_ffmpegErrorLog)
         {
@@ -222,7 +224,13 @@ public class FfmpegProcessHost : IDisposable
         };
         _watchdogThread.Start();
 
-        return true;
+            return true;
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
     }
 
     private void VideoWriterLoop()
@@ -501,7 +509,7 @@ public class FfmpegProcessHost : IDisposable
             _ffmpegProcess.WaitForExit(finalizeBudgetMs);
             if (!_ffmpegProcess.HasExited)
             {
-                try { _ffmpegProcess.Kill(); } catch { }
+                try { _ffmpegProcess.Kill(entireProcessTree: true); } catch { }
                 killed = true;
             }
         }
@@ -620,8 +628,11 @@ public class FfmpegProcessHost : IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
         _isWritingActive = false;
         _disposed = true;
+
+        SinkError = null;
 
         _videoQueue.CompleteAdding();
         _audioQueue?.CompleteAdding();
@@ -643,6 +654,14 @@ public class FfmpegProcessHost : IDisposable
 
         try { _videoPipe?.Dispose(); } catch { }
         try { _audioPipe?.Dispose(); } catch { }
+        try
+        {
+            if (_ffmpegProcess != null && !_ffmpegProcess.HasExited)
+            {
+                _ffmpegProcess.Kill(entireProcessTree: true);
+            }
+        }
+        catch { }
         try { _ffmpegProcess?.Dispose(); } catch { }
 
         _videoPipe = null;

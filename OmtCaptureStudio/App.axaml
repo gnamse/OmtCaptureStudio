@@ -16,7 +16,7 @@
 
         <Color x:Key="StudioAccentSuccessColor">#10B981</Color>
         <Color x:Key="StudioAccentDangerColor">#DC2626</Color>
-        <Color x:Key="StudioAccentPrimaryColor">#6366F1</Color>
+        <Color x:Key="StudioAccentPrimaryColor">#4F46E5</Color>
 
         <!-- Semantic SolidColorBrushes -->
         <SolidColorBrush x:Key="StudioBg" Color="#0F0F12"/>
@@ -28,10 +28,11 @@
         <SolidColorBrush x:Key="StudioTextPrimary" Color="#F4F4F5"/>
         <SolidColorBrush x:Key="StudioTextSecondary" Color="#A1A1AA"/>
         <SolidColorBrush x:Key="StudioTextMuted" Color="#80808A"/>
+        <SolidColorBrush x:Key="StudioTextOnAccent" Color="#FFFFFF"/>
 
         <SolidColorBrush x:Key="StudioAccentSuccess" Color="#10B981"/>
         <SolidColorBrush x:Key="StudioAccentDanger" Color="#DC2626"/>
-        <SolidColorBrush x:Key="StudioAccentPrimary" Color="#6366F1"/>
+        <SolidColorBrush x:Key="StudioAccentPrimary" Color="#4F46E5"/>
 
         <!-- Spacing Scale (4px base) -->
         <Thickness x:Key="SpaceXs">4</Thickness>
@@ -48,9 +49,22 @@
         <!-- Standard Radius -->
         <CornerRadius x:Key="RadiusSm">4</CornerRadius>
         <CornerRadius x:Key="RadiusMd">8</CornerRadius>
+        <CornerRadius x:Key="RadiusLg">12</CornerRadius>
 
-        <!-- Viewport HUD Scrim -->
+        <!-- Viewport HUD & Modal Scrims -->
         <SolidColorBrush x:Key="StudioHudScrim" Color="#CC18181B"/>
+        <SolidColorBrush x:Key="StudioModalScrim" Color="#CC09090B"/>
+
+        <!-- Calibrated Broadcast VU Meter Gradient (-60 dBFS to 0 dBFS) -->
+        <LinearGradientBrush x:Key="StudioVuMeterGradient" StartPoint="0%,100%" EndPoint="0%,0%">
+            <GradientStop Color="#10B981" Offset="0.0"/>
+            <GradientStop Color="#22C55E" Offset="0.65"/>
+            <GradientStop Color="#84CC16" Offset="0.70"/>
+            <GradientStop Color="#EAB308" Offset="0.73"/>
+            <GradientStop Color="#F59E0B" Offset="0.88"/>
+            <GradientStop Color="#EF4444" Offset="0.90"/>
+            <GradientStop Color="#DC2626" Offset="1.00"/>
+        </LinearGradientBrush>
 
         <!-- Drawn Icon Set (24x24 stroke geometry, consistent 2px weight) -->
         <StreamGeometry x:Key="IconRefresh">M4.35 6.4A8 8 0 1 1 4 14 M4 3v4h4</StreamGeometry>

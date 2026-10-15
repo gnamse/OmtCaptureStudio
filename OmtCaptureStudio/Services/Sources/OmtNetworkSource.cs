@@ -9,6 +9,13 @@ public class OmtNetworkSource : IMediaSource
 {
     private readonly OmtReceiverService _receiver;
     private string _address;
+    private bool _disposed;
+
+    private readonly Action<IntPtr, int, int, int, int, double, long> _onVideoReceived;
+    private readonly Action<IntPtr, int, int, int, long> _onAudioReceived;
+    private readonly Action<StreamTelemetry> _onTelemetry;
+    private readonly Action<string> _onStatus;
+    private readonly Action<string> _onError;
 
     public string Name => "OMT Network Stream";
     public string Address => _address;
@@ -25,15 +32,19 @@ public class OmtNetworkSource : IMediaSource
         _address = address ?? string.Empty;
         _receiver = new OmtReceiverService();
 
-        _receiver.VideoFrameReceived += (pData, len, w, h, str, fps, ts) =>
+        _onVideoReceived = (pData, len, w, h, str, fps, ts) =>
             VideoFrameReceived?.Invoke(pData, len, w, h, str, fps, ts);
-
-        _receiver.AudioFrameReceived += (pData, ch, smp, rate, ts) =>
+        _onAudioReceived = (pData, ch, smp, rate, ts) =>
             AudioFrameReceived?.Invoke(pData, ch, smp, rate, ts);
+        _onTelemetry = t => TelemetryUpdated?.Invoke(t);
+        _onStatus = s => StatusChanged?.Invoke(s);
+        _onError = err => ErrorOccurred?.Invoke(err);
 
-        _receiver.TelemetryUpdated += t => TelemetryUpdated?.Invoke(t);
-        _receiver.ConnectionStatusChanged += s => StatusChanged?.Invoke(s);
-        _receiver.ErrorOccurred += err => ErrorOccurred?.Invoke(err);
+        _receiver.VideoFrameReceived += _onVideoReceived;
+        _receiver.AudioFrameReceived += _onAudioReceived;
+        _receiver.TelemetryUpdated += _onTelemetry;
+        _receiver.ConnectionStatusChanged += _onStatus;
+        _receiver.ErrorOccurred += _onError;
     }
 
     public void SetAddress(string address)
@@ -43,6 +54,7 @@ public class OmtNetworkSource : IMediaSource
 
     public void Connect()
     {
+        if (_disposed) return;
         _receiver.Connect(_address);
     }
 
@@ -53,6 +65,21 @@ public class OmtNetworkSource : IMediaSource
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
+        _receiver.VideoFrameReceived -= _onVideoReceived;
+        _receiver.AudioFrameReceived -= _onAudioReceived;
+        _receiver.TelemetryUpdated -= _onTelemetry;
+        _receiver.ConnectionStatusChanged -= _onStatus;
+        _receiver.ErrorOccurred -= _onError;
+
+        VideoFrameReceived = null;
+        AudioFrameReceived = null;
+        TelemetryUpdated = null;
+        StatusChanged = null;
+        ErrorOccurred = null;
+
         _receiver.Dispose();
         GC.SuppressFinalize(this);
     }

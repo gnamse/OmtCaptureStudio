@@ -17,6 +17,7 @@ public class SyntheticPatternSource : IMediaSource
     private readonly int _fps = 60;
     private readonly int _sampleRate = 48000;
     private readonly int _channels = 2;
+    private bool _disposed;
 
     public string Name => "Local Synthetic Test Pattern";
     public string Address => "internal://test-pattern";
@@ -30,7 +31,7 @@ public class SyntheticPatternSource : IMediaSource
 
     public void Connect()
     {
-        if (_isRunning) return;
+        if (_disposed || _isRunning) return;
 
         _isRunning = true;
         StatusChanged?.Invoke("Connected to Internal Test Pattern Generator");
@@ -206,7 +207,15 @@ public class SyntheticPatternSource : IMediaSource
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         Disconnect();
+        VideoFrameReceived = null;
+        AudioFrameReceived = null;
+        TelemetryUpdated = null;
+        StatusChanged = null;
+        ErrorOccurred = null;
         GC.SuppressFinalize(this);
     }
 }

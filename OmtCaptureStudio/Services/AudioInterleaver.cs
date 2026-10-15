@@ -9,6 +9,12 @@ public class AudioInterleaver
 
     public unsafe byte[] Interleave(IntPtr planarData, int channels, int samplesPerChannel, out int totalBytes)
     {
+        if (planarData == IntPtr.Zero || channels <= 0 || samplesPerChannel <= 0 || channels > 64 || samplesPerChannel > 192000)
+        {
+            totalBytes = 0;
+            return Array.Empty<byte>();
+        }
+
         int totalSamples = channels * samplesPerChannel;
         totalBytes = totalSamples * sizeof(float);
 
@@ -39,6 +45,11 @@ public class AudioInterleaver
 
     public unsafe byte[] InterleaveNew(IntPtr planarData, int channels, int samplesPerChannel)
     {
+        if (planarData == IntPtr.Zero || channels <= 0 || samplesPerChannel <= 0 || channels > 64 || samplesPerChannel > 192000)
+        {
+            return Array.Empty<byte>();
+        }
+
         int totalSamples = channels * samplesPerChannel;
         int totalBytes = totalSamples * sizeof(float);
         byte[] buffer = new byte[totalBytes];
