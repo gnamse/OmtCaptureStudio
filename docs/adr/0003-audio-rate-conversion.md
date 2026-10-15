@@ -4,8 +4,19 @@
   - **Slice 1 (complete):** `StereoCaptureRing` extraction, `HostAudioFormat` constants relocation,
     `IHostAudioSource` widening, headless ring/interface tests. Conversion placement is deliberately
     unchanged in this slice.
-  - **Slice 2 (pending):** relocate WASAPI rate conversion to the consumer and unify both paths on
-    the polyphase sinc + 48 kHz passthrough.
+  - **Slice 2 (complete):** WASAPI rate conversion relocated to the consumer thread; both adapters
+    now share one polyphase-sinc policy in `Services/Audio/FixedRatioStereoResampler.cs` (promoted out
+    of its private-nested home in `AsioHostAudioSource`), with a delay-free passthrough when the device
+    rate already matches the 48 kHz stream rate (float-quantised kernel: measured deviation ≤ 1e-6 —
+    NOT bit-exact; asserted as tolerance, never as exactness).
+  - **Consequence (user-audible, expected):** on a rate-mismatched WASAPI endpoint the output is
+    cleaner than it was — the sinc replaces the per-sample linear interpolation. Added latency on that
+    path is the documented 48-frame (~1 ms) FIR lookahead; the matched-rate path is unchanged.
+  - **Consequence (untested live — recorded follow-up):** the rate-mismatch WASAPI path was never
+    exercised end-to-end (no 44.1 kHz WASAPI endpoint on the build machine). Arithmetic consequence
+    there: the ring's 120 ms cap measures device-rate frames (~130 ms wall including the conversion
+    lookahead). The ASIO mismatch path (VB-Matrix, 44.1 kHz native) IS exercised live by Step 0.69.
+    Field verification of a real 44.1 kHz WASAPI endpoint is an open QA follow-up.
 - **Deciders:** Odogwu (orchestration) on behalf of the project owner
 - **Scope:** `Services/IHostAudioSource.cs`, `Services/AsioHostAudioSource.cs`,
   `Services/WasapiHostAudioSource.cs`, new `Services/Audio/*`, callers
