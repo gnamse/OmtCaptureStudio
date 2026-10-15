@@ -31,6 +31,14 @@ quadruples one property at a time.
 4. Out of scope for this pass (recorded as follow-ups, not decided here): extracting the
    ASIO input-pair selector, and reworking the test harness fixtures.
 
+**Amendment (2026-10-15, during implementation review):** the scalar enum models the
+*receive* mode only. The host-broadcast *sender* axis is orthogonal by design — the app
+deliberately supports broadcasting the desktop and then connecting to that same broadcast
+to monitor and record it (`Broadcasting` + `NetworkConnected` simultaneously). The sender
+bit is therefore tracked as `BroadcastSessionState.IsBroadcasting` on the same module, and
+the presentation projection is a pure function of `(State, IsBroadcasting)`. `InputLost`
+joins the enum when ADR-0002 lands, per that ADR.
+
 ## Consequences
 
 - A new mode touches one module, not six pasted sequences (locality).

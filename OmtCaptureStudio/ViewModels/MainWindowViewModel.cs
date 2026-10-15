@@ -38,6 +38,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private readonly DispatcherTimer? _captureTargetsTimer;
     private readonly bool _ownsDependencies;
 
+    // The broadcast-mode state machine (ADR-0001). Headless-constructible; presentation below is a
+    // projection of this state, never an input to it.
+    private readonly BroadcastSessionState _broadcastState = new();
+    private readonly IBroadcastSessionEffects _broadcastEffects;
+
     private OmtDesktopCaptureGenerator? _desktopCapture;
 
     // The target currently being broadcast, so live tracking can stop the broadcast if the
@@ -305,6 +310,13 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     public bool IsRecording => _session.IsRecording;
     public bool IsConnected => _session.IsConnected;
+
+    /// <summary>The named broadcast-mode state (ADR-0001); all presentation is a projection of it.</summary>
+    public BroadcastState BroadcastState => _broadcastState.State;
+
+    /// <summary>True while the host desktop/window broadcast is live.</summary>
+    public bool IsBroadcasting => _broadcastState.IsBroadcasting;
+
     public bool IsSafeExitConfirmed
     {
         get => _isSafeExitConfirmed;
@@ -334,6 +346,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _discoveryService = discoveryService ?? throw new ArgumentNullException(nameof(discoveryService));
         _ownsDependencies = ownsDependencies;
+        _broadcastEffects = new SessionEffects(_session);
         _updateVideoHudDelegate = UpdateVideoHudOnUIThread;
 
         // Load version info
@@ -377,6 +390,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
 
         HookEvents();
+        ApplyBroadcastStateProjection();
         _discoveryService.Start();
 
         // Seed the capture-target picker, audio device picker, and broadcast network picker
@@ -425,6 +439,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private void HookEvents()
     {
+        _broadcastState.StateChanged += OnBroadcastStateChanged;
         _discoveryService.SourcesUpdated += OnSourcesUpdated;
 
         _session.VideoFrameAvailable += OnVideoFrameAvailable;
@@ -493,18 +508,6 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     partial void OnIsRecordingCloseOverlayVisibleChanged(bool value)
     {
         IsMainContentEnabled = !value;
-    }
-
-    partial void OnIsDesktopCaptureActiveChanged(bool value)
-    {
-        IsCaptureSelectorEnabled = !value;
-    }
-
-    partial void OnConnectButtonTextChanged(string value)
-    {
-        // Every connect/disconnect path funnels through ConnectButtonText, so one handler
-        // keeps the Source picker lock in sync without touching each call site.
-        IsSourceSelectorEnabled = value != "Disconnect";
     }
 
     partial void OnSelectedCaptureAudioOptionChanged(HostAudioCaptureOption value)
@@ -588,24 +591,17 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
         try
         {
-            if (_session.IsConnected || ConnectButtonText == "Disconnect")
+            if (_broadcastState.IsReceiving)
             {
                 if (_session.IsRecording)
                 {
                     StatusText = "Finalizing active recording before disconnecting...";
-                    await _session.StopRecordingAsync();
                 }
 
-                _session.Disconnect();
+                // The module owns the "stop-recording-first, then disconnect" ordering; the
+                // resulting state change drives every visual through ApplyBroadcastStateProjection.
+                await _broadcastState.LeaveReceiveModeAsync(_broadcastEffects);
                 AppLogger.LogInfo("Disconnected from stream.");
-                ViewportClearRequested?.Invoke();
-                MetersResetRequested?.Invoke();
-                ResetOfflineState();
-
-                IsTestSignalActive = false;
-                TestSignalBackground = TestSignalInactiveBrush;
-                TestSignalForeground = StudioPalette.ButtonLightForeground;
-                TestSignalAutomationName = "Enable Test Signal Generator";
             }
             else
             {
@@ -617,11 +613,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
                 SourceNameText = info.DisplayName;
                 AppLogger.LogInfo($"Connecting to stream at {info.Address}");
-                _session.Connect(info.Address);
-                ConnectButtonText = "Disconnect";
-                ConnectButtonBackground = DisconnectBrush;
-                ConnectButtonForeground = StudioPalette.ButtonWhiteForeground;
-                ConnectButtonAutomationName = "Disconnect Stream";
+                await _broadcastState.EnterNetworkConnectedAsync(_broadcastEffects, () => _session.Connect(info.Address));
             }
         }
         catch (Exception ex)
@@ -644,53 +636,37 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (active)
             {
-                if (_session.IsConnected)
+                if (_broadcastState.IsReceiving && _session.IsRecording)
                 {
-                    if (_session.IsRecording)
-                    {
-                        StatusText = "Finalizing active recording before switching source...";
-                        await _session.StopRecordingAsync();
-                    }
-                    _session.Disconnect();
+                    StatusText = "Finalizing active recording before switching source...";
                 }
 
-                IsTestSignalActive = true;
-                TestSignalBackground = TestSignalActiveBrush;
-                TestSignalForeground = StudioPalette.ButtonWhiteForeground;
-                TestSignalAutomationName = "Disable Test Signal Generator";
+                // Leaves any active receive mode (stop-recording-first), enters TestSignal and
+                // connects the synthetic source. The projection owns the resulting visuals.
+                await _broadcastState.EnterTestSignalAsync(_broadcastEffects, () =>
+                {
+                    StatusText = "Connected to internal synthetic test generator.";
+                    _session.Connect(new SyntheticPatternSource());
+                });
+
                 SourceNameText = "Local Test Pattern (SMPTE)";
-                StatusText = "Connected to internal synthetic test generator.";
                 AppLogger.LogInfo("Started local test signal generator.");
-
-                _session.Connect(new SyntheticPatternSource());
-
-                ConnectButtonText = "Disconnect";
-                ConnectButtonBackground = DisconnectBrush;
-                ConnectButtonForeground = StudioPalette.ButtonWhiteForeground;
-                ConnectButtonAutomationName = "Disconnect Stream";
             }
             else
             {
-                IsTestSignalActive = false;
-                TestSignalBackground = TestSignalInactiveBrush;
-                TestSignalForeground = StudioPalette.ButtonLightForeground;
-                TestSignalAutomationName = "Enable Test Signal Generator";
                 StatusText = "Test pattern stopped.";
 
-                if (_session.IsConnected)
+                if (_broadcastState.IsReceiving && _session.IsRecording)
                 {
-                    if (_session.IsRecording)
-                    {
-                        StatusText = "Finalizing active recording before disconnecting...";
-                        await _session.StopRecordingAsync();
-                    }
-                    _session.Disconnect();
-                    AppLogger.LogInfo("Disconnected test signal generator.");
+                    StatusText = "Finalizing active recording before disconnecting...";
                 }
 
-                ViewportClearRequested?.Invoke();
-                MetersResetRequested?.Invoke();
-                ResetOfflineState();
+                bool wasReceiving = _broadcastState.IsReceiving;
+                await _broadcastState.LeaveReceiveModeAsync(_broadcastEffects);
+                if (wasReceiving)
+                {
+                    AppLogger.LogInfo("Disconnected test signal generator.");
+                }
             }
         }
         catch (Exception ex)
@@ -766,10 +742,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 }
 
                 _activeCaptureTarget = target;
-                IsDesktopCaptureActive = true;
-                DesktopCaptureBackground = TestSignalActiveBrush;
-                DesktopCaptureForeground = StudioPalette.ButtonWhiteForeground;
-                DesktopCaptureAutomationName = "Disable Host Broadcast";
+                _broadcastState.StartBroadcasting();
                 string audioLabel = SelectedCaptureAudioOption?.DisplayName ?? "System Audio";
                 string networkLabel = SelectedBroadcastNetwork?.DisplayName ?? "All Networks (Auto)";
                 string endpointUrl = _desktopCapture.BroadcastEndpointUrl ?? _desktopCapture.Address ?? "OMT";
@@ -781,10 +754,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 _desktopCapture?.Dispose();
                 _desktopCapture = null;
                 _activeCaptureTarget = null;
-                IsDesktopCaptureActive = false;
-                DesktopCaptureBackground = TestSignalInactiveBrush;
-                DesktopCaptureForeground = StudioPalette.ButtonLightForeground;
-                DesktopCaptureAutomationName = "Enable Host Broadcast";
+                _broadcastState.StopBroadcasting();
                 StatusText = "Host capture stopped.";
                 AppLogger.LogInfo("Stopped host desktop capture.");
             }
@@ -792,10 +762,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         catch (Exception ex)
         {
             AppLogger.LogError($"Error toggling desktop capture: {ex.Message}", ex);
-            IsDesktopCaptureActive = false;
-            DesktopCaptureBackground = TestSignalInactiveBrush;
-            DesktopCaptureForeground = StudioPalette.ButtonLightForeground;
-            DesktopCaptureAutomationName = "Enable Host Broadcast";
+            _broadcastState.StopBroadcasting();
             StatusText = $"Host capture error: {ex.Message}";
         }
     }
@@ -1700,7 +1667,66 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     #endregion
 
-    private void ResetOfflineState()
+    /// <summary>
+    /// Projects the broadcast state machine onto the presentation layer — the single place state
+    /// becomes button text, brushes, automation names and selector locks (ADR-0001 decision 3).
+    /// Display text is an output of state here, never an input to it.
+    /// </summary>
+    private void ApplyBroadcastStateProjection()
+    {
+        BroadcastState state = _broadcastState.State;
+        bool receiving = IsReceiveMode(state);
+
+        // Connect / Disconnect action button.
+        ConnectButtonText = receiving ? "Disconnect" : "Connect";
+        ConnectButtonBackground = receiving ? DisconnectBrush : ConnectBrush;
+        ConnectButtonForeground = receiving ? StudioPalette.ButtonWhiteForeground : StudioPalette.ButtonDarkForeground;
+        ConnectButtonAutomationName = receiving ? "Disconnect Stream" : "Connect Stream";
+
+        // Test-signal toggle.
+        bool testSignalActive = state == BroadcastState.TestSignal;
+        IsTestSignalActive = testSignalActive;
+        TestSignalBackground = testSignalActive ? TestSignalActiveBrush : TestSignalInactiveBrush;
+        TestSignalForeground = testSignalActive ? StudioPalette.ButtonWhiteForeground : StudioPalette.ButtonLightForeground;
+        TestSignalAutomationName = testSignalActive ? "Disable Test Signal Generator" : "Enable Test Signal Generator";
+
+        // Host-broadcast toggle.
+        bool broadcasting = _broadcastState.IsBroadcasting;
+        IsDesktopCaptureActive = broadcasting;
+        DesktopCaptureBackground = broadcasting ? TestSignalActiveBrush : TestSignalInactiveBrush;
+        DesktopCaptureForeground = broadcasting ? StudioPalette.ButtonWhiteForeground : StudioPalette.ButtonLightForeground;
+        DesktopCaptureAutomationName = broadcasting ? "Disable Host Broadcast" : "Enable Host Broadcast";
+
+        // Selector locks, derived once here from the state machine (DESIGN §7).
+        IsSourceSelectorEnabled = _broadcastState.IsSourceSelectorEnabled;
+        IsCaptureSelectorEnabled = _broadcastState.IsCaptureSelectorEnabled;
+    }
+
+    /// <summary>
+    /// Reacts to one module transition: re-project the presentation, and when a receive mode is
+    /// left, clear the viewport/meters and reset the offline HUD readouts (<see cref="ResetOfflineHud"/>)
+    /// — replacing the previously scattered <c>ResetOfflineState()</c> call sites.
+    /// </summary>
+    private void OnBroadcastStateChanged(object? sender, BroadcastStateChangedEventArgs e)
+    {
+        ApplyBroadcastStateProjection();
+
+        if (IsReceiveMode(e.OldState) && !IsReceiveMode(e.NewState))
+        {
+            ViewportClearRequested?.Invoke();
+            MetersResetRequested?.Invoke();
+            ResetOfflineHud();
+        }
+    }
+
+    private static bool IsReceiveMode(BroadcastState state) =>
+        state is BroadcastState.NetworkConnected or BroadcastState.TestSignal;
+
+    /// <summary>
+    /// Resets the viewport HUD and telemetry readouts shown while no stream is being received.
+    /// Button text/brushes are no longer reset here — they are projections of the state machine.
+    /// </summary>
+    private void ResetOfflineHud()
     {
         _isLive = false;
         _lastWidth = 0;
@@ -1708,10 +1734,6 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         _lastFps = 0;
         _lastHudUpdateTick = 0;
         IsRecordingConfigEnabled = true;
-        ConnectButtonText = "Connect";
-        ConnectButtonBackground = ConnectBrush;
-        ConnectButtonForeground = StudioPalette.ButtonDarkForeground;
-        ConnectButtonAutomationName = "Connect Stream";
         IsNoSignalOverlayVisible = true;
         LiveIndicatorBrush = LiveIndicatorInactiveBrush;
         LiveStatusText = "OFFLINE";
@@ -1724,6 +1746,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private void UnhookEvents()
     {
+        _broadcastState.StateChanged -= OnBroadcastStateChanged;
         _discoveryService.SourcesUpdated -= OnSourcesUpdated;
 
         _session.VideoFrameAvailable -= OnVideoFrameAvailable;
@@ -1768,6 +1791,23 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             _discoveryService.Dispose();
             _session.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Adapts <see cref="CaptureSession"/> to the state machine's <see cref="IBroadcastSessionEffects"/>
+    /// seam, so the module owns the stop-recording-first ordering without knowing the session type.
+    /// </summary>
+    private sealed class SessionEffects : IBroadcastSessionEffects
+    {
+        private readonly CaptureSession _session;
+
+        public SessionEffects(CaptureSession session) => _session = session;
+
+        public bool IsRecording => _session.IsRecording;
+
+        public Task StopRecordingAsync() => _session.StopRecordingAsync();
+
+        public void DisconnectSession() => _session.Disconnect();
     }
 }
 
