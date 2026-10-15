@@ -12,11 +12,16 @@
   - **Consequence (user-audible, expected):** on a rate-mismatched WASAPI endpoint the output is
     cleaner than it was — the sinc replaces the per-sample linear interpolation. Added latency on that
     path is the documented 48-frame (~1 ms) FIR lookahead; the matched-rate path is unchanged.
-  - **Consequence (untested live — recorded follow-up):** the rate-mismatch WASAPI path was never
-    exercised end-to-end (no 44.1 kHz WASAPI endpoint on the build machine). Arithmetic consequence
-    there: the ring's 120 ms cap measures device-rate frames (~130 ms wall including the conversion
-    lookahead). The ASIO mismatch path (VB-Matrix, 44.1 kHz native) IS exercised live by Step 0.69.
-    Field verification of a real 44.1 kHz WASAPI endpoint is an open QA follow-up.
+  - **Consequence (untested live — probed and closed by QA):** the rate-mismatch WASAPI path cannot
+    be triggered on this host. QA's COM probe of all 25 WASAPI endpoints (2026-10-15): 24 have a
+    48 kHz shared mix format; the one exception (Poly BT600 mic, 16 kHz native) is still negotiated
+    to 48 kHz because `AudioClientInitialize` in shared mode with
+    `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | SRC_DEFAULT_QUALITY` returns S_OK — the Windows mixer
+    delivers 48 kHz directly. The `initHr < 0` fallback branch (`WasapiHostAudioSource.cs` 342–371)
+    is therefore entered **only** when a driver explicitly rejects AUTOCONVERTPCM in shared mode.
+    The sinc path itself is verified headlessly (Step 0.678: 57.8 dB SER) and live via the ASIO
+    44.1→48 path (Step 0.69). Release notes should state: mismatch conversion on WASAPI is a
+    driver-rejection fallback, not the normal path.
 - **Deciders:** Odogwu (orchestration) on behalf of the project owner
 - **Scope:** `Services/IHostAudioSource.cs`, `Services/AsioHostAudioSource.cs`,
   `Services/WasapiHostAudioSource.cs`, new `Services/Audio/*`, callers
