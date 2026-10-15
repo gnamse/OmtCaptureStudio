@@ -13,6 +13,8 @@ public class NullRecordingSink : IRecordingSink
     public bool IsInitialized { get; private set; }
     public long VideoFramesDropped => 0;
     public long AudioChunksDropped => 0;
+    public string ResolvedEncoderName => "NullSink";
+    public string DiagnosticTail => "";
     public StreamFormat? InitializedFormat { get; private set; }
     public string? OutputPath { get; private set; }
     public event Action<string>? SinkError { add { } remove { } }

@@ -14,13 +14,37 @@ class Program
     [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern bool SetDllDirectory(string lpPathName);
 
-    static void Main(string[] args)
+    static int Main(string[] args)
+    {
+        SetDllDirectory(AppDomain.CurrentDomain.BaseDirectory);
+
+        // SOAK-01 opt-in modes. The default suite (no args) is unchanged and fast; the soak mode runs
+        // ONLY when explicitly requested because it takes ~65-70 s of real wall clock and spawns child
+        // sender processes.
+        if (args.Length >= 1 && args[0] == "--sender")
+        {
+            return RunSenderChild(args.Length >= 2 ? args[1] : "OMT_NET007_LiveSender");
+        }
+
+        if (args.Length >= 1 && args[0] == "--real-sender-soak")
+        {
+            return RunRealSenderSoak();
+        }
+
+        RunDefaultSuite();
+        return 0;
+    }
+
+    /// <summary>
+    /// The default regression gate. Runs only when no CLI mode is given, so its behaviour and runtime
+    /// are unchanged by the soak mode.
+    /// </summary>
+    static void RunDefaultSuite()
     {
         Console.WriteLine("====================================================");
         Console.WriteLine("  OMT Capture Studio - End-to-End Automated Test");
         Console.WriteLine("====================================================");
 
-        SetDllDirectory(AppDomain.CurrentDomain.BaseDirectory);
 
         Console.WriteLine("\n[Step 0] Verifying OMT Source Info Parsing & Display Formatting...");
         var test1 = OmtSourceInfo.Parse("PC (vMix - Output 1)");
@@ -132,6 +156,8 @@ class Program
         TestReconnectBackoff();
         TestRecordingSegments();
         TestRecordingOutageRecovery();
+        TestRecordingStopReportsMediaDuration();
+        TestRecordingHealthModel();
 
         Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
         using (var vmSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(new NullRecordingSink())))
@@ -236,6 +262,26 @@ class Program
             if (vm.IsInputLossBannerVisible || vm.BroadcastState != BroadcastState.Offline)
             {
                 throw new Exception($"ViewModel must start Offline with the input-loss banner hidden: state={vm.BroadcastState}, banner={vm.IsInputLossBannerVisible}");
+            }
+
+            // FEAT-07: the recording-health panel, stop verdict and diagnostics drawer all start hidden
+            // (checked BEFORE any recording below, so nothing has populated a verdict yet).
+            if (vm.IsRecordingHealthVisible || vm.IsStopSummaryVisible || vm.IsDiagnosticsDrawerOpen ||
+                vm.IsRecordingDropWarning || vm.IsRecordingDriftWarning)
+            {
+                throw new Exception(
+                    $"Recording-health surfaces must start hidden: panel={vm.IsRecordingHealthVisible}, " +
+                    $"verdict={vm.IsStopSummaryVisible}, drawer={vm.IsDiagnosticsDrawerOpen}");
+            }
+            vm.ToggleDiagnosticsDrawerCommand.Execute(null);
+            if (!vm.IsDiagnosticsDrawerOpen)
+            {
+                throw new Exception("ToggleDiagnosticsDrawerCommand did not open the drawer.");
+            }
+            vm.ToggleDiagnosticsDrawerCommand.Execute(null);
+            if (vm.IsDiagnosticsDrawerOpen)
+            {
+                throw new Exception("ToggleDiagnosticsDrawerCommand did not close the drawer.");
             }
 
             // Test ToggleTestSignalCommand (Turn ON)
@@ -613,6 +659,400 @@ class Program
         Console.ResetColor();
     }
 
+    // ============================================================================================
+    // SOAK-01: --real-sender-soak / --sender — real out-of-process ADR-0002 soak (ported from QA)
+    // ============================================================================================
+    // The injected-clock tests prove the POLICY; only a real sender killed mid-take proves the
+    // ON-DISK outcome (segment finalized at the boundary, _partNN resume, grace expiry, decode-clean).
+
+    /// <summary>
+    /// Child mode: broadcast an OMT test-pattern stream and block until the orchestrator kills this
+    /// process. Prints exactly one parseable line, then sleeps forever.
+    /// </summary>
+    static int RunSenderChild(string sourceName)
+    {
+        using var gen = new OmtTestPatternGenerator(sourceName);
+        gen.Start();
+        Thread.Sleep(500);
+        Console.WriteLine($"SENDER_READY|SourceName={sourceName}|Address={gen.Address}|Url={gen.Url}|Port={gen.Port}|PID={Environment.ProcessId}");
+        Console.Out.Flush();
+
+        Thread.Sleep(Timeout.Infinite);
+        return 0;
+    }
+
+    static string Now() => DateTime.Now.ToString("HH:mm:ss.fff");
+
+    static Process SpawnSender(string exePath, string sourceName, out string address)
+    {
+        address = string.Empty;
+        var psi = new ProcessStartInfo
+        {
+            FileName = exePath,
+            Arguments = $"--sender \"{sourceName}\"",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+
+        Process proc = Process.Start(psi) ?? throw new Exception("Failed to start the sender child process.");
+        string? line = proc.StandardOutput.ReadLine();
+        if (line == null || !line.StartsWith("SENDER_READY|", StringComparison.Ordinal))
+        {
+            string err = proc.StandardError.ReadToEnd();
+            throw new Exception($"Sender child did not report ready. Line='{line}', Err='{err}', Exe='{exePath}'");
+        }
+
+        foreach (string part in line.Split('|').Skip(1))
+        {
+            string[] kv = part.Split('=', 2);
+            if (kv.Length == 2 && kv[0] == "Address")
+            {
+                address = kv[1];
+            }
+        }
+
+        Console.WriteLine($"[{Now()}] Spawned sender PID={proc.Id}: '{sourceName}' address='{address}'");
+        return proc;
+    }
+
+    static string ResolveDiscoveredAddress(string sourceName, string fallback)
+    {
+        var disc = libomtnet.OMTDiscovery.GetInstance();
+        for (int i = 0; i < 30; i++)
+        {
+            string[] addrs = disc.GetAddresses() ?? Array.Empty<string>();
+            string? match = addrs.FirstOrDefault(a => a.Contains(sourceName, StringComparison.OrdinalIgnoreCase));
+            if (match != null)
+            {
+                Console.WriteLine($"[{Now()}] Discovery resolved '{sourceName}' -> '{match}'");
+                return match;
+            }
+            Thread.Sleep(200);
+        }
+
+        Console.WriteLine($"[{Now()}] Discovery did not list '{sourceName}' yet; using fallback '{fallback}'");
+        return fallback;
+    }
+
+    /// <summary>
+    /// Fully DECODES the recorded file with FFmpeg (not just a header probe) — the real "playable"
+    /// check. Fails loudly on a non-zero exit or any stderr output at <c>-v error</c>.
+    /// </summary>
+    static void VerifyDecodeClean(string path, string label)
+    {
+        if (!File.Exists(path))
+        {
+            throw new Exception($"{label}: expected recorded file is missing: {path}");
+        }
+
+        long size = new FileInfo(path).Length;
+        if (size < 10_000)
+        {
+            throw new Exception($"{label}: recorded file suspiciously small ({size} bytes): {path}");
+        }
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = "ffmpeg",
+            Arguments = $"-v error -i \"{path}\" -f null -",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using Process p = Process.Start(psi) ?? throw new Exception($"{label}: could not start ffmpeg for decode verification.");
+        string stderr = p.StandardError.ReadToEnd();
+        p.WaitForExit(120_000);
+
+        if (p.ExitCode != 0 || !string.IsNullOrWhiteSpace(stderr))
+        {
+            throw new Exception($"{label}: decode is NOT clean (exit={p.ExitCode}). ffmpeg said: {stderr.Trim()}");
+        }
+
+        Console.WriteLine($"[{Now()}] {label}: decode-clean, {size / 1024.0 / 1024.0:F2} MB -> {Path.GetFileName(path)}");
+    }
+
+    /// <summary>Poll a condition, ticking a side effect (e.g. CheckInputHealth) between attempts.</summary>
+    static void WaitUntil(Func<bool> condition, int timeoutMs, string what, Action? tick = null)
+    {
+        var sw = Stopwatch.StartNew();
+        while (!condition())
+        {
+            tick?.Invoke();
+            if (sw.ElapsedMilliseconds > timeoutMs)
+            {
+                throw new Exception($"Timed out after {timeoutMs} ms waiting for {what}.");
+            }
+            Thread.Sleep(100);
+        }
+    }
+
+    /// <summary>
+    /// SOAK-01 orchestrator. Runs two real end-to-end scenarios against child sender processes:
+    /// Run 1 kills the sender mid-take and restarts it inside the grace window; Run 2 never brings it
+    /// back, so the grace window must expire. Every produced segment is fully decoded.
+    /// </summary>
+    static int RunRealSenderSoak()
+    {
+        string appHost = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "OmtCaptureStudio.Tests.exe");
+        string exePath = File.Exists(appHost) ? appHost : (Environment.ProcessPath ?? appHost);
+
+        string baseOutDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SoakOutput");
+        if (Directory.Exists(baseOutDir))
+        {
+            try { Directory.Delete(baseOutDir, true); } catch { }
+        }
+        Directory.CreateDirectory(baseOutDir);
+
+        Console.WriteLine("====================================================");
+        Console.WriteLine("  [SOAK-01] Real-Sender Soak: input loss -> finalize -> _partNN resume");
+        Console.WriteLine("====================================================");
+        Console.WriteLine($"Executable : {exePath}");
+        Console.WriteLine($"Output Dir : {baseOutDir}");
+
+        // ---------------------------------------------------- RUN 1: recover inside the grace window
+        Console.WriteLine("\n--------------------------------------------------------------------------------");
+        Console.WriteLine("  RUN 1: mid-recording signal loss + sender restart within the grace window");
+        Console.WriteLine("--------------------------------------------------------------------------------");
+
+        string run1Dir = Path.Combine(baseOutDir, "Run1_Recovery");
+        Directory.CreateDirectory(run1Dir);
+        string source1 = $"OMT_SOAK_Recovery_{Environment.ProcessId}";
+
+        string seg1Path = string.Empty;
+        string seg2Path = string.Empty;
+        Process? sender1 = null;
+        try
+        {
+            sender1 = SpawnSender(exePath, source1, out string address1);
+            Thread.Sleep(1500);
+            string target1 = ResolveDiscoveredAddress(source1, address1);
+
+            using var session = new CaptureSession();
+            using var discovery = new OmtDiscoveryService();
+            using var vm = new MainWindowViewModel(session, discovery, ownsDependencies: false);
+
+            long videoFrames = 0;
+            bool inputLost = false;
+            bool inputRecovered = false;
+
+            session.VideoFrameAvailable += (p, l, w, h, s, fps, ts) => Interlocked.Increment(ref videoFrames);
+            session.RecordingStarted += path =>
+                Console.WriteLine($"[{Now()}] EVENT RecordingStarted segment={session.RecordingSegmentIndex}: {Path.GetFileName(path)}");
+            session.RecordingStopped += summary =>
+                Console.WriteLine($"[{Now()}] EVENT RecordingStopped segment={summary.SegmentIndex} media={summary.MediaDuration.TotalSeconds:F3}s wall={summary.WallClockDuration.TotalSeconds:F3}s size={summary.FileSizeBytes:N0}");
+            session.InputLost += () =>
+            {
+                inputLost = true;
+                Console.WriteLine($"[{Now()}] EVENT InputLost | VM.State={vm.BroadcastState} banner={vm.IsInputLossBannerVisible}");
+            };
+            session.InputRecovered += () =>
+            {
+                inputRecovered = true;
+                Console.WriteLine($"[{Now()}] EVENT InputRecovered | VM.State={vm.BroadcastState} segment={session.RecordingSegmentIndex}");
+            };
+
+            vm.SelectedSource = OmtSourceInfo.Parse(target1);
+            vm.ToggleConnectCommand.ExecuteAsync(null).GetAwaiter().GetResult();
+
+            WaitUntil(() => Interlocked.Read(ref videoFrames) >= 60 && session.CurrentFormat.HasVideo, 15_000, "live frames from the sender");
+            Console.WriteLine($"[{Now()}] Stream locked: {session.CurrentFormat.VideoSpecsText}, {session.CurrentFormat.AudioSpecsText}");
+
+            var config1 = new RecordingConfig
+            {
+                ContainerFormat = OutputContainerFormat.MP4,
+                EncoderChoice = VideoEncoderChoice.CpuX264,
+                Quality = QualityPreset.High,
+                OutputDirectory = run1Dir,
+                FilenamePrefix = "SOAK_Run1",
+                InputLossThresholdSeconds = 5.0,
+                InputRecoveryGraceSeconds = 30.0
+            };
+
+            if (!session.StartRecording(config1))
+            {
+                throw new Exception("Run 1: StartRecording failed.");
+            }
+            seg1Path = session.CurrentRecordingPath ?? string.Empty;
+            if (session.RecordingSegmentIndex != 1)
+            {
+                throw new Exception($"Run 1: expected to open segment 1, got {session.RecordingSegmentIndex}.");
+            }
+
+            Console.WriteLine($"[{Now()}] Recording segment 1 for ~6 s...");
+            var sw1 = Stopwatch.StartNew();
+            while (sw1.ElapsedMilliseconds < 6000)
+            {
+                Thread.Sleep(200);
+                session.CheckInputHealth();
+            }
+
+            Console.WriteLine($"[{Now()}] KILLING sender PID={sender1.Id} mid-take (RecFrames={session.RecordingFramesWritten})...");
+            sender1.Kill(entireProcessTree: true);
+            sender1.WaitForExit(3000);
+            sender1.Dispose();
+            sender1 = null;
+
+            WaitUntil(() => session.IsInputLost, 25_000, "the input-loss boundary", () => session.CheckInputHealth());
+
+            if (!inputLost) throw new Exception("Run 1: InputLost was never raised.");
+            if (session.IsRecording) throw new Exception("Run 1: the take must be finalized at the outage boundary.");
+            if (!File.Exists(seg1Path)) throw new Exception($"Run 1: finalized segment 1 is missing: {seg1Path}");
+            Console.WriteLine($"[{Now()}] Boundary handled; segment 1 finalized: {Path.GetFileName(seg1Path)}");
+
+            Console.WriteLine($"[{Now()}] Leaving the sender offline ~4.5 s to exercise backoff reconnects...");
+            var swDead = Stopwatch.StartNew();
+            while (swDead.ElapsedMilliseconds < 4500)
+            {
+                Thread.Sleep(100);
+                session.CheckInputHealth();
+            }
+
+            Console.WriteLine($"[{Now()}] Restarting the sender inside the 30 s grace window...");
+            sender1 = SpawnSender(exePath, source1, out _);
+
+            WaitUntil(() => !session.IsInputLost && session.IsRecording, 30_000, "auto-reconnect and _partNN resume", () => session.CheckInputHealth());
+
+            seg2Path = session.CurrentRecordingPath ?? string.Empty;
+            if (session.RecordingSegmentIndex != 2)
+            {
+                throw new Exception($"Run 1: expected segment 2 after resume, got {session.RecordingSegmentIndex}.");
+            }
+            if (!seg2Path.EndsWith("_part02.mp4", StringComparison.Ordinal))
+            {
+                throw new Exception($"Run 1: the resumed segment must be named …_part02.mp4, got '{seg2Path}'.");
+            }
+            if (!inputRecovered) throw new Exception("Run 1: InputRecovered was never raised.");
+            Console.WriteLine($"[{Now()}] Resumed into segment 2: {Path.GetFileName(seg2Path)}");
+
+            Console.WriteLine($"[{Now()}] Recording segment 2 for ~6 s...");
+            var sw2 = Stopwatch.StartNew();
+            while (sw2.ElapsedMilliseconds < 6000)
+            {
+                Thread.Sleep(200);
+                session.CheckInputHealth();
+            }
+
+            session.StopRecording();
+            vm.ToggleConnectCommand.ExecuteAsync(null).GetAwaiter().GetResult();
+        }
+        finally
+        {
+            if (sender1 != null)
+            {
+                try { if (!sender1.HasExited) sender1.Kill(entireProcessTree: true); } catch { }
+                sender1.Dispose();
+            }
+        }
+
+        VerifyDecodeClean(seg1Path, "Run 1 segment 1");
+        VerifyDecodeClean(seg2Path, "Run 1 segment 2");
+        if (string.Equals(seg1Path, seg2Path, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new Exception("Run 1: the resumed segment must be a different file from segment 1.");
+        }
+
+        // ---------------------------------------------------- RUN 2: grace window expires
+        Console.WriteLine("\n--------------------------------------------------------------------------------");
+        Console.WriteLine("  RUN 2: permanent sender loss (full 30 s grace window expiry)");
+        Console.WriteLine("--------------------------------------------------------------------------------");
+
+        string run2Dir = Path.Combine(baseOutDir, "Run2_GraceExpiry");
+        Directory.CreateDirectory(run2Dir);
+        string source2 = $"OMT_SOAK_NoReturn_{Environment.ProcessId}";
+
+        Process? sender2 = null;
+        try
+        {
+            sender2 = SpawnSender(exePath, source2, out string address2);
+            Thread.Sleep(1500);
+            string target2 = ResolveDiscoveredAddress(source2, address2);
+
+            using var session2 = new CaptureSession();
+            using var discovery2 = new OmtDiscoveryService();
+            using var vm2 = new MainWindowViewModel(session2, discovery2, ownsDependencies: false);
+
+            long videoFrames2 = 0;
+            bool recoveryFailed = false;
+
+            session2.VideoFrameAvailable += (p, l, w, h, s, fps, ts) => Interlocked.Increment(ref videoFrames2);
+            session2.RecordingStopped += summary =>
+                Console.WriteLine($"[{Now()}] [Run 2] EVENT RecordingStopped segment={summary.SegmentIndex} media={summary.MediaDuration.TotalSeconds:F3}s wall={summary.WallClockDuration.TotalSeconds:F3}s");
+            session2.InputRecoveryFailed += () =>
+            {
+                recoveryFailed = true;
+                Console.WriteLine($"[{Now()}] [Run 2] EVENT InputRecoveryFailed | VM.State={vm2.BroadcastState} banner={vm2.IsInputLossBannerVisible}");
+            };
+
+            vm2.SelectedSource = OmtSourceInfo.Parse(target2);
+            vm2.ToggleConnectCommand.ExecuteAsync(null).GetAwaiter().GetResult();
+            WaitUntil(() => Interlocked.Read(ref videoFrames2) >= 60 && session2.CurrentFormat.HasVideo, 15_000, "[Run 2] live frames from the sender");
+
+            var config2 = new RecordingConfig
+            {
+                ContainerFormat = OutputContainerFormat.MP4,
+                EncoderChoice = VideoEncoderChoice.CpuX264,
+                Quality = QualityPreset.High,
+                OutputDirectory = run2Dir,
+                FilenamePrefix = "SOAK_Run2",
+                InputLossThresholdSeconds = 5.0,
+                InputRecoveryGraceSeconds = 30.0
+            };
+
+            if (!session2.StartRecording(config2))
+            {
+                throw new Exception("[Run 2] StartRecording failed.");
+            }
+
+            Console.WriteLine($"[{Now()}] [Run 2] Recording ~5 s, then killing the sender permanently (RecFrames={session2.RecordingFramesWritten})...");
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 5000)
+            {
+                Thread.Sleep(200);
+                session2.CheckInputHealth();
+            }
+
+            sender2.Kill(entireProcessTree: true);
+            sender2.WaitForExit(3000);
+            sender2.Dispose();
+            sender2 = null;
+
+            WaitUntil(() => recoveryFailed, 50_000, "[Run 2] the 30 s grace-window expiry", () => session2.CheckInputHealth());
+
+            if (session2.IsRecording) throw new Exception("[Run 2] the take must be stopped once the grace window expires.");
+            if (session2.IsInputHealthWatched) throw new Exception("[Run 2] the watchdog must be disarmed once the take has stopped.");
+            Console.WriteLine($"[{Now()}] [Run 2] Grace expired cleanly; VM.State={vm2.BroadcastState} banner={vm2.IsInputLossBannerVisible}");
+
+            string[] run2Files = Directory.GetFiles(run2Dir);
+            if (run2Files.Length != 1)
+            {
+                throw new Exception($"[Run 2] expected exactly one finalized segment, found {run2Files.Length}: {string.Join(", ", run2Files.Select(Path.GetFileName))}");
+            }
+
+            vm2.ToggleConnectCommand.ExecuteAsync(null).GetAwaiter().GetResult();
+            VerifyDecodeClean(run2Files[0], "[Run 2] segment 1");
+        }
+        finally
+        {
+            if (sender2 != null)
+            {
+                try { if (!sender2.HasExited) sender2.Kill(entireProcessTree: true); } catch { }
+                sender2.Dispose();
+            }
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine("\n====================================================");
+        Console.WriteLine("  SOAK PASSED: boundary finalize, _partNN resume,");
+        Console.WriteLine("  grace expiry and decode-clean output verified.");
+        Console.WriteLine("====================================================");
+        Console.ResetColor();
+        return 0;
+    }
+
     /// <summary>
     /// Exercises the headless <see cref="BroadcastSessionState"/> module directly (ADR-0001): the
     /// enum contract, the transition rules, the stop-recording-before-disconnect ordering, and the
@@ -970,7 +1410,8 @@ class Program
             session.VideoFrameAvailable += (p, l, w, h, s, fps, ts) => Interlocked.Increment(ref frames);
 
             var order = new List<string>();
-            session.RecordingStopped += (path, dur, size) => order.Add("finalize");
+            RecordingStopSummary? outageStopSummary = null;
+            session.RecordingStopped += summary => { outageStopSummary = summary; order.Add("finalize"); };
             session.InputLost += () => order.Add("input-lost");
             session.InputRecovered += () => order.Add("input-recovered");
 
@@ -1023,6 +1464,12 @@ class Program
             {
                 throw new Exception($"Segment must be finalized BEFORE the alarm is raised: [{string.Join(",", order)}]");
             }
+            if (outageStopSummary == null || outageStopSummary.SegmentIndex != 1 || outageStopSummary.MediaDuration <= TimeSpan.Zero)
+            {
+                throw new Exception(
+                    $"Boundary stop must carry a segment-1 summary with a positive media duration: " +
+                    $"{(outageStopSummary == null ? "null" : $"seg={outageStopSummary.SegmentIndex}, media={outageStopSummary.MediaDuration}")}");
+            }
 
             // --- Reconnect attempts follow the backoff schedule (250 ms, then 500 ms). ---
             WaitFor(() => source.ReconnectCount >= 1, "first auto-reconnect attempt");
@@ -1074,6 +1521,236 @@ class Program
         Console.WriteLine(" -> Outage finalize-before-alarm, backoff reconnect, and _part02 resume verified!");
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> Input-loss watchdog, auto-reconnect, and segment-per-outage verified!");
+        Console.ResetColor();
+    }
+
+    /// <summary>
+    /// DEF-01: a stop that follows dead air must report MEDIA duration (frames / stamped fps), never
+    /// wall clock — the watchdog-triggered stop used to count the input-loss window and disagreed with
+    /// the container (QA: 11.05 s reported vs 5.92 s on disk). Real (not injected) time here, so the
+    /// wall clock genuinely accrues dead air while no frames arrive.
+    /// </summary>
+    static void TestRecordingStopReportsMediaDuration()
+    {
+        Console.WriteLine("\n[Step 0.674] Verifying DEF-01: stop reports MEDIA duration, not wall clock (dead air excluded)...");
+
+        string outDir = Path.Combine(Path.GetTempPath(), "OMT_Duration_Test");
+        if (Directory.Exists(outDir))
+        {
+            try { Directory.Delete(outDir, true); } catch { }
+        }
+        Directory.CreateDirectory(outDir);
+
+        using var sink = new NullRecordingSink();
+        using var recorder = new StreamRecorderService(sink);
+        using var audio = new AudioEngine();
+        using var session = new CaptureSession(audio, recorder);
+        var source = new RecoverableTestSource();
+
+        RecordingStopSummary? summary = null;
+        session.RecordingStopped += s => summary = s;
+
+        session.Connect(source);
+        WaitForFormat(session, "recoverable source");
+
+        var config = new RecordingConfig
+        {
+            OutputDirectory = outDir,
+            FilenamePrefix = "Duration_Test",
+            ContainerFormat = OutputContainerFormat.MP4,
+            EncoderChoice = VideoEncoderChoice.CpuX264,
+            Quality = QualityPreset.High,
+            // Far above the simulated gap, so the watchdog does not interfere with this test.
+            InputLossThresholdSeconds = 999,
+            InputRecoveryGraceSeconds = 999
+        };
+
+        if (!session.StartRecording(config))
+        {
+            throw new Exception("StartRecording failed for the DEF-01 duration test.");
+        }
+
+        // ~0.6 s of live frames, then 1.2 s of dead air (frames stop, nothing is written).
+        Thread.Sleep(600);
+        source.Suspend();
+        Thread.Sleep(1200);
+
+        long framesWritten = session.RecordingFramesWritten;
+        TimeSpan wallAtStop = session.RecordingElapsedTime;
+        session.StopRecording();
+
+        if (summary == null)
+        {
+            throw new Exception("RecordingStopped did not fire for the DEF-01 duration test.");
+        }
+
+        // Wall clock really did span the dead air...
+        if (summary.WallClockDuration.TotalSeconds < 1.5)
+        {
+            throw new Exception($"Wall-clock duration should span the dead air (>=1.5s), got {summary.WallClockDuration.TotalSeconds:F3}s");
+        }
+
+        // ...and the reported duration must NOT be that wall clock: dead air is excluded.
+        if (summary.MediaDuration.TotalSeconds >= summary.WallClockDuration.TotalSeconds - 1.0)
+        {
+            throw new Exception(
+                $"DEF-01 regression: reported duration {summary.MediaDuration.TotalSeconds:F3}s tracks wall clock " +
+                $"{summary.WallClockDuration.TotalSeconds:F3}s (dead air not excluded).");
+        }
+
+        // Media duration is frames / stamped fps — SyntheticPatternSource stamps 60 fps.
+        double expectedMediaSeconds = framesWritten / 60.0;
+        if (framesWritten <= 0 || Math.Abs(summary.MediaDuration.TotalSeconds - expectedMediaSeconds) > 0.35)
+        {
+            throw new Exception(
+                $"Media duration {summary.MediaDuration.TotalSeconds:F3}s does not match frames/fps " +
+                $"({framesWritten} frames -> {expectedMediaSeconds:F3}s).");
+        }
+
+        if (summary.MediaDuration > wallAtStop)
+        {
+            throw new Exception($"Media duration {summary.MediaDuration} cannot exceed the captured span {wallAtStop}.");
+        }
+        if (summary.AudioDuration <= TimeSpan.Zero)
+        {
+            throw new Exception("Audio duration should be positive (audio flowed before the gap).");
+        }
+
+        Console.WriteLine(
+            $" -> media {summary.MediaDuration.TotalSeconds:F3}s (frames {framesWritten}) vs wall-clock " +
+            $"{summary.WallClockDuration.TotalSeconds:F3}s; dead air excluded.");
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> DEF-01 verified: reported duration is media duration, wall clock logged separately.");
+        Console.ResetColor();
+    }
+
+    /// <summary>
+    /// FEAT-07: pure recording-health analysis with synthetic telemetry — verdict computation, drop
+    /// thresholds and the A/V clamp warning. No FFmpeg, no UI, no I/O.
+    /// </summary>
+    static void TestRecordingHealthModel()
+    {
+        Console.WriteLine("\n[Step 0.675] Verifying RecordingHealth model (verdict, drop thresholds, clamp warning)...");
+
+        var healthy = new RecordingHealthSnapshot
+        {
+            IsRecording = true,
+            HasTake = true,
+            SegmentIndex = 1,
+            EncoderName = RecordingHealth.EncoderDisplayName(VideoEncoderChoice.CpuX264),
+            AchievedBitrateMbps = 6.2,
+            VideoFramesWritten = 360,
+            VideoFramesDropped = 0,
+            AudioChunksDropped = 0,
+            MediaDuration = TimeSpan.FromSeconds(6.0),
+            AudioDuration = TimeSpan.FromSeconds(6.02),
+            WallClockDuration = TimeSpan.FromSeconds(6.1),
+            AvDriftRatio = 1.0,
+            AvDriftClamped = false
+        };
+
+        if (RecordingHealth.IsDropWarning(healthy) || RecordingHealth.IsDriftWarning(healthy) || !RecordingHealth.IsAvParityOk(healthy))
+        {
+            throw new Exception("A healthy snapshot must not raise any warning.");
+        }
+        if (RecordingHealth.BitrateText(healthy) != "6.2 Mbps" || RecordingHealth.EncoderText(healthy) != "x264 (CPU)")
+        {
+            throw new Exception($"Health text mismatch: bitrate='{RecordingHealth.BitrateText(healthy)}', encoder='{RecordingHealth.EncoderText(healthy)}'");
+        }
+
+        // Drop threshold: warns AT the threshold, not below.
+        if (RecordingHealth.IsDropWarning(healthy with { VideoFramesDropped = RecordingHealth.DropWarnThreshold - 1 }))
+        {
+            throw new Exception("Drops below the threshold must not warn.");
+        }
+        if (!RecordingHealth.IsDropWarning(healthy with { VideoFramesDropped = RecordingHealth.DropWarnThreshold }))
+        {
+            throw new Exception("Drops at the threshold must warn.");
+        }
+
+        // Drift band: |ratio - 1| beyond the band warns; a pinned clamp always warns.
+        // (Strictly inside: 1.0 + 0.02 is not representable exactly in binary, so use a margin.)
+        if (RecordingHealth.IsDriftWarning(healthy with { AvDriftRatio = 1.0 + RecordingHealth.DriftWarnBand - 0.001 }))
+        {
+            throw new Exception("Drift inside the band must not warn.");
+        }
+        if (!RecordingHealth.IsDriftWarning(healthy with { AvDriftRatio = 1.0 + RecordingHealth.DriftWarnBand + 0.001 }))
+        {
+            throw new Exception("Drift beyond the band must warn.");
+        }
+        if (!RecordingHealth.IsDriftWarning(healthy with { AvDriftRatio = 1.0, AvDriftClamped = true }))
+        {
+            throw new Exception("A pinned clamp must warn even at ratio 1.0.");
+        }
+        if (!RecordingHealth.DriftText(healthy with { AvDriftRatio = 1.1, AvDriftClamped = true }).Contains("clamped", StringComparison.Ordinal))
+        {
+            throw new Exception("DriftText must surface the clamp.");
+        }
+
+        // Duration parity: within tolerance is OK, beyond it is not, and a missing track cannot mismatch.
+        if (!RecordingHealth.IsAvParityOk(healthy with { AudioDuration = TimeSpan.FromSeconds(6.0 + RecordingHealth.AvParityToleranceSeconds) }))
+        {
+            throw new Exception("Parity exactly at the tolerance edge must be OK.");
+        }
+        if (RecordingHealth.IsAvParityOk(healthy with { AudioDuration = TimeSpan.FromSeconds(6.0 + RecordingHealth.AvParityToleranceSeconds + 0.5) }))
+        {
+            throw new Exception("Parity beyond the tolerance must be reported.");
+        }
+        if (!RecordingHealth.IsAvParityOk(healthy with { AudioDuration = TimeSpan.Zero }))
+        {
+            throw new Exception("A missing audio track must not be called a parity mismatch.");
+        }
+
+        // Stop verdict: reports MEDIA duration + drops + finalize + segment + encoder, never wall clock.
+        var summary = new RecordingStopSummary(
+            Path: @"C:\captures\Take.mp4",
+            MediaDuration: TimeSpan.FromSeconds(5.91),
+            WallClockDuration: TimeSpan.FromSeconds(11.06), // includes ~5 s of dead air
+            AudioDuration: TimeSpan.FromSeconds(5.93),
+            FinalizeDuration: TimeSpan.FromMilliseconds(412),
+            FileSizeBytes: 486_548,
+            VideoFramesWritten: 355,
+            VideoFramesDropped: 2,
+            AudioChunksDropped: 0,
+            SegmentIndex: 1,
+            EncoderName: "x264 (CPU)",
+            DiagnosticTail: "frame=1 fps=0 q=0.0");
+
+        string verdict = RecordingHealth.BuildStopVerdict(summary);
+        Console.WriteLine($" -> {verdict}");
+
+        foreach (string expected in new[] { "video 5.91s", "audio 5.93s", "parity OK", "drops 2 video", "finalize 412 ms", "segment 1", "x264 (CPU)" })
+        {
+            if (!verdict.Contains(expected, StringComparison.Ordinal))
+            {
+                throw new Exception($"Stop verdict is missing '{expected}': {verdict}");
+            }
+        }
+        if (verdict.Contains("11.06", StringComparison.Ordinal))
+        {
+            throw new Exception($"DEF-01 regression: the stop verdict must not report wall clock: {verdict}");
+        }
+
+        string wallNote = RecordingHealth.WallClockNote(summary);
+        if (!wallNote.Contains("11.06", StringComparison.Ordinal) || !wallNote.Contains("dead air", StringComparison.Ordinal))
+        {
+            throw new Exception($"Wall-clock must be reported separately and labelled: {wallNote}");
+        }
+
+        // The summary derives its own snapshot: achieved bitrate comes from file size / MEDIA duration.
+        double expectedMbps = 486_548 * 8.0 / 1_000_000.0 / 5.91;
+        if (Math.Abs(summary.ToHealthSnapshot().AchievedBitrateMbps - expectedMbps) > 0.01)
+        {
+            throw new Exception($"Derived bitrate mismatch: {summary.ToHealthSnapshot().AchievedBitrateMbps:F3} vs {expectedMbps:F3}");
+        }
+        if (summary.ToHealthSnapshot().DiagnosticTail != "frame=1 fps=0 q=0.0")
+        {
+            throw new Exception("The summary must carry its diagnostic tail through to the snapshot.");
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> RecordingHealth verdict, drop thresholds, clamp warning and parity verified!");
         Console.ResetColor();
     }
 

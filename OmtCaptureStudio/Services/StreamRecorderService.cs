@@ -38,6 +38,12 @@ public class StreamRecorderService : IDisposable
     private string? _takeBasePath;
     private int _segmentIndex;
 
+    // Stamped format of the active segment — the basis for MEDIA duration (frames / stamped fps) and
+    // audio duration (PCM bytes / bytes-per-sample-frame). Never wall clock: that includes dead air.
+    private double _recordFrameRate;
+    private int _recordSampleRate;
+    private int _recordChannels;
+
     public bool IsRecording => _isRecording;
     public string? CurrentRecordingPath => _currentRecordingPath;
 
@@ -54,8 +60,56 @@ public class StreamRecorderService : IDisposable
     /// <summary>Audio chunks the recording transport discarded since recording started.</summary>
     public long AudioChunksDropped => _sink.AudioChunksDropped;
 
+    /// <summary>Encoder actually used this session (AutoHardware resolved), or empty when idle.</summary>
+    public string ResolvedEncoderName => _sink.ResolvedEncoderName;
+
+    /// <summary>Capped FFmpeg stderr tail, for the in-app diagnostics drawer.</summary>
+    public string DiagnosticTail => _sink.DiagnosticTail;
+
+    /// <summary>
+    /// Video track duration so far: frames written / stamped frame rate. Contains no dead air, which
+    /// is exactly why it is the figure reported on stop (DEF-01).
+    /// </summary>
+    public TimeSpan MediaDuration => _recordFrameRate > 0
+        ? TimeSpan.FromSeconds(Interlocked.Read(ref _framesWritten) / _recordFrameRate)
+        : TimeSpan.Zero;
+
+    /// <summary>Audio track duration so far, derived from interleaved 32-bit float PCM bytes.</summary>
+    public TimeSpan AudioDuration => _recordSampleRate > 0 && _recordChannels > 0
+        ? TimeSpan.FromSeconds(Interlocked.Read(ref _audioBytesWritten) / (double)(_recordSampleRate * _recordChannels * 4))
+        : TimeSpan.Zero;
+
+    /// <summary>
+    /// Achieved output bitrate: the on-disk file size over media duration. MP4/MOV are written
+    /// fragmented (moof/mdat incrementally), so the live file size is a usable estimate mid-take.
+    /// </summary>
+    public double AchievedBitrateMbps
+    {
+        get
+        {
+            string? path = _currentRecordingPath;
+            TimeSpan media = MediaDuration;
+            if (path == null || media.TotalSeconds <= 0) return 0;
+            try
+            {
+                var info = new FileInfo(path);
+                return info.Exists ? info.Length * 8.0 / 1_000_000.0 / media.TotalSeconds : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+    }
+
     public event Action<string>? RecordingStarted;
-    public event Action<string, TimeSpan, long>? RecordingStopped;
+
+    /// <summary>
+    /// Raised once per segment/take stop with the full <see cref="RecordingStopSummary"/>.
+    /// <see cref="RecordingStopSummary.MediaDuration"/> is the media duration (DEF-01) — NOT wall
+    /// clock, which rides along separately as <see cref="RecordingStopSummary.WallClockDuration"/>.
+    /// </summary>
+    public event Action<RecordingStopSummary>? RecordingStopped;
     public event Action<string>? RecordingError;
 
     /// <summary>
@@ -199,6 +253,9 @@ public class StreamRecorderService : IDisposable
             // advance the segment sequence).
             _takeBasePath = takeBasePath;
             _segmentIndex = segmentIndex;
+            _recordFrameRate = format.FrameRate;
+            _recordSampleRate = format.SampleRate;
+            _recordChannels = format.Channels;
 
             _recordStartTimestamp = Stopwatch.GetTimestamp();
             _framesWritten = 0;
@@ -413,13 +470,54 @@ public class StreamRecorderService : IDisposable
             _isRecording = false;
 
             string path = _currentRecordingPath ?? string.Empty;
-            TimeSpan duration = Stopwatch.GetElapsedTime(_recordStartTimestamp);
+
+            // DEF-01: report MEDIA duration, not wall clock. A watchdog-forced stop happens after up
+            // to `InputLossThresholdSeconds` of dead air, and counting that made the reported duration
+            // disagree with the container (QA measured 11.05s reported vs 5.92s on disk). Media
+            // duration is frames / stamped fps, so an outage cannot inflate it. Wall clock is still
+            // useful for forensics, so it rides along separately and clearly labelled.
+            TimeSpan mediaDuration = MediaDuration;
+            TimeSpan audioDuration = AudioDuration;
+            TimeSpan wallClock = Stopwatch.GetElapsedTime(_recordStartTimestamp);
+
+            // Capture the encoder + diagnostics BEFORE finalizing: FinalizeSink tears the transport
+            // down, so afterwards those reads come back empty.
+            string encoderName = _sink.ResolvedEncoderName;
+            string diagnosticTail = _sink.DiagnosticTail;
+
+            var finalizeWatch = Stopwatch.StartNew();
 
             try
             {
                 _sink.FinalizeSink(out long fileSize);
-                AppLogger.LogInfo($"Recording finalized internally: {path}, {fileSize} bytes");
-                RecordingStopped?.Invoke(path, duration, fileSize);
+                finalizeWatch.Stop();
+
+                if (mediaDuration <= TimeSpan.Zero)
+                {
+                    // No frames cleared the transport (or an unknown frame rate): fall back to wall
+                    // clock rather than reporting a bogus zero.
+                    mediaDuration = wallClock;
+                }
+
+                var summary = new RecordingStopSummary(
+                    Path: path,
+                    MediaDuration: mediaDuration,
+                    WallClockDuration: wallClock,
+                    AudioDuration: audioDuration,
+                    FinalizeDuration: finalizeWatch.Elapsed,
+                    FileSizeBytes: fileSize,
+                    VideoFramesWritten: Interlocked.Read(ref _framesWritten),
+                    VideoFramesDropped: _sink.VideoFramesDropped,
+                    AudioChunksDropped: _sink.AudioChunksDropped,
+                    SegmentIndex: _segmentIndex,
+                    EncoderName: encoderName,
+                    DiagnosticTail: diagnosticTail);
+
+                AppLogger.LogInfo(
+                    $"Recording finalized internally: {path}, {fileSize} bytes, media {summary.MediaDuration.TotalSeconds:F2}s, " +
+                    RecordingHealth.WallClockNote(summary));
+
+                RecordingStopped?.Invoke(summary);
             }
             catch (Exception ex)
             {

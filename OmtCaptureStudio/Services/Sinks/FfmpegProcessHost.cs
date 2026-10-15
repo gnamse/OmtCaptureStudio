@@ -52,6 +52,18 @@ public class FfmpegProcessHost : IDisposable
     
     public event Action<string>? SinkError;
 
+    /// <summary>The encoder actually used this session (AutoHardware resolved to a concrete choice).</summary>
+    public VideoEncoderChoice ResolvedEncoder { get; private set; } = VideoEncoderChoice.AutoHardware;
+
+    /// <summary>Friendly name of <see cref="ResolvedEncoder"/> for display/logging.</summary>
+    public string ResolvedEncoderName => RecordingHealth.EncoderDisplayName(ResolvedEncoder);
+
+    /// <summary>
+    /// Capped FFmpeg stderr tail (kept at ~4 KB by the ErrorDataReceived handler), for the in-app
+    /// diagnostics drawer. Distinct from the stall watchdog: this is the raw diagnostic stream.
+    /// </summary>
+    public string DiagnosticTail => GetLastFfmpegError();
+
     public FfmpegProcessHost(
         BoundedMediaQueue<VideoFramePacket> videoQueue,
         BoundedMediaQueue<AudioDataPacket>? audioQueue)
@@ -104,6 +116,7 @@ public class FfmpegProcessHost : IDisposable
 
         double fps = format.FrameRate > 0 ? format.FrameRate : 60.0;
         string fpsStr = fps.ToString("0.###", CultureInfo.InvariantCulture);
+        ResolvedEncoder = ResolveEncoder(config.EncoderChoice);
         string vCodecArgs = GetVideoCodecArguments(config.EncoderChoice, config.Quality);
 
         string aInputArgs = "";
@@ -552,6 +565,10 @@ public class FfmpegProcessHost : IDisposable
 
     private static VideoEncoderChoice _detectedHardware = VideoEncoderChoice.AutoHardware;
 
+    /// <summary>AutoHardware resolves to the detected hardware encoder, else stays as requested.</summary>
+    private static VideoEncoderChoice ResolveEncoder(VideoEncoderChoice encoder) =>
+        encoder == VideoEncoderChoice.AutoHardware ? DetectHardwareEncoder() : encoder;
+
     private static VideoEncoderChoice DetectHardwareEncoder()
     {
         if (_detectedHardware != VideoEncoderChoice.AutoHardware)
@@ -610,10 +627,7 @@ public class FfmpegProcessHost : IDisposable
             _ => 20
         };
 
-        if (encoder == VideoEncoderChoice.AutoHardware)
-        {
-            encoder = DetectHardwareEncoder();
-        }
+        encoder = ResolveEncoder(encoder);
 
         return encoder switch
         {

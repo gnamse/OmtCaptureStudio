@@ -255,6 +255,49 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string _inputLossBannerText = "";
 
+    // Recording Health panel (FEAT-07) — a projection of CaptureSession.GetRecordingHealthSnapshot().
+    // Aggregation lives in the engine/model; this is presentation only.
+    [ObservableProperty]
+    private bool _isRecordingHealthVisible;
+
+    [ObservableProperty]
+    private string _recordingHealthEncoderText = "—";
+
+    [ObservableProperty]
+    private string _recordingHealthBitrateText = "—";
+
+    [ObservableProperty]
+    private string _recordingHealthDropsText = "—";
+
+    [ObservableProperty]
+    private string _recordingHealthDriftText = "—";
+
+    [ObservableProperty]
+    private bool _isRecordingDropWarning;
+
+    [ObservableProperty]
+    private bool _isRecordingDriftWarning;
+
+    [ObservableProperty]
+    private IBrush _recordingDropsForeground = StudioPalette.ButtonLightForeground;
+
+    [ObservableProperty]
+    private IBrush _recordingDriftForeground = StudioPalette.ButtonLightForeground;
+
+    // Stop-summary verdict (FEAT-07) and the diagnostics drawer.
+    [ObservableProperty]
+    private string _stopSummaryText = "";
+
+    /// <summary>True when a stop verdict is available (drives the drawer's verdict row).</summary>
+    [ObservableProperty]
+    private bool _isStopSummaryVisible;
+
+    [ObservableProperty]
+    private string _diagnosticTailText = "";
+
+    [ObservableProperty]
+    private bool _isDiagnosticsDrawerOpen;
+
     // 7. Recording Configuration Choices
     public IReadOnlyList<OutputContainerFormat> ContainerFormats { get; } = Enum.GetValues<OutputContainerFormat>();
 
@@ -1660,13 +1703,24 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             RecordButtonBackground = RecordStopBrush;
             RecordButtonAutomationName = "Stop Recording Stream";
             RecordStatsText = $"Recording to {Path.GetFileName(filePath)}";
+
+            // A new take clears the previous verdict, then the panel re-projects.
+            StopSummaryText = string.Empty;
             _recordUiTimer?.Start();
+            ProjectRecordingHealth(_session.GetRecordingHealthSnapshot());
         });
     }
 
-    private void OnRecordingStopped(string filePath, TimeSpan duration, long fileSize)
+    private void OnRecordingStopped(RecordingStopSummary summary)
     {
-        AppLogger.LogInfo($"Recording stopped: {filePath} (Duration: {duration}, Size: {fileSize} bytes)");
+        // DEF-01: this used to report Stopwatch wall clock, which counted the input-loss dead air (QA
+        // measured 11.05s reported against 5.92s on disk). It now reports MEDIA duration — frames /
+        // stamped fps — and logs wall clock separately, clearly labelled.
+        AppLogger.LogInfo(
+            $"Recording stopped: {summary.Path} (media duration: {summary.MediaDuration}, " +
+            $"wall-clock duration: {summary.WallClockDuration} [includes input-loss dead air], size: {summary.FileSizeBytes} bytes)");
+        AppLogger.LogInfo(RecordingHealth.BuildStopVerdict(summary));
+
         PostToUIThread(() =>
         {
             IsRecordingCloseOverlayVisible = false;
@@ -1677,11 +1731,16 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             RecordButtonBackground = RecordStartBrush;
             RecordButtonAutomationName = "Start Recording Stream";
 
-            double mb = fileSize / (1024.0 * 1024.0);
+            double mb = summary.FileSizeBytes / (1024.0 * 1024.0);
             RecordDurationText = "00:00:00";
-            RecordStatsText = $"Saved: {Path.GetFileName(filePath)} ({mb:F1} MB, {duration:mm\\:ss})";
+            RecordStatsText = $"Saved: {Path.GetFileName(summary.Path)} ({mb:F1} MB, {summary.MediaDuration:mm\\:ss})";
 
-            StatusText = $"Recording completed and saved to {filePath}";
+            // FEAT-07: the stop-summary verdict, shown in the UI (and logged above) from the summary's
+            // own snapshot, since the live session has already torn the transport down.
+            StopSummaryText = RecordingHealth.BuildStopVerdict(summary);
+            ProjectRecordingHealth(summary.ToHealthSnapshot());
+
+            StatusText = $"Recording completed and saved to {summary.Path}";
         });
     }
 
@@ -1715,7 +1774,45 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
             long frames = _session.RecordingFramesWritten;
             RecordStatsText = $"Writing... {frames:N0} frames";
+
+            // FEAT-07: refresh the recording-health projection once per tick (Interlocked reads plus at
+            // most one file-size query — no per-frame work, and we are already on the UI thread).
+            ProjectRecordingHealth(_session.GetRecordingHealthSnapshot());
         }
+    }
+
+    /// <summary>
+    /// Projects one health snapshot onto the panel (FEAT-07). Pure mapping — thresholds and text come
+    /// from <see cref="RecordingHealth"/>, so the UI and the headless tests agree by construction.
+    /// </summary>
+    private void ProjectRecordingHealth(RecordingHealthSnapshot snapshot)
+    {
+        RecordingHealthEncoderText = RecordingHealth.EncoderText(snapshot);
+        RecordingHealthBitrateText = RecordingHealth.BitrateText(snapshot);
+        RecordingHealthDropsText = RecordingHealth.DropsText(snapshot);
+        RecordingHealthDriftText = RecordingHealth.DriftText(snapshot);
+
+        IsRecordingDropWarning = RecordingHealth.IsDropWarning(snapshot);
+        IsRecordingDriftWarning = RecordingHealth.IsDriftWarning(snapshot);
+        RecordingDropsForeground = IsRecordingDropWarning ? StudioPalette.MeterDanger : StudioPalette.ButtonLightForeground;
+        RecordingDriftForeground = IsRecordingDriftWarning ? StudioPalette.MeterWarnHigh : StudioPalette.ButtonLightForeground;
+
+        DiagnosticTailText = snapshot.DiagnosticTail ?? string.Empty;
+
+        // The panel stays up after a stop so the verdict remains readable, and hides once the verdict
+        // is cleared by the next take.
+        IsRecordingHealthVisible = snapshot.IsRecording || !string.IsNullOrEmpty(StopSummaryText);
+    }
+
+    partial void OnStopSummaryTextChanged(string value)
+    {
+        IsStopSummaryVisible = !string.IsNullOrEmpty(value);
+    }
+
+    [RelayCommand]
+    private void ToggleDiagnosticsDrawer()
+    {
+        IsDiagnosticsDrawerOpen = !IsDiagnosticsDrawerOpen;
     }
 
     #endregion

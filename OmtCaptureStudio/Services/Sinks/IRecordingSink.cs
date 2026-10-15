@@ -40,6 +40,18 @@ public interface IRecordingSink : IDisposable
     long AudioChunksDropped { get; }
 
     /// <summary>
+    /// The encoder actually used for this session, after any AutoHardware resolution. Empty when the
+    /// transport does not have an encoder concept (in-memory test sink).
+    /// </summary>
+    string ResolvedEncoderName { get; }
+
+    /// <summary>
+    /// Capped tail of the transport's diagnostic stream (FFmpeg stderr), for the in-app diagnostics
+    /// drawer. Empty for transports without one. Never null.
+    /// </summary>
+    string DiagnosticTail { get; }
+
+    /// <summary>
     /// Raised when an asynchronous error occurs within the recording transport sink.
     /// </summary>
     event Action<string>? SinkError;

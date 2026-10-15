@@ -40,7 +40,7 @@ public class CaptureSession : IDisposable
     private readonly Action<AudioLevelData> _onLevelsCalculated;
     private readonly Action<byte[], int> _onAudioInterleavedAvailable;
     private readonly Action<string> _onRecordingStarted;
-    private readonly Action<string, TimeSpan, long> _onRecordingStopped;
+    private readonly Action<RecordingStopSummary> _onRecordingStopped;
     private readonly Action<string> _onRecordingError;
 
     public StreamFormat CurrentFormat { get; private set; } = StreamFormat.Empty;
@@ -62,6 +62,29 @@ public class CaptureSession : IDisposable
 
     /// <summary>True while the watchdog currently reports a frame-absence outage.</summary>
     public bool IsInputLost => _inputWatchdog.IsLost;
+
+    /// <summary>
+    /// Aggregates the recording path's health into one snapshot for the ViewModel to project
+    /// (FEAT-07). The aggregation lives here, not ad hoc in code-behind; counters are Interlocked
+    /// reads (no per-frame work) plus at most one file-size query.
+    /// </summary>
+    public RecordingHealthSnapshot GetRecordingHealthSnapshot() => new()
+    {
+        IsRecording = _recorder.IsRecording,
+        HasTake = _recorder.CurrentTakeBasePath != null,
+        SegmentIndex = _recorder.CurrentSegmentIndex,
+        EncoderName = _recorder.ResolvedEncoderName,
+        AchievedBitrateMbps = _recorder.AchievedBitrateMbps,
+        VideoFramesWritten = _recorder.FramesWritten,
+        VideoFramesDropped = _recorder.VideoFramesDropped,
+        AudioChunksDropped = _recorder.AudioChunksDropped,
+        MediaDuration = _recorder.MediaDuration,
+        AudioDuration = _recorder.AudioDuration,
+        WallClockDuration = _recorder.IsRecording ? _recorder.ElapsedTime : TimeSpan.Zero,
+        AvDriftRatio = _audioResampler.Ratio,
+        AvDriftClamped = _audioResampler.IsRatioClamped,
+        DiagnosticTail = _recorder.DiagnosticTail
+    };
 
     /// <summary>
     /// Wall-clock window with no video frame that counts as input loss. Operator-configurable;
@@ -95,7 +118,7 @@ public class CaptureSession : IDisposable
 
     // Recording Events
     public event Action<string>? RecordingStarted;
-    public event Action<string, TimeSpan, long>? RecordingStopped;
+    public event Action<RecordingStopSummary>? RecordingStopped;
     public event Action<string>? RecordingError;
 
     // Input-loss resilience events (ADR-0002). Raised on the thread that calls CheckInputHealth()
@@ -142,7 +165,7 @@ public class CaptureSession : IDisposable
             }
         };
         _onRecordingStarted = path => RecordingStarted?.Invoke(path);
-        _onRecordingStopped = (path, dur, sz) => RecordingStopped?.Invoke(path, dur, sz);
+        _onRecordingStopped = summary => RecordingStopped?.Invoke(summary);
         _onRecordingError = err => RecordingError?.Invoke(err);
 
         HookInternalAudioAndRecorder();

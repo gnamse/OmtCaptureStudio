@@ -197,6 +197,26 @@ public class FfmpegPipeSink : IRecordingSink
         }
     }
 
+    /// <summary>Encoder actually used this session (AutoHardware resolved), or empty when idle.</summary>
+    public string ResolvedEncoderName
+    {
+        get
+        {
+            var host = _host;
+            return host != null ? host.ResolvedEncoderName : string.Empty;
+        }
+    }
+
+    /// <summary>Capped FFmpeg stderr tail for the in-app diagnostics drawer; empty when idle.</summary>
+    public string DiagnosticTail
+    {
+        get
+        {
+            var host = _host;
+            return host != null ? host.DiagnosticTail : string.Empty;
+        }
+    }
+
     private void Cleanup()
     {
         _disposed = true;
