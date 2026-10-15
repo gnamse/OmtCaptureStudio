@@ -14,6 +14,28 @@ public interface IHostAudioSource : IDisposable
     int SampleRate { get; }
     int Channels { get; }
 
+    // ---- Negotiated state (ADR-0003) -----------------------------------------------------------
+    // Exposed here so callers never have to downcast to a concrete driver adapter to report what the
+    // device actually negotiated.
+
+    /// <summary>True once the underlying capture device is running.</summary>
+    bool IsHardwareActive { get; }
+
+    /// <summary>Device mix rate actually in use; equals <see cref="SampleRate"/> when no conversion is needed.</summary>
+    int DeviceSampleRate { get; }
+
+    /// <summary>True when the device rate differs from the target rate and this source converts.</summary>
+    bool IsResamplingRequired { get; }
+
+    /// <summary>Operator-facing note about rate negotiation, or <c>null</c> when there is nothing to say.</summary>
+    string? RateNegotiationNote { get; }
+
+    /// <summary>Driver-reported input latency in frames, or 0 when the device does not report one.</summary>
+    int InputLatencyFrames { get; }
+
+    /// <summary>Last setup/runtime failure, or <c>null</c> when everything succeeded.</summary>
+    string? LastError { get; }
+
     /// <summary>
     /// Fills <paramref name="planarDestination"/> with <c>Channels * samplesPerChannel</c>
     /// floats: all Left samples (<c>[0 .. samplesPerChannel - 1]</c>) followed by all Right
@@ -31,6 +53,14 @@ public sealed class SilentHostAudioSource : IHostAudioSource
 {
     public int SampleRate => 48000;
     public int Channels => 2;
+
+    // Silent clock: no device, nothing to negotiate, nothing to report.
+    public bool IsHardwareActive => false;
+    public int DeviceSampleRate => 48000;
+    public bool IsResamplingRequired => false;
+    public string? RateNegotiationNote => null;
+    public int InputLatencyFrames => 0;
+    public string? LastError => null;
 
     public void FillPlanarAudio(Span<float> planarDestination, int samplesPerChannel)
     {

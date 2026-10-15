@@ -1241,15 +1241,15 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private static IHostAudioSource CreateCaptureAudioSource(HostAudioCaptureOption option)
     {
         IHostAudioSource source = HostAudioSourceFactory.Create(option);
-        if (source is AsioHostAudioSource asio)
-        {
-            LogAsioStateDeferred(asio, option.DisplayName);
-        }
+
+        // ADR-0003: no downcast to a concrete driver adapter — the negotiated state is on the
+        // interface now, so every source can report it the same way.
+        LogSourceStateDeferred(source, option.DisplayName);
 
         return source;
     }
 
-    private static void LogAsioStateDeferred(AsioHostAudioSource asio, string displayName)
+    private static void LogSourceStateDeferred(IHostAudioSource source, string displayName)
     {
         try
         {
@@ -1258,7 +1258,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 try
                 {
                     await Task.Delay(AsioTelemetryDelayMs).ConfigureAwait(false);
-                    AppLogger.LogInfo($"[ASIO] {displayName}: {DescribeAsioState(asio)}");
+                    AppLogger.LogInfo($"[HostAudio] {displayName}: {DescribeSourceState(source)}");
                 }
                 catch
                 {
@@ -1272,28 +1272,30 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
-    /// <summary>One-line summary of an ASIO source's negotiated state, for logs and status text.</summary>
-    private static string DescribeAsioState(AsioHostAudioSource asio)
+    /// <summary>One-line summary of a host source's negotiated state, for logs and status text.</summary>
+    private static string DescribeSourceState(IHostAudioSource source)
     {
-        int sampleRate = asio.SampleRate > 0 ? asio.SampleRate : 48000;
+        int sampleRate = source.SampleRate > 0 ? source.SampleRate : 48000;
 
-        string rate = asio.IsResamplingRequired
-            ? $"driver runs at {asio.DriverActualSampleRate} Hz, resampling to {sampleRate} Hz"
+        string rate = source.IsResamplingRequired
+            ? $"device runs at {source.DeviceSampleRate} Hz, resampling to {sampleRate} Hz"
             : $"native {sampleRate} Hz (no resampling)";
 
-        string note = string.IsNullOrWhiteSpace(asio.SampleRateNegotiationNote)
+        string note = string.IsNullOrWhiteSpace(source.RateNegotiationNote)
             ? string.Empty
-            : $" [{asio.SampleRateNegotiationNote}]";
+            : $" [{source.RateNegotiationNote}]";
 
-        string latency = asio.InputLatencySamples > 0
-            ? $", input latency {asio.InputLatencySamples * 1000 / sampleRate} ms ({asio.InputLatencySamples} samples)"
+        string latency = source.InputLatencyFrames > 0
+            ? $", input latency {source.InputLatencyFrames * 1000 / sampleRate} ms ({source.InputLatencyFrames} samples)"
             : string.Empty;
 
-        string error = string.IsNullOrWhiteSpace(asio.LastError)
+        string error = string.IsNullOrWhiteSpace(source.LastError)
             ? string.Empty
-            : $", ERROR: {asio.LastError}";
+            : $", ERROR: {source.LastError}";
 
-        return $"{rate}{note}{latency}{error}";
+        string active = source.IsHardwareActive ? string.Empty : ", hardware INACTIVE (silence)";
+
+        return $"{rate}{note}{latency}{error}{active}";
     }
 
     private void PopulateBroadcastNetworks()

@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using OmtCaptureStudio.Models;
+using OmtCaptureStudio.Services.Audio;
 
 namespace OmtCaptureStudio.Services;
 
@@ -50,11 +51,9 @@ namespace OmtCaptureStudio.Services;
 /// </summary>
 public sealed unsafe class AsioHostAudioSource : IHostAudioSource
 {
-    private const int TargetSampleRate = WasapiHostAudioSource.TargetSampleRate; // 48000 Hz
-    private const int TargetChannels = WasapiHostAudioSource.TargetChannels;     // 2 (stereo)
-
-    private const int RingCapacitySamples = WasapiHostAudioSource.TargetSampleRate;          // 1.0s of history
-    private const int MaxLatencySamples = WasapiHostAudioSource.TargetSampleRate * 120 / 1000; // 120 ms cap, as WASAPI
+    // Shared audio-layer vocabulary (ADR-0003): the ring policy itself now lives in StereoCaptureRing.
+    private const int TargetSampleRate = HostAudioFormat.TargetSampleRate; // 48000 Hz
+    private const int TargetChannels = HostAudioFormat.TargetChannels;     // 2 (stereo)
 
     private const int CoInitApartmentThreaded = 0x2;
     private const uint ClsCtxInprocServer = 0x1;
@@ -117,13 +116,8 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
     /// </summary>
     public long CallbacksInvoked => Volatile.Read(ref _callbackCount);
 
-    // ---- capture ring (mirrors WasapiEndpointCapture) ------------------------------------------
-    private readonly object _ringLock = new();
-    private readonly float[] _ringLeft = new float[RingCapacitySamples];
-    private readonly float[] _ringRight = new float[RingCapacitySamples];
-    private int _ringReadIndex;
-    private int _ringWriteIndex;
-    private int _ringAvailableSamples;
+    // ---- capture ring: ONE shared implementation (ADR-0003) -------------------------------------
+    private readonly StereoCaptureRing _ring = new();
 
     private float[] _scratchLeft = Array.Empty<float>();   // per-callback conversion target
     private float[] _scratchRight = Array.Empty<float>();
@@ -179,6 +173,11 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
     /// <summary>Driver-reported input latency in frames (informational).</summary>
     public int InputLatencySamples => _inputLatencySamples;
 
+    // ---- IHostAudioSource (ADR-0003 interface widening; kills the caller downcast) --------------
+    public int DeviceSampleRate => _driverActualSampleRate > 0 ? _driverActualSampleRate : TargetSampleRate;
+    public int InputLatencyFrames => _inputLatencySamples;
+    public string? RateNegotiationNote => _negotiationNote;
+
     /// <summary>Driver-reported output latency in frames (informational).</summary>
     public int OutputLatencySamples => _outputLatencySamples;
 
@@ -231,10 +230,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
         }
         else
         {
-            lock (_ringLock)
-            {
-                ReadRingLocked(left, right, samplesPerChannel);
-            }
+            _ring.Read(left, right, samplesPerChannel);
         }
     }
 
@@ -610,12 +606,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
             try { AsioDisposeBuffers(pAsio); } catch { }
         }
 
-        lock (_ringLock)
-        {
-            _ringReadIndex = 0;
-            _ringWriteIndex = 0;
-            _ringAvailableSamples = 0;
-        }
+        _ring.Reset();
 
         if (pAsio != IntPtr.Zero)
         {
@@ -781,10 +772,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
                 Array.Clear(_scratchRight, 0, frames);
             }
 
-            lock (_ringLock)
-            {
-                WriteRingLocked(_scratchLeft, _scratchRight, frames);
-            }
+            _ring.Write(_scratchLeft, _scratchRight, frames);
         }
         finally
         {
@@ -815,58 +803,6 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
             if (b == IntPtr.Zero) continue;
             int bytesPerFrame = SampleTypeSizeBytes(TypeOf(_outputSampleTypes, c));
             new Span<byte>((void*)b, frames * bytesPerFrame).Clear();
-        }
-    }
-
-    // ============================================================================================
-    // Ring buffer (mirrors WasapiEndpointCapture)
-    // ============================================================================================
-
-    private void WriteRingLocked(float[] srcLeft, float[] srcRight, int count)
-    {
-        for (int i = 0; i < count; i++)
-        {
-            _ringLeft[_ringWriteIndex] = srcLeft[i];
-            _ringRight[_ringWriteIndex] = srcRight[i];
-            _ringWriteIndex = (_ringWriteIndex + 1) % RingCapacitySamples;
-
-            if (_ringAvailableSamples < RingCapacitySamples)
-            {
-                _ringAvailableSamples++;
-            }
-            else
-            {
-                _ringReadIndex = (_ringReadIndex + 1) % RingCapacitySamples;
-            }
-        }
-
-        // Bound accumulated latency to ~120 ms so audio never drifts behind video over long sessions.
-        if (_ringAvailableSamples > MaxLatencySamples)
-        {
-            int drop = _ringAvailableSamples - (MaxLatencySamples / 2);
-            _ringReadIndex = (_ringReadIndex + drop) % RingCapacitySamples;
-            _ringAvailableSamples -= drop;
-        }
-    }
-
-    private void ReadRingLocked(Span<float> leftDest, Span<float> rightDest, int wanted)
-    {
-        int copied = 0;
-        int toCopy = Math.Min(wanted, _ringAvailableSamples);
-        while (copied < toCopy)
-        {
-            int contiguous = Math.Min(toCopy - copied, RingCapacitySamples - _ringReadIndex);
-            _ringLeft.AsSpan(_ringReadIndex, contiguous).CopyTo(leftDest.Slice(copied, contiguous));
-            _ringRight.AsSpan(_ringReadIndex, contiguous).CopyTo(rightDest.Slice(copied, contiguous));
-            _ringReadIndex = (_ringReadIndex + contiguous) % RingCapacitySamples;
-            copied += contiguous;
-        }
-        _ringAvailableSamples -= toCopy;
-
-        if (copied < wanted)
-        {
-            leftDest.Slice(copied).Clear();
-            rightDest.Slice(copied).Clear();
         }
     }
 
@@ -1013,16 +949,10 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
         }
 
         // Feed the resampler whatever the ring currently holds (capped) so its latency stays bounded.
-        int feed;
-        lock (_ringLock)
-        {
-            feed = Math.Min(_ringAvailableSamples, resampler.MaxFeedFrames(wanted));
-            if (feed > 0)
-            {
-                EnsurePullCapacity(feed);
-                ReadRingLocked(_pullLeft.AsSpan(0, feed), _pullRight.AsSpan(0, feed), feed);
-            }
-        }
+        // ReadUpTo reports the count in one atomic step, so the pull never has to be sized racily.
+        int maxFeed = Math.Min(resampler.MaxFeedFrames(wanted), _ring.CapacitySamples);
+        EnsurePullCapacity(maxFeed);
+        int feed = _ring.ReadUpTo(_pullLeft.AsSpan(0, maxFeed), _pullRight.AsSpan(0, maxFeed), maxFeed);
         if (feed > 0)
         {
             resampler.Append(_pullLeft, _pullRight, feed);
