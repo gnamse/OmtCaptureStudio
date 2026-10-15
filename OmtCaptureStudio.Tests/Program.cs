@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
+using OmtCaptureStudio.Services.Audio;
 using OmtCaptureStudio.Services.Sinks;
 using OmtCaptureStudio.Services.Sources;
 using OmtCaptureStudio.ViewModels;
@@ -158,6 +159,8 @@ class Program
         TestRecordingOutageRecovery();
         TestRecordingStopReportsMediaDuration();
         TestRecordingHealthModel();
+        TestStereoCaptureRing();
+        TestHostAudioSourceInterface();
 
         Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
         using (var vmSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(new NullRecordingSink())))
@@ -1754,6 +1757,185 @@ class Program
         Console.ResetColor();
     }
 
+    /// <summary>
+    /// ADR-0003 Slice 1: the stereo capture ring is a pure in-memory module now, so its whole policy
+    /// (fill/drain, wrap, latency cap, overflow, underrun→silence, exactly-once handoff) is testable
+    /// with no hardware. Previously the ring existed only inside two live capture devices.
+    /// </summary>
+    static void TestStereoCaptureRing()
+    {
+        Console.WriteLine("\n[Step 0.676] Verifying StereoCaptureRing (fill/drain, wrap, latency cap, underrun)...");
+
+        // --- Defaults and argument guards. ---
+        var defaults = new StereoCaptureRing();
+        if (defaults.CapacitySamples != 48_000 || defaults.MaxLatencySamples != 5_760)
+        {
+            throw new Exception($"Ring defaults mismatch: capacity={defaults.CapacitySamples}, maxLatency={defaults.MaxLatencySamples}");
+        }
+        bool threw = false;
+        try { _ = new StereoCaptureRing(100, 500); } catch (ArgumentOutOfRangeException) { threw = true; }
+        if (!threw) throw new Exception("A latency cap larger than the capacity must be rejected.");
+
+        // --- Fill / drain, exactly once, in order (cap == capacity so nothing is dropped). ---
+        var ring = new StereoCaptureRing(1000, 1000);
+        if (ring.AvailableSamples != 0) throw new Exception("A new ring must be empty.");
+
+        // Sized for the largest single write below (1200 in the overflow case).
+        var left = new float[1200];
+        var right = new float[1200];
+        for (int i = 0; i < 1000; i++) { left[i] = i; right[i] = -i; }
+        ring.Write(left, right, 1000);
+        if (ring.AvailableSamples != 1000) throw new Exception($"Expected 1000 available, got {ring.AvailableSamples}");
+
+        var outL = new float[1000];
+        var outR = new float[1000];
+        // Read in uneven chunks: every frame must arrive exactly once, in order.
+        int got = 0;
+        foreach (int chunk in new[] { 30, 30, 40, 500, 400 })
+        {
+            ring.Read(outL.AsSpan(got, chunk), outR.AsSpan(got, chunk), chunk);
+            got += chunk;
+        }
+        for (int i = 0; i < 1000; i++)
+        {
+            if (outL[i] != i || outR[i] != -i)
+            {
+                throw new Exception($"Frame {i} came back as L={outL[i]}/R={outR[i]} (expected L={i}/R={-i}).");
+            }
+        }
+        if (ring.AvailableSamples != 0) throw new Exception("Draining the ring must leave it empty.");
+
+        // --- Wrap-around across the ring boundary. ---
+        for (int i = 0; i < 600; i++) { left[i] = 2000 + i; right[i] = 2000 + i; }
+        ring.Write(left, right, 600);
+        ring.Read(outL.AsSpan(0, 600), outR.AsSpan(0, 600), 600);
+        for (int i = 0; i < 600; i++)
+        {
+            if (outL[i] != 2000 + i) throw new Exception($"Wrap read mismatch at {i}: {outL[i]} != {2000 + i}");
+        }
+
+        // --- Overflow: the oldest frames are overwritten, the newest window is retained. ---
+        for (int i = 0; i < 1200; i++) { left[i] = 5000 + i; right[i] = 5000 + i; }
+        ring.Write(left, right, 1200);
+        if (ring.AvailableSamples != 1000) throw new Exception($"A full ring must hold exactly its capacity, got {ring.AvailableSamples}");
+        ring.Read(outL, outR, 1000);
+        for (int i = 0; i < 1000; i++)
+        {
+            if (outL[i] != 5000 + 200 + i)
+            {
+                throw new Exception($"Overflow window mismatch at {i}: {outL[i]} != {5000 + 200 + i}");
+            }
+        }
+
+        // --- Underrun → silence: the shortfall is zero-filled, never stale. ---
+        ring.Write(left, right, 10);                      // 10 frames available
+        for (int i = 0; i < 200; i++) outL[i] = 7f;       // sentinel
+        for (int i = 0; i < 200; i++) outR[i] = 7f;
+        ring.Read(outL.AsSpan(0, 200), outR.AsSpan(0, 200), 200);
+        for (int i = 0; i < 10; i++)
+        {
+            if (outL[i] != 5000 + i) throw new Exception($"Underrun prefix mismatch at {i}: {outL[i]}");
+        }
+        for (int i = 10; i < 200; i++)
+        {
+            if (outL[i] != 0f || outR[i] != 0f) throw new Exception($"Underrun shortfall at {i} must be silence, got {outL[i]}/{outR[i]}");
+        }
+        if (ring.AvailableSamples != 0) throw new Exception("An underrun read must consume everything available.");
+
+        // --- ReadUpTo: reads exactly min(available, max) and does NOT zero-fill. ---
+        ring.Write(left, right, 300);
+        for (int i = 0; i < 500; i++) outL[i] = 9f;
+        int read = ring.ReadUpTo(outL.AsSpan(0, 500), outR.AsSpan(0, 500), 500);
+        if (read != 300) throw new Exception($"ReadUpTo should report 300, got {read}");
+        for (int i = 300; i < 500; i++)
+        {
+            if (outL[i] != 9f) throw new Exception($"ReadUpTo must not touch the destination beyond the frames read (index {i}).");
+        }
+        if (ring.AvailableSamples != 0) throw new Exception("ReadUpTo must consume what it reported.");
+
+        // --- Latency cap: past the cap the ring jumps to half the window and keeps the NEWEST frames. ---
+        var capped = new StereoCaptureRing(1000, 100);
+        for (int i = 0; i < 100; i++) { left[i] = i; right[i] = i; }
+        capped.Write(left, right, 100);
+        if (capped.AvailableSamples != 100) throw new Exception($"At the cap the window must be intact, got {capped.AvailableSamples}");
+
+        // The 101st frame trips the cap. Drop arithmetic is `available - cap/2` = 101 - 50 = 51, so the
+        // retained window is ring indices 51..100: the newest 49 written frames plus this new one.
+        left[0] = 1234f;
+        capped.Write(left, right, 1);
+        if (capped.AvailableSamples != 50)
+        {
+            throw new Exception($"Exceeding the cap must drop to half the window (50), got {capped.AvailableSamples}");
+        }
+        capped.Read(outL.AsSpan(0, 50), outR.AsSpan(0, 50), 50);
+        for (int i = 0; i < 49; i++)
+        {
+            if (outL[i] != 51 + i)
+            {
+                throw new Exception($"The cap must retain the NEWEST frames; index {i} was {outL[i]}, expected {51 + i}");
+            }
+        }
+        if (outL[49] != 1234f)
+        {
+            throw new Exception($"The just-written frame must survive the cap drop; index 49 was {outL[49]}, expected 1234");
+        }
+
+        // --- Reset clears everything (used when a capture stream is torn down). ---
+        capped.Write(left, right, 10);
+        capped.Reset();
+        if (capped.AvailableSamples != 0) throw new Exception("Reset must empty the ring.");
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> StereoCaptureRing fill/drain, wrap, overflow, underrun, ReadUpTo and latency cap verified!");
+        Console.ResetColor();
+    }
+
+    /// <summary>
+    /// ADR-0003 Slice 1: the negotiated-state members live on <see cref="IHostAudioSource"/>, so no
+    /// caller needs to downcast to a concrete driver adapter. Exercised through the interface type
+    /// only — if a member were missing, this would not compile.
+    /// </summary>
+    static void TestHostAudioSourceInterface()
+    {
+        Console.WriteLine("\n[Step 0.677] Verifying IHostAudioSource widening (no downcasts) + shared format constants...");
+
+        if (HostAudioFormat.TargetSampleRate != 48_000 || HostAudioFormat.TargetChannels != 2)
+        {
+            throw new Exception($"Shared host-audio vocabulary mismatch: {HostAudioFormat.TargetSampleRate}/{HostAudioFormat.TargetChannels}");
+        }
+
+        // The silent clock: a source with no device behind it.
+        using (IHostAudioSource silent = HostAudioSourceFactory.Create(HostAudioCaptureMode.Mute))
+        {
+            if (silent.IsHardwareActive) throw new Exception("The silent source must not claim hardware.");
+            if (silent.DeviceSampleRate != 48_000 || silent.IsResamplingRequired) throw new Exception("The silent source negotiates nothing.");
+            if (silent.RateNegotiationNote != null || silent.InputLatencyFrames != 0 || silent.LastError != null)
+            {
+                throw new Exception("The silent source must report no note, no latency and no error.");
+            }
+            var planar = new float[2 * 64];
+            silent.FillPlanarAudio(planar, 64);
+        }
+
+        // A real adapter, reached ONLY through the interface (this is the AC5 assertion: no downcast).
+        // Hardware may or may not be present on a headless box, so is-state is asserted, not its value.
+        using (IHostAudioSource system = HostAudioSourceFactory.Create(HostAudioCaptureMode.SystemAudio))
+        {
+            int rate = system.DeviceSampleRate;
+            if (rate <= 0) throw new Exception($"DeviceSampleRate must be positive, got {rate}");
+            if (system.IsResamplingRequired != (rate != HostAudioFormat.TargetSampleRate))
+            {
+                throw new Exception("IsResamplingRequired must agree with the negotiated device rate.");
+            }
+            string summary = $"{system.SampleRate}Hz -> {rate}Hz, resample={system.IsResamplingRequired}, active={system.IsHardwareActive}, err={system.LastError ?? "none"}";
+            Console.WriteLine($" -> SystemAudio source via IHostAudioSource only: {summary}");
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> Interface widening verified (silent + system sources, zero concrete-type downcasts)!");
+        Console.ResetColor();
+    }
+
     private static void WaitForFormat(CaptureSession session, string what)
     {
         int tries = 0;
@@ -3090,6 +3272,14 @@ class Program
         private double _phaseR;
         public int SampleRate => 48000;
         public int Channels => 2;
+
+        // ADR-0003 widened IHostAudioSource; this synthetic source is a native-48k stand-in.
+        public bool IsHardwareActive => true;
+        public int DeviceSampleRate => 48000;
+        public bool IsResamplingRequired => false;
+        public string? RateNegotiationNote => null;
+        public int InputLatencyFrames => 0;
+        public string? LastError => null;
 
         public void FillPlanarAudio(Span<float> planarDestination, int samplesPerChannel)
         {
