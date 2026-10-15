@@ -36,7 +36,7 @@
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto"/> <!-- 0: App Branding -->
                         <ColumnDefinition Width="Auto"/> <!-- 1: Source Label -->
-                        <ColumnDefinition Width="*" MinWidth="160"/> <!-- 2: Source ComboBox (elastic) -->
+                        <ColumnDefinition Width="*" MinWidth="160" MaxWidth="340"/> <!-- 2: Source ComboBox (elastic, capped) -->
                         <ColumnDefinition Width="Auto"/> <!-- 3: Refresh Sources Button -->
                         <ColumnDefinition Width="Auto"/> <!-- 4: Connect / Disconnect Button -->
                         <ColumnDefinition Width="Auto"/> <!-- 5: Divider -->
@@ -53,7 +53,7 @@
 
                     <!-- 1-4: Source Picker & Connection -->
                     <TextBlock Grid.Column="1" Text="Source:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                    <ComboBox x:Name="CmbSources" Grid.Column="2" Margin="0,0,6,0" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                    <ComboBox x:Name="CmbSources" Grid.Column="2" Margin="0,0,6,0" HorizontalAlignment="Stretch" MaxWidth="320" VerticalAlignment="Center"
                               IsEnabled="{CompiledBinding IsSourceSelectorEnabled}"
                               ItemsSource="{CompiledBinding DiscoveredSources}"
                               SelectedItem="{CompiledBinding SelectedSource, Mode=TwoWay}"
@@ -107,11 +107,11 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/> <!-- 0: Broadcast Badge -->
                             <ColumnDefinition Width="Auto"/> <!-- 1: Target Label -->
-                            <ColumnDefinition Width="1.15*" MinWidth="130"/> <!-- 2: Capture Target ComboBox -->
+                            <ColumnDefinition Width="1.15*" MinWidth="130" MaxWidth="320"/> <!-- 2: Capture Target ComboBox -->
                             <ColumnDefinition Width="Auto"/> <!-- 3: Audio Label -->
-                            <ColumnDefinition Width="1.25*" MinWidth="140"/> <!-- 4: Audio Device ComboBox -->
+                            <ColumnDefinition Width="1.25*" MinWidth="140" MaxWidth="340"/> <!-- 4: Audio Device ComboBox -->
                             <ColumnDefinition Width="Auto"/> <!-- 5: Network Label -->
-                            <ColumnDefinition Width="1*" MinWidth="130"/> <!-- 6: Network Adapter ComboBox -->
+                            <ColumnDefinition Width="1*" MinWidth="130" MaxWidth="280"/> <!-- 6: Network Adapter ComboBox -->
                             <ColumnDefinition Width="Auto"/> <!-- 7: Refresh Targets/Devices/Networks Button -->
                             <ColumnDefinition Width="Auto"/> <!-- 8: Broadcast Toggle Button -->
                         </Grid.ColumnDefinitions>
@@ -122,7 +122,7 @@
 
                         <!-- Target (Monitor / Window) -->
                         <TextBlock Grid.Column="1" Text="Target:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                        <ComboBox x:Name="CmbCaptureTarget" Grid.Column="2" Margin="0,0,10,0" MinHeight="30" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                        <ComboBox x:Name="CmbCaptureTarget" Grid.Column="2" Margin="0,0,10,0" MinHeight="30" MaxWidth="300" HorizontalAlignment="Stretch" VerticalAlignment="Center"
                                   IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
                                   ItemsSource="{CompiledBinding CaptureTargets}"
                                   SelectedItem="{CompiledBinding SelectedCaptureTarget, Mode=TwoWay}"
@@ -161,7 +161,7 @@
                                 </ComboBox.ItemTemplate>
                             </ComboBox>
 
-                            <ComboBox x:Name="CmbCaptureAudio" HorizontalAlignment="Stretch" MinHeight="30" VerticalAlignment="Center"
+                            <ComboBox x:Name="CmbCaptureAudio" HorizontalAlignment="Stretch" MaxWidth="320" MinHeight="30" VerticalAlignment="Center"
                                       IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
                                       ItemsSource="{CompiledBinding CaptureAudioOptions}"
                                       SelectedItem="{CompiledBinding SelectedCaptureAudioOption, Mode=TwoWay}"
@@ -178,7 +178,7 @@
 
                         <!-- Network Interface (All Networks, Specific NIC IPv4, or Localhost) -->
                         <TextBlock Grid.Column="5" Text="Network:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                        <ComboBox x:Name="CmbCaptureNetwork" Grid.Column="6" Margin="0,0,6,0" MinHeight="30" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                        <ComboBox x:Name="CmbCaptureNetwork" Grid.Column="6" Margin="0,0,6,0" MinHeight="30" MaxWidth="260" HorizontalAlignment="Stretch" VerticalAlignment="Center"
                                   IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
                                   ItemsSource="{CompiledBinding BroadcastNetworks}"
                                   SelectedItem="{CompiledBinding SelectedBroadcastNetwork, Mode=TwoWay}"
@@ -267,7 +267,7 @@
             <Grid VerticalAlignment="Center">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/> <!-- 0: Container, Encoder, Quality -->
-                    <ColumnDefinition Width="*" MinWidth="180"/> <!-- 1: Save Folder -->
+                    <ColumnDefinition Width="*" MinWidth="180" MaxWidth="460"/> <!-- 1: Save Folder -->
                     <ColumnDefinition Width="Auto"/> <!-- 2: Divider -->
                     <ColumnDefinition Width="Auto"/> <!-- 3: Recording Duration & Stats -->
                     <ColumnDefinition Width="Auto"/> <!-- 4: Record Button -->
@@ -320,7 +320,7 @@
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <TextBox x:Name="TxtOutputDir" Grid.Column="0" MinHeight="30" VerticalContentAlignment="Center"
+                        <TextBox x:Name="TxtOutputDir" Grid.Column="0" MinHeight="30" MaxWidth="420" VerticalContentAlignment="Center"
                                  Text="{CompiledBinding OutputDirectory, Mode=TwoWay}"
                                  IsEnabled="{CompiledBinding IsRecordingConfigEnabled}"
                                  AutomationProperties.Name="Destination Folder Path"

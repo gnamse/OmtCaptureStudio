@@ -1,0 +1,206 @@
+# DESIGN.md — OMT Capture Studio
+
+Reference for building and changing UI in this app. Derived from the shipped
+implementation (`App.axaml`, `StudioPalette.cs`, `MainWindow.axaml`, code-behind
+and ViewModels), not aspirational — anything here that disagrees with the code is
+a bug in this file.
+
+**Surface:** desktop app shell + video monitoring viewport.
+**Mode:** Operate. The user is completing a task (connect to a stream, broadcast,
+record). Scanability, consistency and native expectations outrank expression;
+brand lives in precise details, not decoration.
+**Non-goal:** this is not a marketing surface. Do not add gradients, hero
+imagery, or display type to functional controls.
+
+---
+
+## 1. Platform & hard constraints
+
+- Windows x64, **Avalonia 11** with `FluentTheme`, `RequestedThemeVariant="Dark"`.
+- **Dark-only by design** (broadcast dim-use scene). Do not introduce a light theme.
+- **Native AOT** (`PublishAot=true`): no reflection-driven styling, no dynamic resource lookups at construction time.
+- Window: `Height="800" Width="1240" MinHeight="650" MinWidth="950"`. **950px is the floor** — every layout must still read correctly there.
+
+---
+
+## 2. Colour tokens (single source of truth)
+
+Defined in `App.axaml`. Values are exact — do not approximate or "tidy" them.
+
+| Token | Value | Use |
+|---|---|---|
+| `StudioBg` | `#0F0F12` | Window background, viewport letterbox |
+| `StudioSurface` | `#18181B` | Top bar, recording bar |
+| `StudioSurfaceElevated` | `#27272A` | Raised panels, inactive toggles |
+| `StudioBorder` | `#27272A` | Default 1px borders |
+| `StudioBorderSubtle` | `#3F3F46` | Dividers, the `·` separators |
+| `StudioTextPrimary` | `#F4F4F5` | Live values, headings |
+| `StudioTextSecondary` | `#A1A1AA` | Field labels, secondary status |
+| `StudioTextMuted` | `#80808A` | Version, dormant readouts |
+| `StudioTextOnAccent` | `#FFFFFF` | Text on any accent fill |
+| `StudioAccentSuccess` | `#10B981` | Connect action |
+| `StudioAccentDanger` | `#DC2626` | Record / destructive action |
+| `StudioAccentPrimary` | `#4F46E5` | Test Signal active, host Broadcast active |
+| `StudioHudScrim` | `#CC18181B` | Viewport HUD chips |
+| `StudioModalScrim` | `#CC09090B` | Recording-close overlay |
+| `StudioVuMeterGradient` | 7-stop, see §7 | VU meter bar fill |
+
+> `App.axaml` declares each colour **twice** — once as `<Color x:Key="…Color">` and once
+> as a `<SolidColorBrush x:Key="…">` with the same literal. If you add or change a
+> colour you must update **both** entries or the layers drift.
+
+### 2.1 The two-layer palette rule (critical)
+
+There are exactly **two** sanctioned places colour may live:
+
+1. **Declarative XAML** → the `Studio*` tokens above, consumed with `{DynamicResource …}`.
+2. **Imperative code** (ViewModel / control code-behind) → `StudioPalette.cs` (`MainWindowViewModel` uses `ConnectBrush`, `TestSignalActiveBrush`, `RecordStartBrush`, …).
+
+Both layers mirror the same hex values and cover different lookup contexts.
+
+**`StudioPalette.cs` must stay `static`.** Never resolve brushes via
+`Application.Current.Resources` at construction: the headless automated test suite
+constructs `MainWindowViewModel` and controls from a plain console with **no Avalonia
+`Application`**, and a runtime resource lookup throws there. This is a hard
+constraint, not a preference.
+
+**Banned:** inline hex literals in any `.axaml` other than `App.axaml`;
+`Color.FromRgb` / `Color.Parse` anywhere outside `StudioPalette.cs`. Audit verified
+0 violations — keep it that way.
+
+### 2.2 Contrast floor (measured)
+
+| Pair | Ratio | Result |
+|---|---|---|
+| `StudioTextOnAccent` on `StudioAccentPrimary` | **6.3:1** | AA text — pass |
+| `StudioAccentPrimary` on `StudioBg` | **3.05:1** | Passes the 3:1 non-text floor — **only marginally** |
+| `StudioTextMuted` on `StudioBg` | **4.90:1** | AA text — pass |
+
+`StudioAccentPrimary` sits right at the edge for non-text use. If it is ever
+lightened, it falls below the 3:1 floor — recheck rather than eyeballing.
+
+---
+
+## 3. Spacing, radius, density
+
+4px base scale — use the tokens, not raw numbers.
+
+- **Spacing:** `SpaceXs` 4, `SpaceSm` 8, `SpaceMd` 12, `SpaceLg` 16, `SpaceXl` 24, `Space2xl` 32.
+- **Bar padding:** `BarPadding` `16,8` for the top and recording bars; `StatusBarPadding` `16,0` for the status bar.
+- **Radius:** `RadiusSm` 4 (chips, tags, brand badge), `RadiusMd` 8 (modals), `RadiusLg` 12.
+- **Control height:** every toolbar control carries `MinHeight="30"`. Do not introduce a second height.
+- Keep this dense. Broadcast operators read this at a glance across many hours; adding vertical air is a regression, not an improvement.
+
+---
+
+## 4. Typography
+
+Two families only. No display fonts, no new weights beyond these roles.
+
+- **UI / labels:** system sans. Field labels are `FontSize="12" FontWeight="SemiBold"` in `StudioTextSecondary` (e.g. `Source:`, `Target:`, `Audio:`, `Network:`). Section labels (`CONTAINER`, `ENCODER`, `QUALITY`, `SAVE FOLDER`) are `FontSize="10" FontWeight="Bold"` in `StudioTextSecondary`.
+- **Numeric / telemetry:** `Consolas, monospace` — recording duration (`FontSize="15"`, bold), video specs (`FontSize="11"`), bitrate and drop counters. This makes live numbers scan as data, not prose.
+- **Status / telemetry readouts:** `FontSize="11"` in `StudioTextSecondary`.
+- **Empty-state:** `NO SIGNAL` is `FontSize="28" FontWeight="Black"` in `StudioTextMuted`, with a `FontSize="12"` instruction beneath it in `StudioTextSecondary`.
+
+---
+
+## 5. Layout rules
+
+### 5.1 Cap every elastic control — and its column
+
+This is the rule most easily broken and the one that made the header look
+unprofessional when maximized. Star/proportional columns with
+`HorizontalAlignment="Stretch"` and **no upper bound** absorb all leftover width:
+at ~2560px the Source combobox stretched to roughly 1800px and Save Folder to
+roughly 2200px, with the value stranded at the left edge.
+
+**Cap the `ColumnDefinition` itself with `MaxWidth`** — capping only the control
+is not enough, because the star column keeps growing and the capped control then
+leaves dead space *inside* its column (measured: a 922px hole in the bottom bar).
+
+Current caps (do not remove; raise only with a reason):
+
+| Column | MaxWidth |
+|---|---|
+| Row 0 — Source | 340 |
+| Row 1 — Target | 320 |
+| Row 1 — Audio | 340 |
+| Row 1 — Network | 280 |
+| Recording bar — Save Folder | 460 |
+
+Surplus space then falls at the **right edge** of the bar instead of inside or
+between fields (measured maximized: Source row 53% right margin, broadcast row
+29%). The recording bar's remaining gap is intentional — left settings, right
+record actions.
+
+> Controls may also carry their own `MaxWidth`; both are fine, but the column cap
+> is what actually prevents the balloon.
+
+### 5.2 Header structure
+
+The top bar is a **two-row responsive grid** inside one `Border`:
+
+- **Row 0** — brand, `Source:` picker, refresh, Connect/Disconnect, divider, Test Signal.
+- **Row 1** — broadcast row: `Target:`, `Audio:`, `Network:`, refresh, Broadcast toggle.
+- Rows below: viewport + VU meter (star), recording config bar, status bar.
+
+Do not collapse these back into one row; that is what caused the original crowding
+at 950px. Preserve every `Grid.Column` assignment when editing — add to the row, do
+not restructure it.
+
+### 5.3 The VU meter is a fixed column
+
+`Grid.Column="1" Width="130"` beside the viewport. It must not stretch with the
+window; its scale is calibrated.
+
+---
+
+## 6. Components
+
+- **ComboBox** — used for every selection (sources, targets, audio devices, network, container/encoder/quality). Item templates are a single `TextBlock` bound to `DisplayName` with `TextTrimming="CharacterEllipsis"`.
+- **ToggleButton** — only for state that is *live*: Test Signal and Broadcast. Background binds a `StudioPalette` brush; they are never plain buttons.
+- **Button** — actions (Connect, Record, Refresh, Browse). Command-bound, never click-handlers.
+- **Icon set** — drawn `StreamGeometry` in `App.axaml` (`IconRefresh`, `IconFolder`, `IconWarning`), rendered as `Path` at 14–15px with `StrokeThickness="1.8"`, `Stretch="Uniform"`. Add new icons the same way — no image files, no emoji, no font icons.
+
+---
+
+## 7. Feedback & state (Operate-mode essentials)
+
+- **Status bar** is the primary channel for what just happened and why.
+- **Live regions are mandatory.** `AutomationProperties.LiveSetting="Assertive"` on status / LIVE / record-stats text; `"Polite"` on high-frequency telemetry (bitrate, dropped frames, audio). Screen readers announce nothing without this.
+- **Lock what cannot change mid-flight.** Target, Audio and Network selectors are disabled while a broadcast is live; Source is disabled while connected. All of them require restarting the sender, so allowing edits mid-stream would silently drop receivers. Reuse the existing enabled-flag pattern rather than inventing a new one.
+- **VU meter** uses `StudioVuMeterGradient` (`#10B981` → `#22C55E` → `#84CC16` → `#EAB308` → `#F59E0B` → `#EF4444` → `#DC2626`), calibrated −60 dBFS to 0 dBFS. Do not restyle it freely; it communicates level by colour.
+- **Modals must trap focus.** The recording-close overlay cycles Tab/Shift+Tab between its two buttons so focus cannot reach the controls behind it.
+
+---
+
+## 8. Accessibility baseline
+
+Non-negotiable for every interactive control:
+
+1. `AutomationProperties.Name` — all 20 current controls have one. Keep it at 100%.
+2. `ToolTip.Tip` — every control also carries one.
+3. Keyboard reachability. Touch-target sizing (44pt) is a *mobile* rule and does not apply here.
+4. New modals: focus trap + an initial focus target + `Name`/`HelpText` on the overlay.
+5. New status text: choose `Assertive` vs `Polite` deliberately.
+
+---
+
+## 9. Pitfalls (learned the hard way)
+
+- **Never let `AsioHostAudioSource`'s category drive layout.** Pro-audio complexity must not leak into the shell.
+- **Do not structure the header by pixel-polishing at one width.** Verify at both `MinWidth` 950 and maximized.
+- **Nothing may probe hardware in a ViewModel constructor.** The headless suite constructs ViewModels; ASIO driver probing is lazy and guarded for exactly this reason.
+- **Static brushes only** in ViewModels (see §2.1).
+
+---
+
+## 10. Checklist before calling UI work done
+
+- [ ] No new hex literals outside `App.axaml`; no `Color.FromRgb` outside `StudioPalette.cs`
+- [ ] Every new interactive control has `AutomationProperties.Name` **and** a tooltip
+- [ ] New status text has a deliberate `LiveSetting`
+- [ ] Every new elastic control has a `MaxWidth`
+- [ ] Verified at `MinWidth="950"` **and** maximized, not just the default 1240px
+- [ ] `MinHeight="30"` on any new toolbar control
+- [ ] Headless test suite still passes (ViewModel constructs with no Avalonia `Application`)
