@@ -1,7 +1,10 @@
 # ADR-0005: One deep RecordingArm module for the arm/disarm sequence
 
-- **Status:** **Accepted (design) — implemented in two slices.** Slice 1 (storage policy extraction) is
-  complete; Slice 2 (RecordingArm) is pending a ruling on the low-disk behavior change recorded below.
+- **Status:** **Accepted — IMPLEMENTED (both slices complete).**
+  - **Slice 1 (complete):** `RecordingStorageGuard` extracted; storage policy is a pure module.
+  - **Slice 2 (complete):** `RecordingArm` owns the gate, the A/V clock, the arm sequence and the single
+    finalize path. The low-disk and sink-error silent-stop defects are fixed — both now publish a
+    `RecordingStopSummary` with a `Reason`. Ruled and confirmed by Odogwu before the code was written.
 - **Deciders:** Odogwu (orchestration) on behalf of the project owner
 - **Scope:** `Services/RecordingArm.cs` (new), `Services/RecordingStorageGuard.cs` (new),
   `Services/CaptureSession.cs`, `Services/StreamRecorderService.cs`, `Models/RecordingHealth.cs`
@@ -95,10 +98,30 @@ carries no behavior change at all. Covered by headless policy tests (FAT32 case-
 exFAT exemption, 4× headroom plus the 2 GB floor, the undetermined-volume proceed, low-water with the
 FAT exemption, estimate scaling by quality/pixels/fps/ProRes and the zero-fps fallback, formatting).
 
-## Slice 2 (pending)
+## Slice 2 (complete)
 
-Introduce `RecordingArm`, make it the single gate and the single finalize path, move the A/V clock
-into it, route `CaptureSession`'s three triggers through `Disarm(reason)`, and convert
-`StreamRecorderService` to a facade. Acceptance: `grep` shows no `Task.Run` finalize and exactly one
-`FinalizeSink` call site outside the arm; the ADR-0002 watchdog tests and the DEF-01/health tests stay
-green; the real `--real-sender-soak` passes on the final tree.
+`RecordingArm` is the single gate, the arm sequence and the single finalize path; `StreamRecorderService`
+is a compatibility facade (127 lines, down from 556); `CaptureSession` keeps only source telemetry.
+The A/V clock moved into the arm, so the arm order is enforced rather than conventional.
+
+**Rulings (Odogwu) that shaped this slice:**
+1. Low-disk stops **do** emit `RecordingStopped`/summary — the silent stop was a defect, not a design.
+2. `RecordingStopReason` added to `Models/RecordingHealth.cs` (fence-crossing, authorised).
+3. `OnSinkError` routes through `Disarm(SinkError)`, **exception-tolerant and best-effort**: a failed
+   finalize is reported as its own diagnostic but must never mask the original sink error or throw out
+   of the sink-error path. Verified headlessly with a deliberately failing sink.
+
+**Two corrections found by the tests, worth recording:**
+- The bounded drain was first written as "50 iterations of `Thread.Sleep(1)`". That is **not** 50 ms on
+  Windows — a 1 ms sleep is quantised to the ~15 ms timer tick, so the real bound was up to ~750 ms.
+  It is now measured with a `Stopwatch` (measured: exactly 50 ms against the 50 ms cap).
+- `Arm` assigns the gate three times, not two: open, close in `Disarm`, and close again in the arm's
+  failure rollback, because a `RecordingStarted` subscriber throwing must not leave the gate open.
+
+**Evidence.** Build 0w/0e. Full suite `ALL TESTS PASSED` standalone, including the new
+`[Step 0.681]` (storage policy) and `[Step 0.682]` (arm order / single finalize / bounded drain /
+trigger convergence / best-effort sink failure / finalize locality). The real `--real-sender-soak`
+passed on the final tree: segment-1 boundary finalize (media 5.912 s vs wall 11.057 s — DEF-01
+holding), `_part02` resume after a mid-take sender kill, 30 s grace expiry clean, both segments
+decode-clean. Locality is asserted in the suite itself: **1** `FinalizeSink` call site (in the arm),
+**0** in the facade/session, **1** thread hop, and the gate assigned in no other class.

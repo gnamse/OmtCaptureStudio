@@ -1,269 +1,78 @@
-using System.Diagnostics;
-using System.IO;
+using System;
+using System.Threading.Tasks;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services.Sinks;
 
 namespace OmtCaptureStudio.Services;
 
 /// <summary>
-/// Orchestrates file recording sessions, tracks timing, frame counts, and file paths,
-/// while delegating transport mechanics to an IRecordingSink seam.
+/// Compatibility facade over <see cref="RecordingArm"/> (ADR-0005).
+///
+/// <para>This type used to own recording orchestration: the volatile gate, sink lifecycle, segment
+/// bookkeeping, the stop summary, the A/V clock ordering convention AND the disk policy — all in one
+/// 556-line class, with three different threads able to finalize it. All of that now lives in
+/// <see cref="RecordingArm"/> (sequence + gate + finalize) and <see cref="RecordingStorageGuard"/>
+/// (storage policy). What remains here is the public surface existing callers were written against,
+/// forwarded verbatim.</para>
+///
+/// <para>Deliberately NOT a place to add recording logic: if you are tempted to put a decision in
+/// this file, it belongs in the arm.</para>
 /// </summary>
 public class StreamRecorderService : IDisposable
 {
-    // Disk-storage policy (preflight thresholds, file-system guard, low-water mark, session-size
-    // estimation) lives in RecordingStorageGuard — this service orchestrates recordings, it does not
-    // decide storage policy (ADR-0005).
-    private readonly IRecordingSink _sink;
-    private readonly bool _ownsSink;
-    // volatile: read on the media/source threads (WriteVideoFrame/WriteAudioData, IsRecording,
-    // ElapsedTime) while written under _recordLock on the stop edge — a stale read could let a
-    // source thread call into the sink during FinalizeSink teardown.
-    private volatile bool _isRecording;
-    private string? _currentRecordingPath;
-    private long _recordStartTimestamp;
-    private long _framesWritten;
-    private long _audioBytesWritten;
-    private readonly object _recordLock = new();
-    private DateTime _lastDiskCheckUtc = DateTime.MinValue;
-    private bool _disposed;
+    private readonly RecordingArm _arm;
 
-    // Multi-segment take state (ADR-0002): segment 1 is the take's timestamped base file; a resume
-    // after an input-loss outage appends the next …_partNN segment under the same base name.
-    private string? _takeBasePath;
-    private int _segmentIndex;
-
-    // Stamped format of the active segment — the basis for MEDIA duration (frames / stamped fps) and
-    // audio duration (PCM bytes / bytes-per-sample-frame). Never wall clock: that includes dead air.
-    private double _recordFrameRate;
-    private int _recordSampleRate;
-    private int _recordChannels;
-
-    public bool IsRecording => _isRecording;
-    public string? CurrentRecordingPath => _currentRecordingPath;
-
-    /// <summary>1-based index of the active take's current (or most recent) segment.</summary>
-    public int CurrentSegmentIndex => _segmentIndex;
-
-    /// <summary>Segment-1 base file path of the active take, or null when no take has started.</summary>
-    public string? CurrentTakeBasePath => _takeBasePath;
-    public TimeSpan ElapsedTime => _isRecording ? Stopwatch.GetElapsedTime(_recordStartTimestamp) : TimeSpan.Zero;
-    public long FramesWritten => _framesWritten;
-    public long AudioBytesWritten => _audioBytesWritten;
-    /// <summary>Frames the recording transport discarded (drop-oldest) since recording started.</summary>
-    public long VideoFramesDropped => _sink.VideoFramesDropped;
-    /// <summary>Audio chunks the recording transport discarded since recording started.</summary>
-    public long AudioChunksDropped => _sink.AudioChunksDropped;
-
-    /// <summary>Encoder actually used this session (AutoHardware resolved), or empty when idle.</summary>
-    public string ResolvedEncoderName => _sink.ResolvedEncoderName;
-
-    /// <summary>Capped FFmpeg stderr tail, for the in-app diagnostics drawer.</summary>
-    public string DiagnosticTail => _sink.DiagnosticTail;
-
-    /// <summary>
-    /// Video track duration so far: frames written / stamped frame rate. Contains no dead air, which
-    /// is exactly why it is the figure reported on stop (DEF-01).
-    /// </summary>
-    public TimeSpan MediaDuration => _recordFrameRate > 0
-        ? TimeSpan.FromSeconds(Interlocked.Read(ref _framesWritten) / _recordFrameRate)
-        : TimeSpan.Zero;
-
-    /// <summary>Audio track duration so far, derived from interleaved 32-bit float PCM bytes.</summary>
-    public TimeSpan AudioDuration => _recordSampleRate > 0 && _recordChannels > 0
-        ? TimeSpan.FromSeconds(Interlocked.Read(ref _audioBytesWritten) / (double)(_recordSampleRate * _recordChannels * 4))
-        : TimeSpan.Zero;
-
-    /// <summary>
-    /// Achieved output bitrate: the on-disk file size over media duration. MP4/MOV are written
-    /// fragmented (moof/mdat incrementally), so the live file size is a usable estimate mid-take.
-    /// </summary>
-    public double AchievedBitrateMbps
-    {
-        get
-        {
-            string? path = _currentRecordingPath;
-            TimeSpan media = MediaDuration;
-            if (path == null || media.TotalSeconds <= 0) return 0;
-            try
-            {
-                var info = new FileInfo(path);
-                return info.Exists ? info.Length * 8.0 / 1_000_000.0 / media.TotalSeconds : 0;
-            }
-            catch
-            {
-                return 0;
-            }
-        }
-    }
-
-    public event Action<string>? RecordingStarted;
-
-    /// <summary>
-    /// Raised once per segment/take stop with the full <see cref="RecordingStopSummary"/>.
-    /// <see cref="RecordingStopSummary.MediaDuration"/> is the media duration (DEF-01) — NOT wall
-    /// clock, which rides along separately as <see cref="RecordingStopSummary.WallClockDuration"/>.
-    /// </summary>
-    public event Action<RecordingStopSummary>? RecordingStopped;
-    public event Action<string>? RecordingError;
-
-    /// <summary>
-    /// Default constructor utilizing production FFmpeg named pipe sink.
-    /// </summary>
+    /// <summary>Default constructor utilizing the production FFmpeg named pipe sink.</summary>
     public StreamRecorderService()
         : this(new FfmpegPipeSink(), ownsSink: true)
     {
     }
 
-    /// <summary>
-    /// Constructor supporting dependency injection of custom or test recording sinks.
-    /// </summary>
+    /// <summary>Constructor supporting dependency injection of custom or test recording sinks.</summary>
     public StreamRecorderService(IRecordingSink sink, bool ownsSink = false)
     {
-        _sink = sink ?? throw new ArgumentNullException(nameof(sink));
-        _ownsSink = ownsSink;
-        _sink.SinkError += OnSinkError;
+        _arm = new RecordingArm(sink, ownsSink);
+
+        _arm.RecordingStarted += path => RecordingStarted?.Invoke(path);
+        _arm.RecordingStopped += summary => RecordingStopped?.Invoke(summary);
+        _arm.RecordingError += err => RecordingError?.Invoke(err);
     }
 
-    private void OnSinkError(string error)
-    {
-        lock (_recordLock)
-        {
-            if (!_isRecording) return;
-            _isRecording = false;
-        }
-        RecordingError?.Invoke(error);
-    }
+    public bool IsRecording => _arm.IsRecording;
+    public string? CurrentRecordingPath => _arm.CurrentRecordingPath;
+    public int CurrentSegmentIndex => _arm.CurrentSegmentIndex;
+    public string? CurrentTakeBasePath => _arm.CurrentTakeBasePath;
+    public TimeSpan ElapsedTime => _arm.ElapsedTime;
+    public long FramesWritten => _arm.FramesWritten;
+    public long AudioBytesWritten => _arm.AudioBytesWritten;
+    public long VideoFramesDropped => _arm.VideoFramesDropped;
+    public long AudioChunksDropped => _arm.AudioChunksDropped;
+    public string ResolvedEncoderName => _arm.ResolvedEncoderName;
+    public string DiagnosticTail => _arm.DiagnosticTail;
+    public TimeSpan MediaDuration => _arm.MediaDuration;
+    public TimeSpan AudioDuration => _arm.AudioDuration;
+    public double AchievedBitrateMbps => _arm.AchievedBitrateMbps;
 
-    /// <summary>
-    /// Starts recording the incoming OMT stream using the specified StreamFormat.
-    /// </summary>
-    public bool StartRecording(RecordingConfig config, StreamFormat format)
-    {
-        lock (_recordLock)
-        {
-            if (_disposed || _isRecording) return false;
+    /// <summary>Live A/V drift ratio, projected into the recording-health readout (FEAT-07).</summary>
+    public double AvDriftRatio => _arm.AvDriftRatio;
 
-            // A caller-initiated start begins a new take: segment 1, fresh timestamped base name.
-            _takeBasePath = null;
-            _segmentIndex = 0;
-            return StartSegmentLocked(config, format, isNewTake: true);
-        }
-    }
+    /// <summary>True when the drift ratio is pinned against its 0.9/1.1 safety clamp.</summary>
+    public bool AvDriftClamped => _arm.AvDriftClamped;
 
-    /// <summary>
-    /// Resumes the active take after an input-loss outage into the next sequential segment
-    /// (…_partNN), reusing the take's original base name and timestamp so all segments of one take
-    /// sort together and the outage boundary is explicit on disk (ADR-0002 decision 3). Falls back to
-    /// starting a fresh take when no base name is known yet.
-    /// </summary>
-    public bool StartNextSegment(RecordingConfig config, StreamFormat format)
-    {
-        lock (_recordLock)
-        {
-            if (_disposed || _isRecording) return false;
-            return StartSegmentLocked(config, format, isNewTake: _takeBasePath == null);
-        }
-    }
+    public event Action<string>? RecordingStarted;
+    public event Action<RecordingStopSummary>? RecordingStopped;
+    public event Action<string>? RecordingError;
 
-    private bool StartSegmentLocked(RecordingConfig config, StreamFormat format, bool isNewTake)
-    {
-        try
-        {
-            if (config == null || string.IsNullOrWhiteSpace(config.OutputDirectory))
-            {
-                RecordingError?.Invoke("Cannot record: Output destination directory is not specified.");
-                return false;
-            }
+    /// <summary>Arms a new take (segment 1) and flips the gate.</summary>
+    public bool StartRecording(RecordingConfig config, StreamFormat format) => _arm.Arm(config, format);
 
-            if (format.Width <= 0 || format.Height <= 0)
-            {
-                RecordingError?.Invoke("Cannot record: Invalid video dimensions.");
-                return false;
-            }
-
-            if (!Directory.Exists(config.OutputDirectory))
-            {
-                Directory.CreateDirectory(config.OutputDirectory);
-            }
-
-            string ext = config.ContainerFormat switch
-            {
-                OutputContainerFormat.MKV => ".mkv",
-                OutputContainerFormat.MOV => ".mov",
-                _ => ".mp4"
-            };
-
-            // Segment 1 uses the take's timestamped base name; later segments suffix the same stem
-            // with _partNN so a post-outage gap is a named discontinuity, never an invisible stitch.
-            bool startNewTake = isNewTake || _takeBasePath == null;
-            string takeBasePath = startNewTake
-                ? Path.Combine(config.OutputDirectory, $"{config.FilenamePrefix}_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}{ext}")
-                : _takeBasePath!;
-            int segmentIndex = startNewTake ? 1 : _segmentIndex + 1;
-
-            _currentRecordingPath = RecordingSegments.SegmentFilePath(takeBasePath, segmentIndex);
-
-            // Preflight: refuse to start a doomed recording before any bytes are written. The policy
-            // itself lives in RecordingStorageGuard, so it is testable without a real volume.
-            StoragePreflightResult preflight = RecordingStorageGuard.Preflight(_currentRecordingPath, config, format);
-            if (preflight.IsRefusal)
-            {
-                RecordingError?.Invoke(preflight.Message ?? "Cannot record: storage preflight refused the destination.");
-                _currentRecordingPath = null;
-                return false;
-            }
-
-            if (preflight.Outcome == StoragePreflightOutcome.Undetermined)
-            {
-                // Drive status could not be determined (e.g. a mapped/UNC path offline).
-                // Surfacing a clear warning is safer than faking a PASS or FAIL — proceed,
-                // the periodic guard will still protect the session once storage is reachable.
-                AppLogger.LogError($"Disk preflight could not determine free space for {_currentRecordingPath}; proceeding without preflight check.");
-            }
-
-            bool initialized = _sink.Initialize(config, format, _currentRecordingPath);
-            if (!initialized)
-            {
-                AppLogger.LogError("Failed to initialize recording sink.");
-                RecordingError?.Invoke("Failed to initialize recording sink.");
-                return false;
-            }
-
-            // Commit the segment bookkeeping only once the sink is live (a failed start must not
-            // advance the segment sequence).
-            _takeBasePath = takeBasePath;
-            _segmentIndex = segmentIndex;
-            _recordFrameRate = format.FrameRate;
-            _recordSampleRate = format.SampleRate;
-            _recordChannels = format.Channels;
-
-            _recordStartTimestamp = Stopwatch.GetTimestamp();
-            _framesWritten = 0;
-            _audioBytesWritten = 0;
-            _isRecording = true;
-
-            AppLogger.LogInfo($"Recording started internally (segment {segmentIndex}): {_currentRecordingPath}");
-            RecordingStarted?.Invoke(_currentRecordingPath);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            AppLogger.LogError($"Failed to start recording: {ex.Message}", ex);
-            RecordingError?.Invoke($"Failed to start recording: {ex.Message}");
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Overload for backwards compatibility with raw scalar stream parameters.
-    /// </summary>
+    /// <summary>Overload for backwards compatibility with raw scalar stream parameters.</summary>
     public bool StartRecording(
-        RecordingConfig config, 
-        int width, 
-        int height, 
-        double frameRate, 
-        int sampleRate, 
+        RecordingConfig config,
+        int width,
+        int height,
+        double frameRate,
+        int sampleRate,
         int channels)
     {
         var format = new StreamFormat
@@ -278,187 +87,42 @@ public class StreamRecorderService : IDisposable
         return StartRecording(config, format);
     }
 
-    /// <summary>
-    /// Periodic low-disk guard. Call from the UI tick loop; if free space on the
-    /// output volume has crossed the hard low-water mark, gracefully stops and
-    /// finalizes the recording (so the partial file is playable) and surfaces an error.
-    /// Thread-safe and cheap (one DriveInfo query every <see cref="DiskCheckInterval"/>).
-    /// </summary>
-    public void CheckDiskSpaceAndProtect()
-    {
-        lock (_recordLock)
-        {
-            if (!_isRecording || _currentRecordingPath == null) return;
+    /// <summary>Resumes the active take into the next …_partNN segment (ADR-0002).</summary>
+    public bool StartNextSegment(RecordingConfig config, StreamFormat format) => _arm.ArmNextSegment(config, format);
 
-            var now = DateTime.UtcNow;
-            if (now - _lastDiskCheckUtc < RecordingStorageGuard.CheckInterval) return;
-            _lastDiskCheckUtc = now;
+    /// <summary>Stops and finalizes through the arm's single finalize path.</summary>
+    public void StopRecording() => _arm.Disarm(RecordingStopReason.Manual, out _);
 
-            if (!RecordingStorageGuard.TryGetFreeSpace(_currentRecordingPath, out _, out string driveFormat, out long freeBytes))
-            {
-                return; // storage temporarily unreachable; retry on next interval
-            }
+    /// <summary>Stops and finalizes, reporting WHY (ADR-0005).</summary>
+    public void StopRecording(RecordingStopReason reason) => _arm.Disarm(reason, out _);
 
-            // Don't penalize already-low volumes (FAT32/exFAT can legitimately show little free).
-            if (!RecordingStorageGuard.IsLowOnSpace(driveFormat, freeBytes)) return;
+    /// <summary>Stops without blocking the calling thread on transport teardown.</summary>
+    public Task StopRecordingAsync() => _arm.DisarmAsync(RecordingStopReason.Manual);
 
-            _isRecording = false;
-            string path = _currentRecordingPath ?? string.Empty;
-            string message = RecordingStorageGuard.LowDiskMessage(freeBytes, path);
-            AppLogger.LogError(message);
+    /// <summary>Periodic low-disk protection sweep. Cheap; call from a UI tick loop while recording.</summary>
+    public void CheckDiskSpaceAndProtect() => _arm.CheckLowDisk();
 
-            // Finalize off the calling (UI) thread and never block it on FFmpeg teardown.
-            // RecordingError is marshaled to the UI thread by the VM's own handler.
-            // ADR-0005: this is the LAST finalize still living outside RecordingArm. Slice 2 routes it
-            // through the arm's single finalize path, which also raises RecordingStopped/summary.
-            Task.Run(() =>
-            {
-                try
-                {
-                    _sink.FinalizeSink(out long fileSize);
-                    RecordingError?.Invoke($"{message} Finalized {RecordingStorageGuard.FormatBytes(fileSize)}.");
-                }
-                catch (Exception ex)
-                {
-                    AppLogger.LogError($"Error finalizing recording on low disk: {ex.Message}", ex);
-                    RecordingError?.Invoke($"{message} Finalization failed: {ex.Message}");
-                }
-            });
-        }
-    }
+    public void WriteVideoFrame(IntPtr pData, int dataLength) => _arm.WriteVideoFrame(pData, dataLength);
 
-    /// <summary>
-    /// Backwards-compatible forwarder; the estimation policy itself lives in
-    /// <see cref="RecordingStorageGuard"/>.
-    /// </summary>
-    internal static long EstimateSessionSize(RecordingConfig config, StreamFormat format)
-        => RecordingStorageGuard.EstimateSessionSize(config, format);
-
-    /// <summary>
-    /// Writes a decoded BGRA video frame to the recording sink.
-    /// </summary>
-    public void WriteVideoFrame(IntPtr pData, int dataLength)
-    {
-        if (_disposed || !_isRecording || pData == IntPtr.Zero || dataLength <= 0) return;
-
-        _sink.WriteVideo(pData, dataLength);
-        Interlocked.Increment(ref _framesWritten);
-    }
-
-    /// <summary>
-    /// Writes interleaved 32-bit float audio bytes to the recording sink.
-    /// </summary>
     public void WriteAudioData(byte[] interleavedBytes)
     {
         if (interleavedBytes != null)
         {
-            WriteAudioData(interleavedBytes, 0, interleavedBytes.Length);
+            _arm.WriteAudioData(interleavedBytes, 0, interleavedBytes.Length);
         }
     }
 
-    /// <summary>
-    /// Writes interleaved 32-bit float audio bytes with offset and count to the recording sink.
-    /// </summary>
-    public void WriteAudioData(byte[] buffer, int offset, int count)
-    {
-        if (_disposed || !_isRecording || buffer == null || count <= 0) return;
+    public void WriteAudioData(byte[] buffer, int offset, int count) => _arm.WriteAudioData(buffer, offset, count);
 
-        _sink.WriteAudio(buffer, offset, count);
-        Interlocked.Add(ref _audioBytesWritten, count);
-    }
+    /// <summary>Ticks the A/V recording clock for one written video frame.</summary>
+    public void OnRecordingVideoFrame() => _arm.OnVideoFrame();
 
-    /// <summary>
-    /// Stops recording gracefully, finalizing the output container.
-    /// </summary>
-    public void StopRecording()
-    {
-        lock (_recordLock)
-        {
-            if (!_isRecording) return;
-            _isRecording = false;
+    /// <summary>Applies the recording clock to an audio block and writes the converted bytes.</summary>
+    public void ProcessAndWriteAudio(byte[] buffer, int count) => _arm.ProcessAndWriteAudio(buffer, count);
 
-            string path = _currentRecordingPath ?? string.Empty;
+    /// <summary>Backwards-compatible forwarder; the estimation policy lives in <see cref="RecordingStorageGuard"/>.</summary>
+    internal static long EstimateSessionSize(RecordingConfig config, StreamFormat format)
+        => RecordingStorageGuard.EstimateSessionSize(config, format);
 
-            // DEF-01: report MEDIA duration, not wall clock. A watchdog-forced stop happens after up
-            // to `InputLossThresholdSeconds` of dead air, and counting that made the reported duration
-            // disagree with the container (QA measured 11.05s reported vs 5.92s on disk). Media
-            // duration is frames / stamped fps, so an outage cannot inflate it. Wall clock is still
-            // useful for forensics, so it rides along separately and clearly labelled.
-            TimeSpan mediaDuration = MediaDuration;
-            TimeSpan audioDuration = AudioDuration;
-            TimeSpan wallClock = Stopwatch.GetElapsedTime(_recordStartTimestamp);
-
-            // Capture the encoder + diagnostics BEFORE finalizing: FinalizeSink tears the transport
-            // down, so afterwards those reads come back empty.
-            string encoderName = _sink.ResolvedEncoderName;
-            string diagnosticTail = _sink.DiagnosticTail;
-
-            var finalizeWatch = Stopwatch.StartNew();
-
-            try
-            {
-                _sink.FinalizeSink(out long fileSize);
-                finalizeWatch.Stop();
-
-                if (mediaDuration <= TimeSpan.Zero)
-                {
-                    // No frames cleared the transport (or an unknown frame rate): fall back to wall
-                    // clock rather than reporting a bogus zero.
-                    mediaDuration = wallClock;
-                }
-
-                var summary = new RecordingStopSummary(
-                    Path: path,
-                    MediaDuration: mediaDuration,
-                    WallClockDuration: wallClock,
-                    AudioDuration: audioDuration,
-                    FinalizeDuration: finalizeWatch.Elapsed,
-                    FileSizeBytes: fileSize,
-                    VideoFramesWritten: Interlocked.Read(ref _framesWritten),
-                    VideoFramesDropped: _sink.VideoFramesDropped,
-                    AudioChunksDropped: _sink.AudioChunksDropped,
-                    SegmentIndex: _segmentIndex,
-                    EncoderName: encoderName,
-                    DiagnosticTail: diagnosticTail);
-
-                AppLogger.LogInfo(
-                    $"Recording finalized internally: {path}, {fileSize} bytes, media {summary.MediaDuration.TotalSeconds:F2}s, " +
-                    RecordingHealth.WallClockNote(summary));
-
-                RecordingStopped?.Invoke(summary);
-            }
-            catch (Exception ex)
-            {
-                AppLogger.LogError($"Error finalizing recording: {ex.Message}", ex);
-                RecordingError?.Invoke($"Error finalizing recording: {ex.Message}");
-            }
-        }
-    }
-
-    /// <summary>
-    /// Stops recording asynchronously without blocking the calling thread.
-    /// </summary>
-    public Task StopRecordingAsync()
-    {
-        return Task.Run(() => StopRecording());
-    }
-
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-
-        StopRecording();
-        _sink.SinkError -= OnSinkError;
-
-        RecordingStarted = null;
-        RecordingStopped = null;
-        RecordingError = null;
-
-        if (_ownsSink)
-        {
-            _sink.Dispose();
-        }
-        GC.SuppressFinalize(this);
-    }
+    public void Dispose() => _arm.Dispose();
 }

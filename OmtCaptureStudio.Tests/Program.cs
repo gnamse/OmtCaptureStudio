@@ -164,6 +164,7 @@ class Program
         TestFixedRatioStereoResampler();
         TestConversionPlacement();
         TestRecordingStorageGuard();
+        TestRecordingArm();
 
         Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
         using (var vmSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(new NullRecordingSink())))
@@ -2245,6 +2246,281 @@ class Program
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> Storage guard verified (FAT32, headroom, low-water, estimate scaling, formatting)!");
+        Console.ResetColor();
+    }
+
+    /// <summary>
+    /// A sink that records the ORDER of arm/disarm operations and lets the test observe the arm's gate
+    /// from inside the sink callbacks — which is exactly how the sequencing becomes observable at all.
+    /// </summary>
+    private sealed class SignalRecordingSink : OmtCaptureStudio.Services.Sinks.IRecordingSink
+    {
+        public readonly List<string> Steps = new();
+        public Action<string>? OnStep;
+        public System.Threading.ManualResetEventSlim? BlockVideoWrite;
+        public bool ThrowOnFinalize;
+
+        private long _video, _audio;
+
+        public long VideoFramesReceived => _video;
+        public long AudioBytesReceived => _audio;
+        public long VideoFramesDropped => 0;
+        public long AudioChunksDropped => 0;
+        public string ResolvedEncoderName => "SignalSink";
+        public string DiagnosticTail => "diag-tail";
+
+        public event Action<string>? SinkError;
+        public void RaiseSinkError(string msg) => SinkError?.Invoke(msg);
+
+        private void Step(string name) { Steps.Add(name); OnStep?.Invoke(name); }
+
+        public bool Initialize(RecordingConfig config, StreamFormat format, string outputPath)
+        {
+            Step("init");
+            return true;
+        }
+
+        public void WriteVideo(IntPtr pData, int dataLength)
+        {
+            Step("video");
+            _video++;
+            BlockVideoWrite?.Wait(2000);
+        }
+
+        public void WriteAudio(byte[] buffer, int offset, int count)
+        {
+            Step("audio");
+            _audio += count;
+        }
+
+        public void FinalizeSink(out long totalBytesWritten)
+        {
+            Step("finalize");
+            totalBytesWritten = _audio + 4096;
+            if (ThrowOnFinalize) throw new InvalidOperationException("transport already dead");
+        }
+
+        public void Dispose() { }
+    }
+
+    /// <summary>Count of a substring, for source-shape (locality) assertions.</summary>
+    static int CountIn(string text, string needle)
+    {
+        int n = 0, i = 0;
+        while ((i = text.IndexOf(needle, i, StringComparison.Ordinal)) >= 0) { n++; i += needle.Length; }
+        return n;
+    }
+
+    /// <summary>
+    /// ADR-0005: the arm/disarm sequence is one deep module with one authoritative gate and one
+    /// finalize path. These assertions are deliberately observable-order assertions (what the SINK saw
+    /// and when, versus the gate) rather than implementation poking.
+    /// </summary>
+    static void TestRecordingArm()
+    {
+        Console.WriteLine("\n[Step 0.682] Verifying RecordingArm (arm order, single finalize, drain, convergence)...");
+
+        var config = new RecordingConfig { OutputDirectory = Path.GetTempPath(), FilenamePrefix = "ArmTest" };
+        var format = new StreamFormat { Width = 320, Height = 240, FrameRate = 10.0, SampleRate = 48000, Channels = 2 };
+
+        // ---- Arm order: the sink must be initialized while the gate is still OPEN, then the gate flips.
+        var sink = new SignalRecordingSink();
+        var arm = new RecordingArm(sink);
+        bool? gateDuringInit = null;
+        sink.OnStep = step => { if (step == "init") gateDuringInit = arm.IsRecording; };
+
+        if (!arm.Arm(config, format))
+        {
+            Console.WriteLine(" -> [SKIP] storage preflight refused the temp volume in this environment; arm-path assertions skipped (policy covered by Step 0.681).");
+            return;
+        }
+
+        if (gateDuringInit != false)
+        {
+            throw new Exception($"The gate must still be CLOSED while the sink initializes; saw {gateDuringInit}.");
+        }
+        if (!arm.IsRecording) throw new Exception("Arm must leave the gate open.");
+        if (arm.CurrentSegmentIndex != 1) throw new Exception("A fresh take must start at segment 1.");
+
+        // Arm reset the A/V clock as its FIRST step: a freshly reset clock reports unity drift.
+        double ratioAfterArm = arm.AvDriftRatio;
+        Console.WriteLine($" -> A/V clock ratio immediately after Arm: {ratioAfterArm:F6} (reset inside the arm sequence)");
+        if (ratioAfterArm <= 0 || Math.Abs(ratioAfterArm - 1.0) > 1e-6)
+        {
+            throw new Exception($"Arm must reset the A/V clock to unity before flipping the gate; ratio was {ratioAfterArm}.");
+        }
+
+        // ---- Writes reach the sink while armed.
+        var frame = System.Runtime.InteropServices.Marshal.AllocHGlobal(16);
+        try
+        {
+            arm.WriteVideoFrame(frame, 16);
+            arm.WriteAudioData(new byte[8], 0, 8);
+        }
+        finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(frame); }
+
+        if (sink.VideoFramesReceived != 1) throw new Exception("An armed write must reach the sink.");
+        if (sink.AudioBytesReceived != 8) throw new Exception("An armed audio write must reach the sink.");
+
+        // ---- Disarm: gate closes BEFORE finalize, exactly one finalize, and the summary is published.
+        bool? gateDuringFinalize = null;
+        sink.OnStep = step => { if (step == "finalize") gateDuringFinalize = arm.IsRecording; };
+        RecordingStopSummary? summary = null;
+        arm.RecordingStopped += s => summary = s;
+
+        if (!arm.Disarm(RecordingStopReason.Manual, out var direct)) throw new Exception("Disarm must report that it stopped an active take.");
+        if (gateDuringFinalize != false) throw new Exception($"The gate must be CLOSED before finalize; saw {gateDuringFinalize}.");
+        if (CountIn(string.Join(",", sink.Steps), "finalize") != 1) throw new Exception($"Exactly one finalize expected; steps: {string.Join(" ", sink.Steps)}");
+        if (summary == null || direct == null) throw new Exception("Disarm must publish a stop summary.");
+        if (summary.Reason != RecordingStopReason.Manual) throw new Exception($"Manual stop must report Manual; got {summary.Reason}.");
+        if (summary.VideoFramesWritten != 1) throw new Exception($"The summary must carry the frame count; got {summary.VideoFramesWritten}.");
+        if (summary.MediaDuration.TotalSeconds <= 0) throw new Exception("The summary must carry a media duration.");
+        if (RecordingHealth.ReasonText(summary.Reason) != "stopped by operator") throw new Exception("The verdict reason text is wrong.");
+        if (!RecordingHealth.BuildStopVerdict(summary).StartsWith("Stop verdict (stopped by operator)")) throw new Exception("The stop verdict must name the reason.");
+
+        // ---- Disarm is idempotent, and the gate now blocks writes.
+        sink.Steps.Clear();
+        if (arm.Disarm(RecordingStopReason.Manual, out _)) throw new Exception("A second Disarm must be a no-op.");
+        var frame2 = System.Runtime.InteropServices.Marshal.AllocHGlobal(16);
+        try { arm.WriteVideoFrame(frame2, 16); } finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(frame2); }
+        if (sink.VideoFramesReceived != 1) throw new Exception("A write after Disarm must not reach the sink.");
+
+        // ---- Bounded drain: a writer stuck inside the sink must NOT hang the caller. The three
+        //      low-disk/UI paths depend on this; an unbounded wait would freeze the UI tick thread.
+        var block = new System.Threading.ManualResetEventSlim(false);
+        sink.BlockVideoWrite = block;
+        if (!arm.Arm(config, format)) throw new Exception("Re-arm for the drain test failed.");
+        sink.OnStep = null;
+        var stuck = System.Threading.Tasks.Task.Run(() =>
+        {
+            var f = System.Runtime.InteropServices.Marshal.AllocHGlobal(16);
+            try { arm.WriteVideoFrame(f, 16); } finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(f); }
+        });
+        System.Threading.Thread.Sleep(20); // let the writer get in and block
+        var drainWatch = System.Diagnostics.Stopwatch.StartNew();
+        bool drained = arm.Disarm(RecordingStopReason.InputLoss, out var drainSummary);
+        drainWatch.Stop();
+        block.Set();
+        stuck.Wait(2000);
+
+        if (!drained) throw new Exception("Disarm must complete while a writer is stuck in the sink.");
+        // The cap is DrainTimeoutMs of real time, plus at most one Sleep(1) overshoot (Windows
+        // quantises a 1 ms sleep to ~15 ms), plus scheduling slack.
+        long drainBudget = RecordingArm.DrainTimeoutMs + 100;
+        if (drainWatch.ElapsedMilliseconds > drainBudget)
+        {
+            throw new Exception($"Disarm must be bounded (~{RecordingArm.DrainTimeoutMs} ms), took {drainWatch.ElapsedMilliseconds} ms (budget {drainBudget}).");
+        }
+        if (drainSummary == null || drainSummary.Reason != RecordingStopReason.InputLoss)
+        {
+            throw new Exception("The bounded-drain disarm must still publish an InputLoss summary.");
+        }
+        Console.WriteLine($" -> Bounded drain: Disarm returned in {drainWatch.ElapsedMilliseconds} ms with a writer stuck in the sink (cap {RecordingArm.DrainTimeoutMs} ms).");
+
+        // ---- Convergence: every trigger routes through the one path, differing only in the reason.
+        foreach (var (reason, viaFacade) in new[]
+        {
+            (RecordingStopReason.Manual, "StopRecording()"),
+            (RecordingStopReason.InputLoss, "StopRecording(InputLoss)"),
+            (RecordingStopReason.LowDisk, "StopRecording(LowDisk)")
+        })
+        {
+            var s2 = new SignalRecordingSink();
+            using var svc = new StreamRecorderService(s2);
+            if (!svc.StartRecording(config, format)) throw new Exception($"Facade start failed for {viaFacade}.");
+            s2.Steps.Clear();
+            svc.StopRecording(reason);
+            int finalizes = CountIn(string.Join(",", s2.Steps), "finalize");
+            if (finalizes != 1) throw new Exception($"{viaFacade} must finalize exactly once; saw {finalizes}.");
+            if (!string.IsNullOrEmpty(svc.CurrentRecordingPath) && svc.IsRecording) throw new Exception($"{viaFacade} must close the gate.");
+        }
+
+        // ---- Disposal routes through the same path rather than tearing down around it.
+        var s3 = new SignalRecordingSink();
+        var arm3 = new RecordingArm(s3);
+        RecordingStopSummary? disposeSummary = null;
+        arm3.RecordingStopped += s => disposeSummary = s;
+        if (!arm3.Arm(config, format)) throw new Exception("Arm for the dispose test failed.");
+        s3.Steps.Clear();
+        arm3.Dispose();
+        if (CountIn(string.Join(",", s3.Steps), "finalize") != 1) throw new Exception("Dispose must finalize through the arm.");
+        if (disposeSummary == null || disposeSummary.Reason != RecordingStopReason.Dispose)
+        {
+            throw new Exception("Dispose must publish a Dispose-reason summary.");
+        }
+
+        arm3.Dispose(); // idempotent
+
+        // ---- Secondary failure: the transport is already dead, so finalize throws. The original error
+        //      must survive, a summary must still be published, and nothing may escape.
+        var dead = new SignalRecordingSink { ThrowOnFinalize = true };
+        var arm4 = new RecordingArm(dead);
+        RecordingStopSummary? errSummary = null;
+        var errors = new List<string>();
+        arm4.RecordingStopped += s => errSummary = s;
+        arm4.RecordingError += e => errors.Add(e);
+
+        if (!arm4.Arm(config, format)) throw new Exception("Arm for the sink-failure test failed.");
+        var f3 = System.Runtime.InteropServices.Marshal.AllocHGlobal(16);
+        try { arm4.WriteVideoFrame(f3, 16); arm4.WriteVideoFrame(f3, 16); } finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(f3); }
+        dead.RaiseSinkError("FFmpeg audio pipe disconnected unexpectedly.");
+
+        if (arm4.IsRecording) throw new Exception("A sink error must close the gate.");
+        if (errSummary == null) throw new Exception("A sink error must still publish a summary (best-effort finalize).");
+        if (errSummary.Reason != RecordingStopReason.SinkError) throw new Exception($"Sink failure must report SinkError; got {errSummary.Reason}.");
+        if (errSummary.VideoFramesWritten != 2) throw new Exception($"The summary must carry what reached the transport; got {errSummary.VideoFramesWritten}.");
+        if (errors.Count == 0) throw new Exception("The original sink error must be surfaced.");
+        if (errors[errors.Count - 1] != "FFmpeg audio pipe disconnected unexpectedly.")
+        {
+            throw new Exception($"The ORIGINAL sink error must be reported last, unmasked; last was: {errors[errors.Count - 1]}");
+        }
+        if (!errors.Exists(e => e.Contains("may be incomplete")))
+        {
+            throw new Exception("The failed finalize must be reported as its own diagnostic.");
+        }
+        Console.WriteLine($" -> Sink failure: {errSummary.VideoFramesWritten} frames summarized, finalize failure reported without masking the original error.");
+
+        arm4.Dispose();
+        arm.Dispose();
+        arm3.Dispose();
+
+        // ---- Locality: ONE finalize call site in the whole app outside the sink implementations, and
+        //      no Task.Run finalize left in the orchestration classes (AC3).
+        string? armSrc = FindRepoSource("OmtCaptureStudio/Services/RecordingArm.cs");
+        string? svcSrc = FindRepoSource("OmtCaptureStudio/Services/StreamRecorderService.cs");
+        string? sesSrc = FindRepoSource("OmtCaptureStudio/Services/CaptureSession.cs");
+        if (armSrc == null || svcSrc == null || sesSrc == null)
+        {
+            Console.WriteLine($" -> [SKIP] source tree not reachable from {AppContext.BaseDirectory}; locality assertions skipped.");
+        }
+        else
+        {
+            string armText = File.ReadAllText(armSrc);
+            string svcText = File.ReadAllText(svcSrc);
+            string sesText = File.ReadAllText(sesSrc);
+
+            if (CountIn(armText, "FinalizeSink(") != 1) throw new Exception("The arm must have exactly one FinalizeSink call site.");
+            if (CountIn(svcText, "FinalizeSink(") != 0) throw new Exception("StreamRecorderService must not finalize — it is a facade now.");
+            if (CountIn(sesText, "FinalizeSink(") != 0) throw new Exception("CaptureSession must not finalize — it goes through the arm.");
+            if (CountIn(svcText, "Task.Run") != 0) throw new Exception("StreamRecorderService must not own a thread hop.");
+            if (CountIn(sesText, "Task.Run(") != 1) throw new Exception("CaptureSession should only Task.Run the reconnect hop, nothing else.");
+            if (CountIn(armText, "Task.Run") != 1) throw new Exception("The arm must own the single off-thread disarm.");
+            if (sesText.Contains("_audioResampler")) throw new Exception("CaptureSession must no longer own the A/V clock.");
+            // The arm is the only file that assigns the gate, and it does so exactly three times:
+            // open in Arm, close in Disarm, and close again in Arm's failure rollback (an event
+            // subscriber throwing out of RecordingStarted must not leave the gate open).
+            if (CountIn(armText, "_isRecording = true") != 1 ||
+                CountIn(armText, "_isRecording = false") != 2 ||
+                CountIn(svcText, "_isRecording") != 0 ||
+                CountIn(sesText, "_isRecording") != 0)
+            {
+                throw new Exception("The arm must be the ONLY place the gate is assigned (1 open, 2 closes) and no other class may touch it.");
+            }
+            Console.WriteLine(" -> Finalize locality: 1 FinalizeSink site (arm), 0 in the facade/session, 1 thread hop, gate assigned in exactly two places.");
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> RecordingArm sequencing, single finalize, bounded drain, convergence and best-effort sink-failure verified!");
         Console.ResetColor();
     }
 

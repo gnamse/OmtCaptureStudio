@@ -45,6 +45,32 @@ public readonly record struct RecordingHealthSnapshot
 }
 
 /// <summary>
+/// Why a recording stopped (ADR-0005).
+///
+/// <para>Every stop trigger routes through one finalize path, so the only thing that distinguishes
+/// them is the reason — reported on <see cref="RecordingStopSummary"/> and surfaced in the stop
+/// verdict. Before ADR-0005 the low-disk and sink-error paths stopped silently, with no summary at
+/// all.</para>
+/// </summary>
+public enum RecordingStopReason
+{
+    /// <summary>The operator asked to stop (or disconnected / closed the session).</summary>
+    Manual,
+
+    /// <summary>Free space crossed the hard low-water mark; stopped to keep the file playable.</summary>
+    LowDisk,
+
+    /// <summary>The input-health watchdog hit an outage boundary while recording (ADR-0002).</summary>
+    InputLoss,
+
+    /// <summary>The recording transport failed; finalization is best-effort from whatever reached disk.</summary>
+    SinkError,
+
+    /// <summary>The session was disposed while recording.</summary>
+    Dispose
+}
+
+/// <summary>
 /// Everything reported when a segment (or the whole take) stops. <see cref="MediaDuration"/> is the
 /// media duration, NOT wall clock — the DEF-01 fix. Wall clock rides along separately and clearly
 /// labelled, because it is the only figure that includes input-loss dead air.
@@ -61,7 +87,8 @@ public sealed record RecordingStopSummary(
     long AudioChunksDropped,
     int SegmentIndex,
     string EncoderName,
-    string DiagnosticTail)
+    string DiagnosticTail,
+    RecordingStopReason Reason = RecordingStopReason.Manual)
 {
     public RecordingHealthSnapshot ToHealthSnapshot() => new()
     {
@@ -148,11 +175,21 @@ public static class RecordingHealth
         double delta = Math.Abs(s.MediaDuration.TotalSeconds - s.AudioDuration.TotalSeconds);
         string parity = IsAvParityOk(s) ? "parity OK" : "PARITY MISMATCH";
 
-        return $"Stop verdict: video {s.MediaDuration.TotalSeconds:F2}s vs audio {s.AudioDuration.TotalSeconds:F2}s " +
+        return $"Stop verdict ({ReasonText(summary.Reason)}): video {s.MediaDuration.TotalSeconds:F2}s vs audio {s.AudioDuration.TotalSeconds:F2}s " +
                $"(delta {delta:F2}s, {parity}) | drops {VideoDropsText(s)} | finalize {summary.FinalizeDuration.TotalMilliseconds:F0} ms | " +
                $"segment {summary.SegmentIndex} | {EncoderText(s)} @ {s.AchievedBitrateMbps:F1} Mbps | " +
                $"file {summary.FileSizeBytes / (1024.0 * 1024.0):F1} MB";
     }
+
+    /// <summary>Operator-facing name for why a recording stopped.</summary>
+    public static string ReasonText(RecordingStopReason reason) => reason switch
+    {
+        RecordingStopReason.LowDisk => "stopped: low disk",
+        RecordingStopReason.InputLoss => "stopped: input lost",
+        RecordingStopReason.SinkError => "stopped: transport failure",
+        RecordingStopReason.Dispose => "stopped: session closed",
+        _ => "stopped by operator"
+    };
 
     /// <summary>Wall-clock span for the log line — the ONLY figure that includes outage dead air.</summary>
     public static string WallClockNote(RecordingStopSummary summary) =>
