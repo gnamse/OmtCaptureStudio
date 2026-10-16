@@ -166,6 +166,7 @@ class Program
         TestRecordingStorageGuard();
         TestRecordingArm();
         TestMediaBufferPool();
+        TestPipeWriterLoop();
 
         Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
         using (var vmSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(new NullRecordingSink())))
@@ -2252,6 +2253,173 @@ class Program
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> Exactly-once return is now observable (lease ledger, drop/drain/dispose paths, broken-loop detector)!");
+        Console.ResetColor();
+    }
+
+    /// <summary>A programmable fake transport: counts payloads, and can fail on demand.</summary>
+    private sealed class FakePipe : IDisposable
+    {
+        public long BytesWritten;
+        public int PacketsWritten;
+        public int FailAfterPackets = -1;      // >= 0: throw on this packet index
+        public bool DisconnectAfter;           // return Disconnected from the 2nd packet on
+
+        public PipeWriteResult Write(byte[] buffer, int length)
+        {
+            if (DisconnectAfter && PacketsWritten >= 1) return PipeWriteResult.Disconnected;
+            if (FailAfterPackets >= 0 && PacketsWritten >= FailAfterPackets)
+            {
+                throw new InvalidOperationException("simulated pipe failure");
+            }
+            Interlocked.Add(ref BytesWritten, length);
+            PacketsWritten++;
+            return PipeWriteResult.Written;
+        }
+
+        public void Dispose() { }
+    }
+
+    /// <summary>
+    /// NET-004: the ONE writer loop, driven headlessly at line rate by a fake consumer. The Slice-A
+    /// detectors are wired through the NEW loop, so a double-return introduced by the extraction would
+    /// fail here rather than reach the gate.
+    /// </summary>
+    static void TestPipeWriterLoop()
+    {
+        Console.WriteLine("\n[Step 0.684] Verifying PipeWriterLoop<T> (line rate, exactly-once return, error funnel)...");
+
+        MediaBufferPoolLedger.Reset();
+        MediaBufferPoolLedger.Enabled = true;
+        try
+        {
+            // ---- 1. Line rate: concurrent enqueue while the loop drains. Capacity is deliberately
+            // small so the drop-oldest path runs concurrently with the consumer path.
+            var fake = new FakePipe();
+            var queue = new BoundedMediaQueue<VideoFramePacket>(16, p => p.Release());
+            int connected = 0, dequeued = 0;
+            var loop = new PipeWriterLoop<VideoFramePacket>(
+                queue,
+                connect: () => null,
+                write: fake.Write,
+                isCancelled: () => false,
+                reportError: msg => throw new Exception($"Unexpected error report on the healthy path: {msg}"),
+                errorPrefix: "FFmpeg video",
+                onConnected: () => connected++,
+                onDequeued: () => Interlocked.Increment(ref dequeued));
+
+            const int total = 200;
+            var thread = new System.Threading.Thread(loop.Run) { IsBackground = true };
+            thread.Start();
+            for (int i = 0; i < total; i++)
+            {
+                queue.Enqueue(new VideoFramePacket(MediaBufferPool.Video.Rent(512), 512, MediaBufferPool.Video));
+            }
+            queue.CompleteAdding();
+            if (!thread.Join(5000)) throw new Exception("The loop did not drain and exit.");
+            queue.Dispose();
+
+            if (connected != 1) throw new Exception($"onConnected must fire exactly once; got {connected}.");
+            if (loop.WrittenCount != fake.PacketsWritten) throw new Exception("WrittenCount must match the transport's count.");
+            long accounted = fake.PacketsWritten + queue.DroppedCount;
+            if (accounted != total)
+            {
+                throw new Exception($"Every packet must be written or dropped exactly once: written {fake.PacketsWritten} + dropped {queue.DroppedCount} != {total}.");
+            }
+            if (dequeued != fake.PacketsWritten)
+            {
+                throw new Exception($"onDequeued fired {dequeued} times but {fake.PacketsWritten} packets were written — a dequeued packet must always be written or the loop must report.");
+            }
+            if (!loop.HasExited) throw new Exception("A drained loop must report HasExited.");
+            if (MediaBufferPoolLedger.ActiveLeases != 0)
+            {
+                throw new Exception($"LEASE LEAK through the new loop: {MediaBufferPoolLedger.ActiveLeases} buffer(s) never returned.");
+            }
+            if (MediaBufferPoolLedger.FaultCount != 0)
+            {
+                throw new Exception($"Ledger faults through the new loop: {string.Join(" | ", MediaBufferPoolLedger.Faults)}");
+            }
+            if (fake.BytesWritten != fake.PacketsWritten * 512L) throw new Exception("Payload byte accounting is off.");
+            Console.WriteLine($" -> Line rate: {fake.PacketsWritten} written + {queue.DroppedCount} dropped = {total}; {MediaBufferPoolLedger.RentCount} rents / {MediaBufferPoolLedger.ReturnCount} returns, 0 leaks.");
+
+            // ---- 2. Every failure path must still return the packet it was holding, report ONCE, and exit.
+            foreach (var (name, write, connect, expected) in new (string, Func<byte[], int, PipeWriteResult>, Func<string?>, string)[]
+            {
+                ("disconnected", (b, l) => PipeWriteResult.Disconnected, () => null, "FFmpeg video pipe disconnected unexpectedly."),
+                ("write threw", (b, l) => throw new InvalidOperationException("boom"), () => null, "FFmpeg video write error: boom"),
+                ("handshake refused", (b, l) => PipeWriteResult.Written, () => "pipe failed to connect.", "FFmpeg video pipe failed to connect."),
+                ("handshake threw", (b, l) => PipeWriteResult.Written, () => throw new InvalidOperationException("dead"), "FFmpeg video pipe handshake error: dead"),
+            })
+            {
+                MediaBufferPoolLedger.Reset();
+                var failQueue = new BoundedMediaQueue<VideoFramePacket>(8, p => p.Release());
+                for (int i = 0; i < 4; i++)
+                {
+                    failQueue.Enqueue(new VideoFramePacket(MediaBufferPool.Video.Rent(512), 512, MediaBufferPool.Video));
+                }
+                failQueue.CompleteAdding();
+
+                var errors = new List<string>();
+                PipeWrite writer = (b, l) =>
+                {
+                    try { return write(b, l); }
+                    catch (InvalidOperationException ex) { throw new InvalidOperationException(ex.Message); }
+                };
+                PipeConnect connector = () => connect();
+
+                var failLoop = new PipeWriterLoop<VideoFramePacket>(
+                    failQueue, connector, writer, () => false, errors.Add, "FFmpeg video");
+                failLoop.Run(); // same thread: the loop must return promptly, not spin
+
+                if (errors.Count != 1) throw new Exception($"[{name}] the funnel must report EXACTLY once; got {errors.Count}.");
+                if (errors[0] != expected) throw new Exception($"[{name}] message drifted: got \"{errors[0]}\", expected \"{expected}\".");
+                if (!failLoop.HasExited) throw new Exception($"[{name}] the loop must exit after a failure.");
+
+                failQueue.Dispose(); // the drain releases whatever the loop left behind
+                if (MediaBufferPoolLedger.ActiveLeases != 0)
+                {
+                    throw new Exception($"[{name}] LEASE LEAK: {MediaBufferPoolLedger.ActiveLeases} buffer(s) stranded.");
+                }
+                if (MediaBufferPoolLedger.FaultCount != 0)
+                {
+                    throw new Exception($"[{name}] ledger faults: {string.Join(" | ", MediaBufferPoolLedger.Faults)}");
+                }
+                Console.WriteLine($" -> [{name}] one report (\"{errors[0]}\"), loop exited, 0 leases stranded.");
+            }
+
+            // ---- 3. The audio prefix produces the historic audio wording from the same loop.
+            MediaBufferPoolLedger.Reset();
+            var audioQueue = new BoundedMediaQueue<AudioDataPacket>(4, p => p.Release());
+            var audioErrors = new List<string>();
+            // One packet queued, so the loop actually reaches the transport and takes the
+            // disconnected path. (With an empty, still-open queue the loop correctly waits instead.)
+            audioQueue.Enqueue(new AudioDataPacket(MediaBufferPool.Audio.Rent(256), 256, MediaBufferPool.Audio));
+            var audioLoop = new PipeWriterLoop<AudioDataPacket>(
+                audioQueue, () => null, (b, l) => PipeWriteResult.Disconnected, () => false, audioErrors.Add, "FFmpeg audio");
+            audioLoop.Run();
+            if (audioErrors.Count != 1 || audioErrors[0] != "FFmpeg audio pipe disconnected unexpectedly.")
+            {
+                throw new Exception($"The audio prefix must produce the audio message; got \"{(audioErrors.Count > 0 ? audioErrors[0] : "<none>")}\".");
+            }
+            audioQueue.Dispose();
+
+            // ---- 4. Cancellation leaves the queue to release its own backlog (no leak either way).
+            MediaBufferPoolLedger.Reset();
+            var cancelQueue = new BoundedMediaQueue<VideoFramePacket>(4, p => p.Release());
+            cancelQueue.Enqueue(new VideoFramePacket(MediaBufferPool.Video.Rent(256), 256, MediaBufferPool.Video));
+            var cancelLoop = new PipeWriterLoop<VideoFramePacket>(
+                cancelQueue, () => null, (b, l) => PipeWriteResult.Written, () => true, _ => { }, "FFmpeg video");
+            cancelLoop.Run();
+            cancelQueue.Dispose();
+            if (MediaBufferPoolLedger.ActiveLeases != 0) throw new Exception("A cancelled loop must not strand leases (the queue drain owns them).");
+        }
+        finally
+        {
+            MediaBufferPoolLedger.Enabled = false;
+            MediaBufferPoolLedger.Reset();
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> One writer loop verified: exactly-once return on every path, single funnel report, historic wording preserved!");
         Console.ResetColor();
     }
 

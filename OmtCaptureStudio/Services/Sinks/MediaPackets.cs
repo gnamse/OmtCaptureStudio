@@ -2,7 +2,7 @@ using System;
 
 namespace OmtCaptureStudio.Services.Sinks;
 
-public readonly struct VideoFramePacket
+public readonly struct VideoFramePacket : IMediaPacket
 {
     public readonly byte[] Buffer;
     public readonly int Length;
@@ -24,9 +24,14 @@ public readonly struct VideoFramePacket
     {
         if (Pool != null && Buffer != null) Pool.Return(Buffer);
     }
+
+    // Explicit interface implementation: the interface exposes the fields as properties, and the
+    // generic constraint still dispatches directly (no boxing) because T is a struct.
+    byte[] IMediaPacket.Buffer => Buffer;
+    int IMediaPacket.Length => Length;
 }
 
-public readonly struct AudioDataPacket
+public readonly struct AudioDataPacket : IMediaPacket
 {
     public readonly byte[] Buffer;
     public readonly int Length;
@@ -47,4 +52,9 @@ public readonly struct AudioDataPacket
     {
         if (Pool != null && Buffer != null) Pool.Return(Buffer);
     }
+
+    // Explicit interface implementation: the interface exposes the fields as properties, and the
+    // generic constraint still dispatches directly (no boxing) because T is a struct.
+    byte[] IMediaPacket.Buffer => Buffer;
+    int IMediaPacket.Length => Length;
 }

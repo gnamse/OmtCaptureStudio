@@ -46,6 +46,9 @@ public class FfmpegProcessHost : IDisposable
     private int _dropRingFilled;
     private Thread? _watchdogThread;
 
+    private PipeWriterLoop<VideoFramePacket>? _videoLoop;
+    private PipeWriterLoop<AudioDataPacket>? _audioLoop;
+
     private readonly BoundedMediaQueue<VideoFramePacket> _videoQueue;
     private readonly BoundedMediaQueue<AudioDataPacket>? _audioQueue;
     private string? _outputPath;
@@ -210,7 +213,19 @@ public class FfmpegProcessHost : IDisposable
         _dropRingIndex = 0;
         _dropRingFilled = 0;
 
-        _videoWorkerThread = new Thread(VideoWriterLoop)
+        // One loop implementation, two instantiations. The error funnel is FailRecording — the same
+        // one function the watchdog uses — and the exactly-once return lives inside the loop.
+        _videoLoop = new PipeWriterLoop<VideoFramePacket>(
+            _videoQueue,
+            ConnectVideoPipe,
+            WriteVideoPacket,
+            isCancelled: () => _disposed,
+            reportError: FailRecording,
+            errorPrefix: "FFmpeg video",
+            onConnected: OnVideoPipeConnected,
+            onDequeued: () => Interlocked.Increment(ref _videoDequeued));
+
+        _videoWorkerThread = new Thread(() => _videoLoop?.Run())
         {
             Name = "Ffmpeg_VideoPipeWriter",
             IsBackground = true,
@@ -220,7 +235,15 @@ public class FfmpegProcessHost : IDisposable
 
         if (hasAudio)
         {
-            _audioWorkerThread = new Thread(AudioWriterLoop)
+            _audioLoop = new PipeWriterLoop<AudioDataPacket>(
+                _audioQueue!,
+                ConnectAudioPipe,
+                WriteAudioPacket,
+                isCancelled: () => _disposed,
+                reportError: FailRecording,
+                errorPrefix: "FFmpeg audio");
+
+            _audioWorkerThread = new Thread(() => _audioLoop?.Run())
             {
                 Name = "Ffmpeg_AudioPipeWriter",
                 IsBackground = true,
@@ -246,165 +269,72 @@ public class FfmpegProcessHost : IDisposable
         }
     }
 
-    private void VideoWriterLoop()
+    // ============================================================================================
+    // Writer loops: ONE implementation (PipeWriterLoop<T>). This host supplies only the
+    // transport-specific pieces — the pipe, the two video-only watchdog hooks, and the error funnel.
+    // ============================================================================================
+
+    /// <summary>
+    /// Performs the (up to 8 s) video pipe handshake. Returns null on success, else the error tail the
+    /// loop reports as "FFmpeg video {tail}".
+    /// </summary>
+    private string? ConnectVideoPipe()
     {
         try
         {
-            if (_videoPipeConnectTask != null)
-            {
-                _videoPipeConnectTask.Wait(8000);
-            }
+            _videoPipeConnectTask?.Wait(8000);
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[Video Pipe Handshake Error] {ex.Message}");
-            if (_isWritingActive)
-            {
-                _isWritingActive = false;
-                SinkError?.Invoke($"FFmpeg video pipe handshake error: {ex.Message}");
-            }
-            return;
+            return $"pipe handshake error: {ex.Message}";
         }
 
-        if (_videoPipe == null || !_videoPipe.IsConnected)
-        {
-            if (_isWritingActive)
-            {
-                _isWritingActive = false;
-                SinkError?.Invoke("FFmpeg video pipe failed to connect.");
-            }
-            return;
-        }
-
-        // Arm the watchdog only now so the (up to 8s) pipe-connect handshake can
-        // never count toward the stall threshold.
-        _videoConnected = true;
-        Interlocked.Exchange(ref _lastVideoWriteMs, Environment.TickCount64);
-
-        while (!_disposed)
-        {
-            if (_videoQueue.TryDequeue(out var packet))
-            {
-                Interlocked.Increment(ref _videoDequeued);
-                try
-                {
-                    if (_videoPipe != null && _videoPipe.IsConnected)
-                    {
-                        _videoPipe.Write(packet.Buffer, 0, packet.Length);
-                        Interlocked.Exchange(ref _lastVideoWriteMs, Environment.TickCount64);
-                    }
-                    else
-                    {
-                        if (_isWritingActive)
-                        {
-                            _isWritingActive = false;
-                            SinkError?.Invoke("FFmpeg video pipe disconnected unexpectedly.");
-                        }
-                        break; // leave iteration via finally, which returns the buffer exactly once
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"[Video Pipe Write Error] {ex.Message}");
-                    if (_isWritingActive)
-                    {
-                        _isWritingActive = false;
-                        SinkError?.Invoke($"FFmpeg video write error: {ex.Message}");
-                    }
-                    break; // leave iteration via finally, which returns the buffer exactly once
-                }
-                finally
-                {
-                    // Exactly-once return, to the pool that rented it (MediaBufferPool owns the rule).
-                    packet.Release();
-                }
-            }
-            else
-            {
-                if (_videoQueue.IsAddingCompleted && _videoQueue.Count == 0)
-                {
-                    break; // done
-                }
-                _videoQueue.Wait(20);
-            }
-        }
+        return _videoPipe == null || !_videoPipe.IsConnected ? "pipe failed to connect." : null;
     }
 
-    private void AudioWriterLoop()
+    private string? ConnectAudioPipe()
     {
         try
         {
-            if (_audioPipeConnectTask != null)
-            {
-                _audioPipeConnectTask.Wait(8000);
-            }
+            _audioPipeConnectTask?.Wait(8000);
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[Audio Pipe Handshake Error] {ex.Message}");
-            if (_isWritingActive)
-            {
-                _isWritingActive = false;
-                SinkError?.Invoke($"FFmpeg audio pipe handshake error: {ex.Message}");
-            }
-            return;
+            return $"pipe handshake error: {ex.Message}";
         }
 
-        if (_audioPipe == null || !_audioPipe.IsConnected)
-        {
-            if (_isWritingActive)
-            {
-                _isWritingActive = false;
-                SinkError?.Invoke("FFmpeg audio pipe failed to connect.");
-            }
-            return;
-        }
+        return _audioPipe == null || !_audioPipe.IsConnected ? "pipe failed to connect." : null;
+    }
 
-        while (!_disposed && _audioQueue != null)
-        {
-            if (_audioQueue.TryDequeue(out var packet))
-            {
-                try
-                {
-                    if (_audioPipe != null && _audioPipe.IsConnected)
-                    {
-                        _audioPipe.Write(packet.Buffer, 0, packet.Length);
-                    }
-                    else
-                    {
-                        if (_isWritingActive)
-                        {
-                            _isWritingActive = false;
-                            SinkError?.Invoke("FFmpeg audio pipe disconnected unexpectedly.");
-                        }
-                        break; // leave iteration via finally, which returns the buffer exactly once
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"[Audio Pipe Write Error] {ex.Message}");
-                    if (_isWritingActive)
-                    {
-                        _isWritingActive = false;
-                        SinkError?.Invoke($"FFmpeg audio write error: {ex.Message}");
-                    }
-                    break; // leave iteration via finally, which returns the buffer exactly once
-                }
-                finally
-                {
-                    // Exactly-once return, to the pool that rented it (MediaBufferPool owns the rule).
-                    packet.Release();
-                }
-            }
-            else
-            {
-                if (_audioQueue.IsAddingCompleted && _audioQueue.Count == 0)
-                {
-                    break;
-                }
-                _audioQueue.Wait(20);
-            }
-        }
+    private PipeWriteResult WriteVideoPacket(byte[] buffer, int length)
+    {
+        NamedPipeServerStream? pipe = _videoPipe;
+        if (pipe == null || !pipe.IsConnected) return PipeWriteResult.Disconnected;
+
+        pipe.Write(buffer, 0, length);
+        Interlocked.Exchange(ref _lastVideoWriteMs, Environment.TickCount64);
+        return PipeWriteResult.Written;
+    }
+
+    private PipeWriteResult WriteAudioPacket(byte[] buffer, int length)
+    {
+        NamedPipeServerStream? pipe = _audioPipe;
+        if (pipe == null || !pipe.IsConnected) return PipeWriteResult.Disconnected;
+
+        pipe.Write(buffer, 0, length);
+        return PipeWriteResult.Written;
+    }
+
+    /// <summary>
+    /// Arms the stall watchdog. Runs only once the video pipe has actually connected, so the handshake
+    /// can never be counted toward the stall threshold.
+    /// </summary>
+    private void OnVideoPipeConnected()
+    {
+        _videoConnected = true;
+        Interlocked.Exchange(ref _lastVideoWriteMs, Environment.TickCount64);
     }
 
     private void WatchdogLoop()
@@ -687,7 +617,9 @@ public class FfmpegProcessHost : IDisposable
         _audioPipeConnectTask = null;
         _videoWorkerThread = null;
         _audioWorkerThread = null;
-        
+        _videoLoop = null;
+        _audioLoop = null;
+
         GC.SuppressFinalize(this);
     }
 }
