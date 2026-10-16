@@ -67,7 +67,20 @@ public enum RecordingStopReason
     SinkError,
 
     /// <summary>The session was disposed while recording.</summary>
-    Dispose
+    Dispose,
+
+    /// <summary>
+    /// A segment rollover boundary (NET-008): the segment finalized and the TAKE CONTINUED in the next
+    /// …_partNN. The only reason that is a BOUNDARY rather than a stop - see
+    /// <see cref="RecordingHealth.IsSegmentBoundary"/>.
+    /// </summary>
+    SegmentRollover,
+
+    /// <summary>The take reached its configured maximum duration and stopped (NET-008).</summary>
+    MaxDuration,
+
+    /// <summary>The take reached its scheduled wall-clock stop time and stopped (NET-008).</summary>
+    ScheduledStop
 }
 
 /// <summary>
@@ -181,12 +194,33 @@ public static class RecordingHealth
                $"file {summary.FileSizeBytes / (1024.0 * 1024.0):F1} MB";
     }
 
+    /// <summary>
+    /// True when this reason is a segment BOUNDARY rather than a take stop: the segment finalized and
+    /// the take CONTINUED in the next …_partNN. Only a rollover qualifies (NET-008). Callers use this
+    /// to give a boundary its own quiet rendering instead of the stop verdict.
+    /// </summary>
+    public static bool IsSegmentBoundary(RecordingStopReason reason)
+        => reason == RecordingStopReason.SegmentRollover;
+
+    /// <summary>
+    /// The quiet one-line notice for a rollover boundary (NET-008). An unattended take rolling over
+    /// every 15 minutes must NOT flash an alarming stop verdict each time - the take did not stop - so
+    /// a boundary renders as this continuation line instead of <see cref="BuildStopVerdict"/>. Pure,
+    /// so the UI and the tests agree by construction.
+    /// </summary>
+    public static string BuildSegmentContinuationText(RecordingStopSummary summary)
+        => $"Segment {summary.SegmentIndex} complete \u2014 continuing " +
+           $"({summary.FileSizeBytes / (1024.0 * 1024.0):F1} MB)";
+
     /// <summary>Operator-facing name for why a recording stopped.</summary>
     public static string ReasonText(RecordingStopReason reason) => reason switch
     {
+        RecordingStopReason.SegmentRollover => "segment complete: continuing",
         RecordingStopReason.LowDisk => "stopped: low disk",
         RecordingStopReason.InputLoss => "stopped: input lost",
         RecordingStopReason.SinkError => "stopped: transport failure",
+        RecordingStopReason.MaxDuration => "stopped: max duration",
+        RecordingStopReason.ScheduledStop => "stopped: scheduled stop",
         RecordingStopReason.Dispose => "stopped: session closed",
         _ => "stopped by operator"
     };

@@ -481,7 +481,7 @@ public class CaptureSession : IDisposable
         switch (boundary)
         {
             case RecordingBoundary.SegmentRollover:
-                if (_recorder.RollSegment(config, format, RecordingBoundaryReasons.SegmentRollover))
+                if (_recorder.RollSegment(config, format, RecordingStopReason.SegmentRollover))
                 {
                     AppLogger.LogInfo(
                         $"Segment rollover: recording continues in segment {_recorder.CurrentSegmentIndex}: " +
@@ -494,14 +494,14 @@ public class CaptureSession : IDisposable
                 AppLogger.LogInfo(
                     $"Max take duration ({config.MaxDurationMinutes:0.#} min) reached; stopping the take.");
                 EndTake();
-                _recorder.StopRecording(RecordingBoundaryReasons.MaxDuration);
+                _recorder.StopRecording(RecordingStopReason.MaxDuration);
                 MaxDurationReached?.Invoke();
                 break;
 
             case RecordingBoundary.ScheduledStop:
                 AppLogger.LogInfo("Scheduled stop time reached; stopping the take.");
                 EndTake();
-                _recorder.StopRecording(RecordingBoundaryReasons.ScheduledStop);
+                _recorder.StopRecording(RecordingStopReason.ScheduledStop);
                 ScheduledStopReached?.Invoke();
                 break;
         }

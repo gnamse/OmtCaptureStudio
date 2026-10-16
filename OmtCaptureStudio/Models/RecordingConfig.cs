@@ -203,28 +203,6 @@ public static class RecordingBoundaries
 }
 
 /// <summary>
-/// NET-008: maps a boundary to the <c>RecordingStopReason</c> reported for the stop it causes.
-///
-/// <para><b>FLAGGED, pending a ruling.</b> <c>RecordingStopReason</c> is declared in
-/// <c>Models/RecordingHealth.cs</c>, which is outside this brief's fence, and none of its five
-/// existing values is TRUE for a rollover or a scheduled auto-stop. Until the ruling lands these map
-/// onto the least-misleading existing value; the whole mapping is this one type, so adding
-/// <c>SegmentRollover</c>/<c>MaxDuration</c>/<c>ScheduledStop</c> to the enum changes three lines
-/// here and nothing else.</para>
-/// </summary>
-public static class RecordingBoundaryReasons
-{
-    /// <summary>A segment rollover: the take CONTINUES in the next …_partNN.</summary>
-    public static RecordingStopReason SegmentRollover => RecordingStopReason.Manual;
-
-    /// <summary>Max-duration auto-stop: the take ends.</summary>
-    public static RecordingStopReason MaxDuration => RecordingStopReason.Manual;
-
-    /// <summary>Scheduled wall-clock stop: the take ends.</summary>
-    public static RecordingStopReason ScheduledStop => RecordingStopReason.Manual;
-}
-
-/// <summary>
 /// Scheduled-start arithmetic, also pure. It lives beside <see cref="RecordingBoundaries"/> because
 /// the two are the same policy read from opposite ends of a take.
 /// </summary>

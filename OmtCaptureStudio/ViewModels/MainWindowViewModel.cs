@@ -292,6 +292,23 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _isStopSummaryVisible;
 
+    /// <summary>
+    /// NET-008: the quiet "Segment N complete - continuing" notice shown at a ROLLOVER boundary.
+    /// Deliberately separate from <c>StopSummaryText</c>: an unattended take rolling every 15 minutes
+    /// must not flash an alarming stop verdict each time - the take did not stop.
+    /// </summary>
+    [ObservableProperty]
+    private string _segmentContinuationText = string.Empty;
+
+    [ObservableProperty]
+    private bool _isSegmentContinuationVisible;
+
+    /// <summary>
+    /// The continuation notice uses the healthy token, deliberately distinct from the stop verdict's
+    /// text colour: a rollover is a normal scheduled event, not a failure (NET-008).
+    /// </summary>
+    public IBrush SegmentContinuationForeground { get; } = StudioPalette.MeterNormal;
+
     [ObservableProperty]
     private string _diagnosticTailText = "";
 
@@ -1552,6 +1569,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 config.ScheduledStartDelayMinutes = 0;
             }
 
+            // A new take clears any rollover notice left over from the previous one.
+            SegmentContinuationText = string.Empty;
+
             bool started = _session.StartRecording(config);
             if (!started)
             {
@@ -1872,6 +1892,29 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private void OnRecordingStopped(RecordingStopSummary summary)
     {
+        // NET-008: a ROLLOVER boundary is not a stop. The take continues in the next …_partNN, so none
+        // of the stop-side teardown below may run - no timer stop, no button flip back to START, no
+        // config re-unlock, no stop verdict, no "saved" copy. It gets its own quiet continuation line.
+        if (RecordingHealth.IsSegmentBoundary(summary.Reason))
+        {
+            string note = RecordingHealth.BuildSegmentContinuationText(summary);
+            AppLogger.LogInfo(
+                $"Segment boundary (roller): {summary.Path} (media duration: {summary.MediaDuration}, " +
+                $"size: {summary.FileSizeBytes} bytes); the take continues in segment {summary.SegmentIndex + 1}.");
+
+            PostToUIThread(() =>
+            {
+                SegmentContinuationText = note;
+                StatusText = note;
+
+                // The take is still live, so the health panel must stay up - and the STOP panel is
+                // explicitly not used for a boundary.
+                IsRecordingHealthVisible = true;
+            });
+
+            return;
+        }
+
         // DEF-01: this used to report Stopwatch wall clock, which counted the input-loss dead air (QA
         // measured 11.05s reported against 5.92s on disk). It now reports MEDIA duration — frames /
         // stamped fps — and logs wall clock separately, clearly labelled.
@@ -1892,6 +1935,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
             double mb = summary.FileSizeBytes / (1024.0 * 1024.0);
             RecordDurationText = "00:00:00";
+
+            // A genuine stop supersedes any rollover notice from earlier in the take.
+            SegmentContinuationText = string.Empty;
             RecordStatsText = $"Saved: {Path.GetFileName(summary.Path)} ({mb:F1} MB, {summary.MediaDuration:mm\\:ss})";
 
             // FEAT-07: the stop-summary verdict, shown in the UI (and logged above) from the summary's
@@ -1966,6 +2012,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     partial void OnStopSummaryTextChanged(string value)
     {
         IsStopSummaryVisible = !string.IsNullOrEmpty(value);
+    }
+
+    partial void OnSegmentContinuationTextChanged(string value)
+    {
+        IsSegmentContinuationVisible = !string.IsNullOrEmpty(value);
     }
 
     [RelayCommand]

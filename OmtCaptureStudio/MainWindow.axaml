@@ -438,6 +438,7 @@
                 <!-- 3: Recording Timer & Stats Readout -->
                 <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="0,0,12,0" HorizontalAlignment="Right">
                     <TextBlock x:Name="TxtRecordDuration" Text="{CompiledBinding RecordDurationText}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="16" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Right"/>
+                    <TextBlock x:Name="TxtSegmentContinuation" Text="{CompiledBinding SegmentContinuationText}" IsVisible="{CompiledBinding IsSegmentContinuationVisible}" Foreground="{CompiledBinding SegmentContinuationForeground}" FontSize="10" FontWeight="SemiBold" HorizontalAlignment="Right" Margin="0,2,0,0" AutomationProperties.Name="Segment Continuation Notice" ToolTip.Tip="Shown when a scheduled rollover finalized a segment; the take continues in the next file"/>
                     <TextBlock x:Name="TxtRecordStats" Text="{CompiledBinding RecordStatsText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" HorizontalAlignment="Right" Margin="0,2,0,0"
                                MaxWidth="130" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Assertive"/>
                 </StackPanel>

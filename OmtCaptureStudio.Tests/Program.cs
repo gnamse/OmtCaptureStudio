@@ -679,7 +679,7 @@ class Program
         int summaries = 0;
         arm.RecordingStopped += _ => summaries++;
 
-        Expect(arm.RollSegment(armCfg, format, RecordingBoundaryReasons.SegmentRollover),
+        Expect(arm.RollSegment(armCfg, format, RecordingStopReason.SegmentRollover),
             "RollSegment must finalize the segment and arm the continuation.");
         Expect(summaries == 1,
             "A rollover must publish exactly one segment summary - it goes through the single finalize path.");
@@ -709,6 +709,117 @@ class Program
         nowTicks = arm.SegmentStartUtcTicks + tenMin;
         Expect(arm.EvaluateBoundary(armCfg) == RecordingBoundary.SegmentRollover,
             "Through the arm, a rollover due at the same moment as the max duration still wins.");
+
+        // ---- 7. Reason mapping: a rollover is named as a CONTINUATION, never as a stop ----------
+        Expect(RecordingHealth.ReasonText(RecordingStopReason.SegmentRollover) == "segment complete: continuing",
+            $"A rollover must be named as a continuation, not a stop; got '{RecordingHealth.ReasonText(RecordingStopReason.SegmentRollover)}'.");
+        Expect(RecordingHealth.ReasonText(RecordingStopReason.MaxDuration) == "stopped: max duration",
+            $"Max duration must be named; got '{RecordingHealth.ReasonText(RecordingStopReason.MaxDuration)}'.");
+        Expect(RecordingHealth.ReasonText(RecordingStopReason.ScheduledStop) == "stopped: scheduled stop",
+            $"Scheduled stop must be named; got '{RecordingHealth.ReasonText(RecordingStopReason.ScheduledStop)}'.");
+
+        // A rollover is the ONLY boundary; every other reason is a genuine stop.
+        Expect(RecordingHealth.IsSegmentBoundary(RecordingStopReason.SegmentRollover),
+            "SegmentRollover is the one boundary reason.");
+        foreach (RecordingStopReason stopReason in new[]
+                 {
+                     RecordingStopReason.Manual, RecordingStopReason.LowDisk, RecordingStopReason.InputLoss,
+                     RecordingStopReason.SinkError, RecordingStopReason.Dispose,
+                     RecordingStopReason.MaxDuration, RecordingStopReason.ScheduledStop
+                 })
+        {
+            Expect(!RecordingHealth.IsSegmentBoundary(stopReason),
+                $"{stopReason} is a genuine stop and must NOT be treated as a segment boundary.");
+        }
+
+        var rolloverSummary = new RecordingStopSummary(
+            Path: Path.Combine(Path.GetTempPath(), "take_part01.mp4"),
+            MediaDuration: TimeSpan.FromMinutes(15),
+            WallClockDuration: TimeSpan.FromMinutes(15.01),
+            AudioDuration: TimeSpan.FromMinutes(15),
+            FinalizeDuration: TimeSpan.FromMilliseconds(42),
+            FileSizeBytes: 484_030,
+            VideoFramesWritten: 9000,
+            VideoFramesDropped: 0,
+            AudioChunksDropped: 0,
+            SegmentIndex: 1,
+            EncoderName: "h264_nvenc",
+            DiagnosticTail: string.Empty,
+            Reason: RecordingStopReason.SegmentRollover);
+
+        string quiet = RecordingHealth.BuildSegmentContinuationText(rolloverSummary);
+        Expect(quiet.Contains("Segment 1 complete") && quiet.Contains("continuing") && quiet.Contains("0.5 MB"),
+            $"The continuation line must name the segment, say it is continuing and carry its size; got '{quiet}'.");
+        Expect(!quiet.Contains("Stop verdict"),
+            "A rollover continuation line must never read as a stop verdict.");
+        Expect(RecordingHealth.BuildStopVerdict(rolloverSummary).Contains("segment complete: continuing"),
+            "Used on a rollover summary, the verdict builder must still name it as a continuation.");
+
+        // ---- 8. The rollover rendering path, end-to-end through the VIEWMODEL ------------------
+        using (var vmSeam = BuildHeadlessSession())
+        {
+            var vm = vmSeam.ViewModel!;
+            var vmSession = vmSeam.Session;
+
+            long vmFrames = 0;
+            vmSession.VideoFrameAvailable += (ptr, len, w, h, st, fps, ts) => Interlocked.Increment(ref vmFrames);
+            vmSession.Connect(new SyntheticPatternSource());
+
+            int vmWait = 0;
+            while (vmFrames < 5 && vmWait < 20)
+            {
+                Thread.Sleep(50);
+                vmWait++;
+            }
+
+            Expect(vmFrames > 0, "The ViewModel rollover test needs a live synthetic feed.");
+            Expect(!vm.IsStopSummaryVisible, "A fresh ViewModel must start with no stop panel.");
+
+            // A threshold low enough to fire inside this test, but reached through the SAME health tick
+            // the running app uses - there is no test-only code path.
+            var vmConfig = new RecordingConfig
+            {
+                OutputDirectory = Path.GetTempPath(),
+                FilenamePrefix = "VmRoll",
+                SegmentRolloverMinutes = 0.002
+            };
+
+            Expect(vmSession.StartRecording(vmConfig), "The ViewModel rollover test needs a live take.");
+            Expect(vm.RecordButtonText.Contains("STOP"),
+                $"A live take must read STOP; got '{vm.RecordButtonText}'.");
+
+            int ticks = 0;
+            while (!vm.IsSegmentContinuationVisible && ticks < 60)
+            {
+                Thread.Sleep(50);
+                vmSession.CheckInputHealth();
+                ticks++;
+            }
+
+            Expect(vm.IsSegmentContinuationVisible,
+                "A rollover must raise the QUIET continuation notice on the ViewModel.");
+            Expect(vm.SegmentContinuationText.Contains("complete") && vm.SegmentContinuationText.Contains("continuing"),
+                $"The notice must read as a continuation; got '{vm.SegmentContinuationText}'.");
+            Expect(!vm.IsStopSummaryVisible && string.IsNullOrEmpty(vm.StopSummaryText),
+                "A rollover must NOT show the stop verdict panel - the take did not stop.");
+            Expect(vm.RecordButtonText.Contains("STOP"),
+                $"The record button must still read STOP after a rollover; got '{vm.RecordButtonText}'.");
+            Expect(vmSession.IsRecording && vmSession.RecordingSegmentIndex >= 2,
+                $"A rollover must leave the take recording in the next segment; segment={vmSession.RecordingSegmentIndex}.");
+            Console.WriteLine($" -> ViewModel rollover rendering: quiet notice '{vm.SegmentContinuationText}', stop panel hidden, take live in segment {vmSession.RecordingSegmentIndex}");
+
+            vmSession.StopRecording();
+
+            int clearWait = 0;
+            while (vm.SegmentContinuationText.Length != 0 && clearWait < 20)
+            {
+                Thread.Sleep(25);
+                clearWait++;
+            }
+
+            Expect(vm.SegmentContinuationText.Length == 0,
+                "A genuine stop must clear the rollover notice.");
+        }
 
         Console.WriteLine(" -> Rollover arithmetic boundary-exact (10 min / 2 GB); take clock survives the rollover; " +
                           "presets round-trip; schedule arithmetic pure-clock; arm rolled segment 1 -> 2 as _part02 " +
