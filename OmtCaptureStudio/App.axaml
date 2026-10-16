@@ -55,6 +55,10 @@
         <SolidColorBrush x:Key="StudioHudScrim" Color="#CC18181B"/>
         <SolidColorBrush x:Key="StudioModalScrim" Color="#CC09090B"/>
 
+        <!-- Modal elevation. BoxShadows is a value type, so this token IS the value
+             (declared once, not the Color + SolidColorBrush pair - see DESIGN.md §2). -->
+        <BoxShadows x:Key="StudioShadowModal">0 12 32 0 #CC09090B</BoxShadows>
+
         <!-- Calibrated Broadcast VU Meter Gradient (-60 dBFS to 0 dBFS) -->
         <LinearGradientBrush x:Key="StudioVuMeterGradient" StartPoint="0%,100%" EndPoint="0%,0%">
             <GradientStop Color="#10B981" Offset="0.0"/>

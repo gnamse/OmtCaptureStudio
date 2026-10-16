@@ -13,7 +13,7 @@ public static class StudioPalette
 {
     // --- Action / State Brushes ---
     public static readonly IBrush Connect = Solid(16, 185, 129);            // StudioAccentSuccess
-    public static readonly IBrush Disconnect = Solid(239, 68, 68);          // error red
+    public static readonly IBrush Disconnect = Solid(220, 38, 38);          // StudioAccentDanger (#DC2626, >= 4.83:1 with white)
     public static readonly IBrush TestSignalActive = Solid(79, 70, 229);    // StudioAccentPrimary (#4F46E5, >= 5.9:1 with white)
     public static readonly IBrush TestSignalInactive = Solid(39, 39, 42);   // StudioSurfaceElevated
     public static readonly IBrush RecordStart = Solid(220, 38, 38);         // StudioAccentDanger

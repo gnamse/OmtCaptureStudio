@@ -43,11 +43,24 @@ Defined in `App.axaml`. Values are exact — do not approximate or "tidy" them.
 | `StudioAccentPrimary` | `#4F46E5` | Test Signal active, host Broadcast active |
 | `StudioHudScrim` | `#CC18181B` | Viewport HUD chips |
 | `StudioModalScrim` | `#CC09090B` | Recording-close overlay |
+| `StudioShadowModal` | `0 12 32 0 #CC09090B` | Recording-close modal drop shadow — a `BoxShadows`, not a colour |
 | `StudioVuMeterGradient` | 7-stop, see §7 | VU meter bar fill |
 
 > `App.axaml` declares each colour **twice** — once as `<Color x:Key="…Color">` and once
 > as a `<SolidColorBrush x:Key="…">` with the same literal. If you add or change a
 > colour you must update **both** entries or the layers drift.
+
+> **Value-type tokens are declared once, as their own type.** Spacing (`Thickness`),
+> radius (`CornerRadius`) and elevation (`BoxShadows`) have no colour half, so the
+> double-declaration rule does not apply to them:
+> `<BoxShadows x:Key="StudioShadowModal">0 12 32 0 #CC09090B</BoxShadows>`, consumed as
+> `BoxShadow="{DynamicResource StudioShadowModal}"`. The XAML parser converts that text
+> to the value type at compile time.
+>
+> A shadow **cannot** be tokenised as a string. `<x:String x:Key="X">0 12 32 0 #CC…</x:String>`
+> consumed via `BoxShadow="{StaticResource X}"` does not work: Avalonia's resource path only
+> converts `Color` → `IBrush` (`StaticResourceExtension` → `ColorToBrushConverter`), so a
+> string resource is never parsed into a value type. Declare the token as the type itself.
 
 ### 2.1 The two-layer palette rule (critical)
 
@@ -75,9 +88,15 @@ constraint, not a preference.
 | `StudioTextOnAccent` on `StudioAccentPrimary` | **6.3:1** | AA text — pass |
 | `StudioAccentPrimary` on `StudioBg` | **3.05:1** | Passes the 3:1 non-text floor — **only marginally** |
 | `StudioTextMuted` on `StudioBg` | **4.90:1** | AA text — pass |
+| `StudioTextMuted` on `StudioSurface` | **4.53:1** | AA text — pass, only **0.03 above** the 4.5:1 floor |
 
 `StudioAccentPrimary` sits right at the edge for non-text use. If it is ever
 lightened, it falls below the 3:1 floor — recheck rather than eyeballing.
+
+`StudioTextMuted` on `StudioSurface` clears AA by 0.03 — the tightest pair in the app
+(status bar, top bar, the `REC` chip). Any change to either token, or moving muted text
+onto a different surface, must be re-measured, not eyeballed: `StudioTextMuted` on
+`StudioSurfaceElevated` measures **3.81:1** and fails AA — do not put muted text there.
 
 ---
 

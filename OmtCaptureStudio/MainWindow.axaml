@@ -541,7 +541,7 @@
             <Border Background="{DynamicResource StudioSurface}" BorderThickness="0"
                     CornerRadius="{DynamicResource RadiusLg}" Padding="24"
                     MaxWidth="480" HorizontalAlignment="Center" VerticalAlignment="Center"
-                    BoxShadow="0 12 32 0 #80000000">
+                    BoxShadow="{DynamicResource StudioShadowModal}">
                 <StackPanel Spacing="16">
                     <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
                         <Border Background="{DynamicResource StudioAccentDanger}" Width="36" Height="36" CornerRadius="18"
