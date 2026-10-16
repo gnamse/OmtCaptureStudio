@@ -81,6 +81,7 @@ class Program
         TestPipeWriterLoop();
         TestFfmpegArguments();
         TestScheduledSegmentedCapture();
+        TestCrashForensics();
 
         TestMainWindowViewModel();
 
@@ -430,11 +431,12 @@ class Program
             case "0.684": TestPipeWriterLoop(); break;
             case "0.685": TestFfmpegArguments(); break;
             case "0.686": TestScheduledSegmentedCapture(); break;
+            case "0.687": TestCrashForensics(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");
                 Console.Error.WriteLine("Known: 0, 0.5, 0.6, 0.65, 0.7, 0.71, 0.69, 0.72, 0.68, 0.67, 0.671, 0.672, " +
-                                        "0.673, 0.674, 0.675, 0.676, 0.677, 0.678, 0.679, 0.681, 0.682, 0.683, 0.684, 0.685, 0.686, 0.75");
+                                        "0.673, 0.674, 0.675, 0.676, 0.677, 0.678, 0.679, 0.681, 0.682, 0.683, 0.684, 0.685, 0.686, 0.687, 0.75");
                 return 2;
         }
 
@@ -514,6 +516,171 @@ class Program
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> Architectural seams successfully verified!");
         Console.ResetColor();
+    }
+
+    /// <summary>
+    /// NET-009: crash forensics. The handler is invoked directly - never a real crash - and its output
+    /// asserted: the crash log must carry the exception AND the live recording state, keep-last-N must
+    /// cap both artifacts, a failed dump must not mask the original exception, and the next-launch
+    /// notice must count what is actually present.
+    /// </summary>
+    static void TestCrashForensics()
+    {
+        Console.WriteLine("\n[Step 0.687] Verifying crash forensics (crash log + state, keep-last-N, launch notice)...");
+
+        string originalLogDir = CrashForensics.LogDir;
+        string originalDumpDir = CrashForensics.DumpDir;
+
+        string sandbox = Path.Combine(Path.GetTempPath(), "omt_crash_" + Guid.NewGuid().ToString("N")[..8]);
+        string logsDir = Path.Combine(sandbox, "logs");
+        string dumpsDir = Path.Combine(sandbox, "crashdumps");
+        Directory.CreateDirectory(logsDir);
+        Directory.CreateDirectory(dumpsDir);
+
+        try
+        {
+            CrashForensics.UseDirectories(logsDir, dumpsDir);
+
+            // ---- 1. A simulated handler invocation records the exception AND the live state ---------
+            var liveState = new CrashState(
+                IsRecording: true,
+                RecordingPath: @"C:\takes\OMT_2026-10-16_part02.mp4",
+                FramesWritten: 12345,
+                SegmentIndex: 2,
+                BroadcastState: "Broadcasting",
+                MediaDuration: TimeSpan.FromMinutes(7) + TimeSpan.FromSeconds(3),
+                EncoderName: "h264_nvenc",
+                IsConnected: true);
+
+            CrashForensics.RegisterStateProvider(() => liveState);
+            string? reportPath = CrashForensics.HandleException(
+                "Test.Handler", new InvalidOperationException("simulated fault"), fatal: false);
+
+            Expect(reportPath != null && File.Exists(reportPath),
+                "The crash handler must write a crash log and return its path.");
+
+            string report = File.ReadAllText(reportPath!);
+            Expect(report.Contains("Test.Handler"), "The crash log must name the handler that fired.");
+            Expect(report.Contains("simulated fault"), "The crash log must carry the exception message.");
+            Expect(report.Contains("Recording   : YES"),
+                "The crash log must say whether a take was live - the part a stack trace cannot tell you.");
+            Expect(report.Contains("OMT_2026-10-16_part02.mp4"), "The crash log must name the file being written.");
+            Expect(report.Contains("Frames      : 12345"), "The crash log must carry the frames written.");
+            Expect(report.Contains("Segment     : 2"), "The crash log must carry the segment index.");
+            Expect(report.Contains("Broadcast   : Broadcasting"), "The crash log must carry the broadcast state.");
+            Expect(report.Contains("Encoder     : h264_nvenc"), "The crash log must carry the resolved encoder.");
+            Expect(report.Contains("(not written)"),
+                "A non-fatal handler must record that no dump was taken rather than implying one was.");
+
+            // ---- 2. A dump failure must not throw and must not mask the original exception ---------
+            string blockedDumpDir = Path.Combine(sandbox, "blocked");
+            File.WriteAllText(blockedDumpDir, "not a directory");
+            CrashForensics.UseDirectories(logsDir, blockedDumpDir);
+
+            string? masked = CrashForensics.HandleException(
+                "Test.DumpFailure", new AccessViolationException("native fault"), fatal: true);
+
+            Expect(masked != null && File.Exists(masked),
+                "A dump failure must still produce the crash log.");
+            Expect(!File.Exists(blockedDumpDir + ".dmp"),
+                "The blocked dump directory must not have produced a dump.");
+            Expect(File.ReadAllText(masked!).Contains("native fault"),
+                "A dump failure must never mask the original exception.");
+
+            CrashForensics.UseDirectories(logsDir, dumpsDir);
+
+            // ---- 2b. A fatal fault on a WRITABLE directory must produce a REAL minidump -----------
+            // This is the only coverage of the MiniDumpWriteDump P/Invoke: a wrong signature or a
+            // missing dbghelp would otherwise fail silently in the field, which is the whole point of
+            // the feature.
+            string? withDump = CrashForensics.HandleException(
+                "Test.RealDump", new AccessViolationException("native fault"), fatal: true);
+
+            string[] producedDumps = Directory.GetFiles(dumpsDir, "crash-*.dmp");
+            Expect(producedDumps.Length == 1,
+                $"A fatal fault on a writable directory must write exactly one minidump; saw {producedDumps.Length}.");
+            Expect(new FileInfo(producedDumps[0]).Length > 4096,
+                $"The minidump must be a real dump, not an empty file; size={new FileInfo(producedDumps[0]).Length}.");
+            Expect(withDump != null && !File.ReadAllText(withDump).Contains("(not written)"),
+                "A fatal fault with a writable directory must record a real dump path in the report.");
+            Console.WriteLine($" -> Real minidump written: {Path.GetFileName(producedDumps[0])}, {new FileInfo(producedDumps[0]).Length:N0} bytes");
+
+            // ---- 3. keep-last-N over the DUMPS ------------------------------------------------------
+            int seed = CrashForensics.KeepLastCount + 5;
+            for (int i = 0; i < seed; i++)
+            {
+                string f = Path.Combine(dumpsDir, $"crash-2026-01-01_00-00-{i:00}.dmp");
+                File.WriteAllText(f, "dump");
+                File.SetLastWriteTimeUtc(f, DateTime.UtcNow.AddMinutes(-60).AddSeconds(i));
+            }
+
+            CrashForensics.EnforceKeepLastCount();
+
+            int dumpsLeft = Directory.GetFiles(dumpsDir, "crash-*.dmp").Length;
+            Expect(dumpsLeft == CrashForensics.KeepLastCount,
+                $"keep-last-N must cap the dump directory at {CrashForensics.KeepLastCount}; saw {dumpsLeft}.");
+            Expect(File.Exists(Path.Combine(dumpsDir, $"crash-2026-01-01_00-00-{seed - 1:00}.dmp")),
+                "keep-last-N must keep the NEWEST dumps.");
+            Expect(!File.Exists(Path.Combine(dumpsDir, "crash-2026-01-01_00-00-00.dmp")),
+                "keep-last-N must delete the OLDEST dumps.");
+
+            // ---- 4. The crash LOG rotates on the same rule ------------------------------------------
+            for (int i = 0; i < seed; i++)
+            {
+                string f = Path.Combine(logsDir, $"crash-2026-01-01_00-00-{i:00}.log");
+                File.WriteAllText(f, "report");
+                File.SetLastWriteTimeUtc(f, DateTime.UtcNow.AddMinutes(-60).AddSeconds(i));
+            }
+
+            CrashForensics.EnforceKeepLastCount();
+            int logsLeft = Directory.GetFiles(logsDir, "crash-*.log").Length;
+            Expect(logsLeft == CrashForensics.KeepLastCount,
+                $"The crash log must rotate on the same keep-last-N rule as the dumps; saw {logsLeft}.");
+
+            // ---- 5. The next-launch notice --------------------------------------------------------
+            Expect(CrashForensics.CountDumps() == CrashForensics.KeepLastCount,
+                "The launch notice must count the dumps actually on disk.");
+            Expect(CrashForensics.ReportPendingDumps() == CrashForensics.KeepLastCount,
+                "ReportPendingDumps must report the number of dumps present.");
+
+            // ---- 6. Clean install -> no notice -----------------------------------------------------
+            string emptyDumps = Path.Combine(sandbox, "emptydumps");
+            Directory.CreateDirectory(emptyDumps);
+            CrashForensics.UseDirectories(logsDir, emptyDumps);
+            Expect(CrashForensics.ReportPendingDumps() == 0,
+                "With no dumps present the next-launch notice must stay silent.");
+
+            // ---- 7. A faulting state provider must not stop the report ----------------------------
+            CrashForensics.UseDirectories(logsDir, dumpsDir);
+            CrashForensics.RegisterStateProvider(() => throw new InvalidOperationException("provider boom"));
+
+            string? resilient = CrashForensics.HandleException(
+                "Test.BadProvider", new Exception("fault"), fatal: false);
+            Expect(resilient != null, "A throwing state provider must not stop the crash log being written.");
+            Expect(File.ReadAllText(resilient!).Contains("Recording   : no"),
+                "With no usable state the report must say so rather than inventing a live take.");
+
+            // ---- 8. The handlers are actually WIRED --------------------------------------------------
+            CrashForensics.Install();
+            Expect(CrashForensics.IsInstalled,
+                "Install() must wire AppDomain.UnhandledException and TaskScheduler.UnobservedTaskException.");
+
+            // ---- 9. The report builder is pure and deterministic -----------------------------------
+            DateTime when = new(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            string a = CrashForensics.BuildCrashReport("S", "E", CrashState.Unknown, null, when);
+            string b = CrashForensics.BuildCrashReport("S", "E", CrashState.Unknown, null, when);
+            Expect(a == b, "The report builder must be deterministic for a fixed timestamp.");
+            Expect(a.Contains("Dump        : (not written)"), "An absent dump must read as not written.");
+        }
+        finally
+        {
+            CrashForensics.RegisterStateProvider(null);
+            CrashForensics.UseDirectories(originalLogDir, originalDumpDir);
+            try { Directory.Delete(sandbox, recursive: true); } catch { }
+        }
+
+        Console.WriteLine(" -> Crash log carries the live recording state; keep-last-N caps logs and dumps; " +
+                          "a failed dump never masks the exception; the launch notice counts what is present!");
     }
 
     /// <summary>
