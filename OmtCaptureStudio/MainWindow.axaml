@@ -303,6 +303,10 @@
         <Border Grid.Row="2" Background="{DynamicResource StudioSurface}" BorderBrush="{DynamicResource StudioBorder}" BorderThickness="0,1,0,0" Padding="{DynamicResource BarPadding}" MinHeight="72"
                 IsEnabled="{CompiledBinding IsMainContentEnabled}">
             <Grid VerticalAlignment="Center">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/> <!-- 0: Container, Encoder, Quality -->
                     <ColumnDefinition Width="*" MinWidth="180" MaxWidth="460"/> <!-- 1: Save Folder -->
@@ -342,6 +346,57 @@
                                   SelectedItem="{CompiledBinding SelectedQualityPreset, Mode=TwoWay}"
                                   AutomationProperties.Name="Recording Quality Preset"
                                   ToolTip.Tip="Select recording quality and bitrate preset (High, Ultra, Master ProRes, Medium)"/>
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- NET-008: scheduled / segmented capture. Lives inside the existing
+                     IsRecordingConfigEnabled lock so a mid-flight change can never restart a running
+                     take (the live-changing-selector locking rule). -->
+                <StackPanel Grid.Row="1" Grid.ColumnSpan="5" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,8,0,0"
+                            IsEnabled="{CompiledBinding IsRecordingConfigEnabled}">
+                    <StackPanel Margin="0,0,16,0">
+                        <TextBlock Text="PRESET" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbRecordingPreset" Width="185"
+                                  ItemsSource="{CompiledBinding RecordingPresetNames}"
+                                  SelectedItem="{CompiledBinding SelectedRecordingPreset, Mode=TwoWay}"
+                                  AutomationProperties.Name="Recording Preset"
+                                  ToolTip.Tip="Apply a named container/encoder/quality/rollover preset. Editing any control switches the picker to Custom."/>
+                    </StackPanel>
+
+                    <StackPanel Margin="0,0,16,0">
+                        <TextBlock Text="ROLL OVER" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbRolloverMinutes" Width="90"
+                                  ItemsSource="{CompiledBinding RolloverMinuteOptions}"
+                                  SelectedItem="{CompiledBinding SelectedRolloverMinutes, Mode=TwoWay}"
+                                  AutomationProperties.Name="Segment Rollover Interval"
+                                  ToolTip.Tip="Finalize the current segment and continue in the next _partNN file after this long. Off never rolls by time."/>
+                    </StackPanel>
+
+                    <StackPanel Margin="0,0,16,0">
+                        <TextBlock Text="OR SIZE" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbRolloverGigabytes" Width="85"
+                                  ItemsSource="{CompiledBinding RolloverGigabyteOptions}"
+                                  SelectedItem="{CompiledBinding SelectedRolloverGigabytes, Mode=TwoWay}"
+                                  AutomationProperties.Name="Segment Rollover Size"
+                                  ToolTip.Tip="Finalize the current segment after this much data. Off never rolls by size."/>
+                    </StackPanel>
+
+                    <StackPanel Margin="0,0,16,0">
+                        <TextBlock Text="MAX LENGTH" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbMaxDuration" Width="90"
+                                  ItemsSource="{CompiledBinding MaxDurationOptions}"
+                                  SelectedItem="{CompiledBinding SelectedMaxDuration, Mode=TwoWay}"
+                                  AutomationProperties.Name="Maximum Recording Duration"
+                                  ToolTip.Tip="Stop the take automatically after this long, counted across all segments. Off is unlimited."/>
+                    </StackPanel>
+
+                    <StackPanel>
+                        <TextBlock Text="START IN" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbScheduleDelay" Width="90"
+                                  ItemsSource="{CompiledBinding ScheduleDelayOptions}"
+                                  SelectedItem="{CompiledBinding SelectedScheduleDelay, Mode=TwoWay}"
+                                  AutomationProperties.Name="Scheduled Start Delay"
+                                  ToolTip.Tip="Delay the start of the next take by this long. Off starts immediately."/>
                     </StackPanel>
                 </StackPanel>
 

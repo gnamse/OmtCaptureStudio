@@ -102,6 +102,22 @@ public class StreamRecorderService : IDisposable
     /// <summary>Periodic low-disk protection sweep. Cheap; call from a UI tick loop while recording.</summary>
     public void CheckDiskSpaceAndProtect() => _arm.CheckLowDisk();
 
+    /// <summary>
+    /// NET-008: evaluates the rollover / max-duration / scheduled-stop boundary. Pure comparison; cheap
+    /// enough for the UI health tick. Forwarded, like the low-disk sweep above - no logic here.
+    /// </summary>
+    public RecordingBoundary EvaluateBoundary(RecordingConfig config) => _arm.EvaluateBoundary(config);
+
+    /// <summary>NET-008: true when a take is live and can be rolled into its next segment.</summary>
+    public bool CanRollSegment => _arm.CanRollSegment;
+
+    /// <summary>
+    /// NET-008: rolls into the next …_partNN - the arm's single finalize path followed by an arm of the
+    /// continuation. Forwarded verbatim; the sequence itself lives in <see cref="RecordingArm"/>.
+    /// </summary>
+    public bool RollSegment(RecordingConfig config, StreamFormat format, RecordingStopReason reason)
+        => _arm.RollSegment(config, format, reason);
+
     public void WriteVideoFrame(IntPtr pData, int dataLength) => _arm.WriteVideoFrame(pData, dataLength);
 
     public void WriteAudioData(byte[] interleavedBytes)

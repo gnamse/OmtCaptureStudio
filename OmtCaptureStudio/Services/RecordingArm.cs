@@ -41,6 +41,12 @@ public sealed class RecordingArm : IDisposable
     private readonly IRecordingSink _sink;
     private readonly bool _ownsSink;
 
+    /// <summary>
+    /// UTC-now source for the scheduled/segmented-capture boundaries (NET-008). Injected so the
+    /// boundary tests drive a local clock and need zero real waits; the default reads the system clock.
+    /// </summary>
+    private readonly Func<long> _utcNowTicks;
+
     /// <summary>The A/V recording clock. It lives here because the arm must reset it before the gate flips.</summary>
     private readonly AudioClockResampler _avClock = new();
 
@@ -61,6 +67,11 @@ public sealed class RecordingArm : IDisposable
     private int _segmentIndex;
     private string? _currentRecordingPath;
     private long _recordStartTimestamp;
+
+    // NET-008 boundary state. _takeStartUtcTicks survives a segment rollover (a rollover continues the
+    // SAME take); _segmentStartUtcTicks is reset by every arm, including a rollover.
+    private long _takeStartUtcTicks;
+    private long _segmentStartUtcTicks;
     private long _framesWritten;
     private long _audioBytesWritten;
     private DateTime _lastDiskCheckUtc = DateTime.MinValue;
@@ -71,10 +82,11 @@ public sealed class RecordingArm : IDisposable
     private int _recordSampleRate;
     private int _recordChannels;
 
-    public RecordingArm(IRecordingSink sink, bool ownsSink = false)
+    public RecordingArm(IRecordingSink sink, bool ownsSink = false, Func<long>? utcNowTicks = null)
     {
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
         _ownsSink = ownsSink;
+        _utcNowTicks = utcNowTicks ?? (static () => DateTime.UtcNow.Ticks);
         _sink.SinkError += OnSinkError;
     }
 
@@ -84,6 +96,36 @@ public sealed class RecordingArm : IDisposable
     public string? CurrentRecordingPath => _currentRecordingPath;
     public int CurrentSegmentIndex => _segmentIndex;
     public string? CurrentTakeBasePath => _takeBasePath;
+
+    /// <summary>The active take's start (UTC ticks). Survives a segment rollover - the boundary clock.</summary>
+    public long TakeStartUtcTicks => Interlocked.Read(ref _takeStartUtcTicks);
+
+    /// <summary>The active SEGMENT's start (UTC ticks). Reset by every arm, including a rollover.</summary>
+    public long SegmentStartUtcTicks => Interlocked.Read(ref _segmentStartUtcTicks);
+
+    /// <summary>
+    /// Bytes on disk for the ACTIVE segment (0 when idle or unreadable). MP4/MOV are written fragmented
+    /// so the live length grows with the take; a read failure reports 0 rather than throwing on the
+    /// UI tick path.
+    /// </summary>
+    public long CurrentSegmentBytes
+    {
+        get
+        {
+            string? path = _currentRecordingPath;
+            if (path == null) return 0;
+
+            try
+            {
+                var info = new FileInfo(path);
+                return info.Exists ? info.Length : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+    }
     public TimeSpan ElapsedTime => _isRecording ? Stopwatch.GetElapsedTime(_recordStartTimestamp) : TimeSpan.Zero;
     public long FramesWritten => Interlocked.Read(ref _framesWritten);
     public long AudioBytesWritten => Interlocked.Read(ref _audioBytesWritten);
@@ -253,6 +295,16 @@ public sealed class RecordingArm : IDisposable
                 _recordStartTimestamp = Stopwatch.GetTimestamp();
                 Interlocked.Exchange(ref _framesWritten, 0);
                 Interlocked.Exchange(ref _audioBytesWritten, 0);
+
+                // NET-008: a NEW take resets the take clock; every arm (including a rollover) resets the
+                // segment clock. Both commit here with the rest of the bookkeeping, so a failed arm can
+                // advance neither.
+                long armedUtcTicks = _utcNowTicks();
+                if (startNewTake)
+                {
+                    _takeStartUtcTicks = armedUtcTicks;
+                }
+                _segmentStartUtcTicks = armedUtcTicks;
 
                 // ---- Step 4: flip the gate LAST ----------------------------------------------------
                 _isRecording = true;
@@ -481,6 +533,65 @@ public sealed class RecordingArm : IDisposable
         }
 
         RecordingError?.Invoke(error);
+    }
+
+    // ============================================================================================
+    // Scheduled / segmented capture boundaries (NET-008)
+    // ============================================================================================
+
+    /// <summary>True when a take is live and can be rolled - the guard callers check before rolling.</summary>
+    public bool CanRollSegment => _disposed == 0 && _isRecording;
+
+    /// <summary>
+    /// The production overload: evaluates against the arm's own UTC clock. Tests drive
+    /// <see cref="EvaluateBoundary(RecordingConfig, long)"/> with an injected tick instead.
+    /// </summary>
+    public RecordingBoundary EvaluateBoundary(RecordingConfig config)
+        => EvaluateBoundary(config, _utcNowTicks());
+
+    /// <summary>
+    /// Evaluates the rollover / max-duration / scheduled-stop boundary for the active take. Pure
+    /// arithmetic (see <see cref="RecordingBoundaries"/>) - no lock and no allocation - so it is safe
+    /// on the UI health tick. The only I/O is the segment-size probe, and only when a size rollover is
+    /// configured.
+    /// </summary>
+    public RecordingBoundary EvaluateBoundary(RecordingConfig config, long nowUtcTicks)
+    {
+        if (_disposed != 0 || !_isRecording) return RecordingBoundary.None;
+
+        long segmentBytes = config.SegmentRolloverGigabytes > 0 ? CurrentSegmentBytes : 0;
+
+        return RecordingBoundaries.Evaluate(
+            config, TakeStartUtcTicks, SegmentStartUtcTicks, segmentBytes, nowUtcTicks);
+    }
+
+    /// <summary>
+    /// Rolls the take into its next segment (NET-008): the SAME single finalize path
+    /// (<see cref="Disarm"/>) followed by an arm of the next …_partNN via <see cref="ArmNextSegment"/>.
+    /// This method touches no gate state itself, so a rollover cannot become a second stop path
+    /// (ADR-0005) - it is a Disarm+Arm cycle and nothing more.
+    ///
+    /// <para>Returns false when there was nothing to roll, or when the next segment could not be armed.
+    /// In the latter case the take is left stopped rather than silently recording into a dead
+    /// transport, and the arm's own <see cref="RecordingError"/> has already reported why.</para>
+    /// </summary>
+    public bool RollSegment(RecordingConfig config, StreamFormat format, RecordingStopReason reason)
+    {
+        if (!CanRollSegment) return false;
+
+        if (!Disarm(reason, out RecordingStopSummary? segmentSummary))
+        {
+            return false;
+        }
+
+        bool rearmed = ArmNextSegment(config, format);
+        if (!rearmed)
+        {
+            AppLogger.LogError(
+                $"Segment rollover armed no continuation after {segmentSummary?.Path}; the take is stopped.");
+        }
+
+        return rearmed;
     }
 
     // ============================================================================================

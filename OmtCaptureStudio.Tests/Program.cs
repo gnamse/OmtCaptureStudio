@@ -80,6 +80,7 @@ class Program
         TestMediaBufferPool();
         TestPipeWriterLoop();
         TestFfmpegArguments();
+        TestScheduledSegmentedCapture();
 
         TestMainWindowViewModel();
 
@@ -428,11 +429,12 @@ class Program
             case "0.683": TestMediaBufferPool(); break;
             case "0.684": TestPipeWriterLoop(); break;
             case "0.685": TestFfmpegArguments(); break;
+            case "0.686": TestScheduledSegmentedCapture(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");
                 Console.Error.WriteLine("Known: 0, 0.5, 0.6, 0.65, 0.7, 0.71, 0.69, 0.72, 0.68, 0.67, 0.671, 0.672, " +
-                                        "0.673, 0.674, 0.675, 0.676, 0.677, 0.678, 0.679, 0.681, 0.682, 0.683, 0.684, 0.685, 0.75");
+                                        "0.673, 0.674, 0.675, 0.676, 0.677, 0.678, 0.679, 0.681, 0.682, 0.683, 0.684, 0.685, 0.686, 0.75");
                 return 2;
         }
 
@@ -512,6 +514,205 @@ class Program
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> Architectural seams successfully verified!");
         Console.ResetColor();
+    }
+
+    /// <summary>
+    /// NET-008: scheduled / segmented capture. Pure boundary and schedule arithmetic, a preset
+    /// round-trip, and the rollover driven through the ARM on an injected clock - so the whole policy
+    /// is asserted with zero real waits.
+    /// </summary>
+    static void TestScheduledSegmentedCapture()
+    {
+        Console.WriteLine("\n[Step 0.686] Verifying scheduled/segmented capture (rollover, max-duration, presets, schedule)...");
+
+        long t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks;
+        long tenMin = TimeSpan.FromMinutes(10).Ticks;
+
+        // ---- 1. Rollover arithmetic is pure and BOUNDARY-EXACT --------------------------------
+        var minutes = new RecordingConfig { SegmentRolloverMinutes = 10 };
+        Expect(!RecordingBoundaries.RolloverDue(minutes, t0, 0, t0 + tenMin - 1),
+            "A 10-minute rollover must NOT fire one tick before the boundary.");
+        Expect(RecordingBoundaries.RolloverDue(minutes, t0, 0, t0 + tenMin),
+            "A 10-minute rollover must fire exactly AT the boundary.");
+
+        var bySize = new RecordingConfig { SegmentRolloverGigabytes = 2 };
+        Expect(!RecordingBoundaries.RolloverDue(bySize, t0, 1_999_999_999, t0),
+            "A 2 GB rollover must not fire one byte early.");
+        Expect(RecordingBoundaries.RolloverDue(bySize, t0, 2_000_000_000, t0),
+            "A 2 GB rollover must fire at exactly 2.0 decimal GB.");
+
+        var bothTriggers = new RecordingConfig { SegmentRolloverMinutes = 60, SegmentRolloverGigabytes = 1 };
+        Expect(RecordingBoundaries.RolloverDue(bothTriggers, t0, 1_000_000_000, t0),
+            "With both triggers set, the segment must roll on whichever fires first (size here, 1 min in).");
+
+        var allOff = new RecordingConfig();
+        Expect(!RecordingBoundaries.RolloverDue(allOff, t0, long.MaxValue / 4, t0 + TimeSpan.FromDays(30).Ticks),
+            "With both rollover triggers off, nothing may ever roll a segment.");
+
+        // ---- 2. Priority: a rollover beats a take-level stop due at the same instant -----------
+        var tie = new RecordingConfig { SegmentRolloverMinutes = 10, MaxDurationMinutes = 10 };
+        Expect(RecordingBoundaries.Evaluate(tie, t0, t0, 0, t0 + tenMin) == RecordingBoundary.SegmentRollover,
+            "When a rollover and the max duration fall due together the rollover must win, so the take " +
+            "yields a full set of segments instead of stopping early.");
+
+        // ---- 3. Max duration and scheduled stop ------------------------------------------------
+        var maxOnly = new RecordingConfig { MaxDurationMinutes = 30 };
+        Expect(RecordingBoundaries.Evaluate(maxOnly, t0, t0, 0, t0 + TimeSpan.FromMinutes(30).Ticks - 1) == RecordingBoundary.None,
+            "One tick before the max duration the take must keep recording.");
+        Expect(RecordingBoundaries.Evaluate(maxOnly, t0, t0, 0, t0 + TimeSpan.FromMinutes(30).Ticks) == RecordingBoundary.MaxDuration,
+            "At the max duration the take must report MaxDuration.");
+
+        // Max duration is measured from the TAKE start: a segment that began 20 min in has 10 min left.
+        var spanning = new RecordingConfig { MaxDurationMinutes = 30, SegmentRolloverMinutes = 25 };
+        long segStartAt20 = t0 + TimeSpan.FromMinutes(20).Ticks;
+        Expect(RecordingBoundaries.Evaluate(spanning, t0, segStartAt20, 0, segStartAt20 + TimeSpan.FromMinutes(5).Ticks) == RecordingBoundary.None,
+            "Max duration must be measured from the TAKE start, not the current segment: 25 min into a " +
+            "30 min take with a fresh 25 min segment is still recording.");
+        Expect(RecordingBoundaries.Evaluate(spanning, t0, segStartAt20, 0, t0 + TimeSpan.FromMinutes(30).Ticks) == RecordingBoundary.MaxDuration,
+            "30 minutes into the TAKE, the max duration must fire even though the current segment is young.");
+
+        long stopTicks = t0 + TimeSpan.FromMinutes(45).Ticks;
+        var schedStop = new RecordingConfig { ScheduledStopUtc = new DateTime(stopTicks, DateTimeKind.Utc) };
+        Expect(RecordingBoundaries.Evaluate(schedStop, t0, t0, 0, stopTicks - 1) == RecordingBoundary.None,
+            "One tick before the scheduled stop the take must keep recording.");
+        Expect(RecordingBoundaries.Evaluate(schedStop, t0, t0, 0, stopTicks) == RecordingBoundary.ScheduledStop,
+            "At the scheduled wall-clock stop the take must report ScheduledStop.");
+
+        // ---- 4. Scheduled START arithmetic -----------------------------------------------------
+        var at0 = new DateTime(t0, DateTimeKind.Utc);
+        var delayed = new RecordingConfig { ScheduledStartDelayMinutes = 5 };
+        Expect(RecordingSchedule.ResolveStartUtc(delayed, at0) == at0.AddMinutes(5),
+            "A 5-minute start delay must resolve to now + 5 minutes.");
+        var absolute = new RecordingConfig { ScheduledStartUtc = new DateTime(stopTicks, DateTimeKind.Utc) };
+        Expect(RecordingSchedule.ResolveStartUtc(absolute, at0) == new DateTime(stopTicks, DateTimeKind.Utc),
+            "An absolute scheduled start must resolve to that instant.");
+
+        var bothStarts = new RecordingConfig
+        {
+            ScheduledStartUtc = new DateTime(stopTicks, DateTimeKind.Utc),
+            ScheduledStartDelayMinutes = 5
+        };
+        Expect(RecordingSchedule.ResolveStartUtc(bothStarts, at0) == at0.AddMinutes(5),
+            "When a delay and an absolute instant are both set the DELAY wins (the more specific instruction).");
+
+        Expect(!RecordingSchedule.StartReached(at0.AddMinutes(5), at0),
+            "A start instant in the future must not read as reached.");
+        Expect(RecordingSchedule.StartReached(at0.AddMinutes(5), at0.AddMinutes(5)),
+            "A start instant exactly now must read as reached.");
+        Expect(RecordingSchedule.StartReached(null, at0),
+            "No scheduled instant at all means 'start now'.");
+
+        // ---- 5. Preset round-trip --------------------------------------------------------------
+        string mine = Path.Combine(Path.GetTempPath(), "mine");
+        var cfg = new RecordingConfig { OutputDirectory = Path.Combine(Path.GetTempPath(), "preset-dest"), FilenamePrefix = "PFX" };
+        foreach (RecordingPreset preset in RecordingPresets.BuiltIn)
+        {
+            RecordingPresets.Apply(preset, cfg);
+            Expect(RecordingPresets.Matches(preset, cfg),
+                $"Preset '{preset.Name}' must match the config it was just applied to.");
+
+            RecordingPreset captured = RecordingPresets.Capture(cfg, preset.Name, preset.Description);
+            Expect(captured.ContainerFormat == preset.ContainerFormat
+                   && captured.EncoderChoice == preset.EncoderChoice
+                   && captured.Quality == preset.Quality
+                   && captured.SegmentRolloverMinutes.Equals(preset.SegmentRolloverMinutes)
+                   && captured.SegmentRolloverGigabytes.Equals(preset.SegmentRolloverGigabytes)
+                   && captured.MaxDurationMinutes.Equals(preset.MaxDurationMinutes),
+                $"Preset '{preset.Name}' must survive an Apply then Capture round-trip on every axis.");
+        }
+
+        var noDest = new RecordingPreset("No destination", "", OutputContainerFormat.MP4, VideoEncoderChoice.AutoHardware, QualityPreset.High);
+        var destCfg = new RecordingConfig { OutputDirectory = mine, FilenamePrefix = "MINE" };
+        RecordingPresets.Apply(noDest, destCfg);
+        Expect(destCfg.OutputDirectory == mine,
+            "A preset carrying no destination must leave the operator's folder untouched - a preset must not " +
+            "redirect output on a machine it was not authored on.");
+        Expect(destCfg.FilenamePrefix == "MINE",
+            "A preset carrying no prefix must leave the operator's prefix untouched.");
+        Expect(RecordingPresets.Matches(noDest, new RecordingConfig()),
+            "A destination-less preset must treat the folder as a wildcard: a default config on the same " +
+            "codec axis DOES match it (Matches is not a destination assertion).");
+        Expect(!RecordingPresets.Matches(noDest, new RecordingConfig { Quality = QualityPreset.Low }),
+            "A config whose quality differs from the preset must NOT match it.");
+
+        var setsRollover = new RecordingPreset("Rolls", "", OutputContainerFormat.MP4, VideoEncoderChoice.AutoHardware, QualityPreset.High)
+        {
+            SegmentRolloverMinutes = 10
+        };
+        RecordingPresets.Apply(setsRollover, destCfg);
+        Expect(destCfg.SegmentRolloverMinutes.Equals(10d), "A preset that sets a rollover must write it.");
+        RecordingPresets.Apply(noDest, destCfg);
+        Expect(destCfg.SegmentRolloverMinutes.Equals(0d),
+            "A preset with no rollover must CLEAR a rollover left by a previous preset rather than inherit it.");
+
+        // ---- 6. The rollover through the ARM, on an injected clock -----------------------------
+        long nowTicks = t0;
+        var armCfg = new RecordingConfig
+        {
+            OutputDirectory = Path.GetTempPath(),
+            FilenamePrefix = "RollTest",
+            SegmentRolloverMinutes = 10
+        };
+        var format = new StreamFormat { Width = 320, Height = 240, FrameRate = 10.0, SampleRate = 48000, Channels = 2 };
+        var armSink = new SignalRecordingSink();
+        using var arm = new RecordingArm(armSink, ownsSink: false, utcNowTicks: () => nowTicks);
+
+        if (!arm.Arm(armCfg, format))
+        {
+            Console.WriteLine(" -> [SKIP] storage preflight refused the temp volume; the arm-level rollover is skipped " +
+                              "(the pure arithmetic above still covers the rollover policy).");
+            return;
+        }
+
+        string firstPath = arm.CurrentRecordingPath!;
+        long takeStart = arm.TakeStartUtcTicks;
+
+        nowTicks = takeStart + tenMin - 1;
+        Expect(arm.EvaluateBoundary(armCfg) == RecordingBoundary.None,
+            "One tick before the rollover the arm must report no boundary.");
+        Expect(arm.IsRecording, "No boundary due means the gate stays open.");
+
+        nowTicks = takeStart + tenMin;
+        Expect(arm.EvaluateBoundary(armCfg) == RecordingBoundary.SegmentRollover,
+            "At the boundary the arm must report SegmentRollover.");
+
+        int summaries = 0;
+        arm.RecordingStopped += _ => summaries++;
+
+        Expect(arm.RollSegment(armCfg, format, RecordingBoundaryReasons.SegmentRollover),
+            "RollSegment must finalize the segment and arm the continuation.");
+        Expect(summaries == 1,
+            "A rollover must publish exactly one segment summary - it goes through the single finalize path.");
+        Expect(arm.IsRecording, "After a rollover the take must still be recording (the take continues).");
+        Expect(arm.CurrentSegmentIndex == 2,
+            $"A rollover must advance to segment 2; saw {arm.CurrentSegmentIndex}.");
+        Expect(arm.CurrentTakeBasePath == firstPath,
+            "A rollover must keep the SAME take base path so the _partNN files sort together.");
+        Expect(arm.CurrentRecordingPath != null
+               && arm.CurrentRecordingPath != firstPath
+               && arm.CurrentRecordingPath.Contains("_part02"),
+            $"A rolled segment must be named _part02; saw {arm.CurrentRecordingPath}.");
+        Expect(arm.TakeStartUtcTicks == takeStart,
+            "A rollover must NOT reset the take clock - max duration is measured from the take start.");
+        Expect(arm.SegmentStartUtcTicks == nowTicks,
+            "A rollover must reset the SEGMENT clock so the new segment gets a full rollover budget.");
+        Expect(arm.EvaluateBoundary(armCfg) == RecordingBoundary.None,
+            "The rolled-in segment must start with a fresh rollover budget.");
+
+        // Take-level max duration, once the segment clock is fresh.
+        armCfg.MaxDurationMinutes = 15;
+        nowTicks = takeStart + TimeSpan.FromMinutes(15).Ticks;
+        Expect(arm.EvaluateBoundary(armCfg) == RecordingBoundary.MaxDuration,
+            "15 minutes into the TAKE (5 minutes into segment 2) the arm must report MaxDuration.");
+
+        // ... and the rollover still wins when both fall due.
+        nowTicks = arm.SegmentStartUtcTicks + tenMin;
+        Expect(arm.EvaluateBoundary(armCfg) == RecordingBoundary.SegmentRollover,
+            "Through the arm, a rollover due at the same moment as the max duration still wins.");
+
+        Console.WriteLine(" -> Rollover arithmetic boundary-exact (10 min / 2 GB); take clock survives the rollover; " +
+                          "presets round-trip; schedule arithmetic pure-clock; arm rolled segment 1 -> 2 as _part02 " +
+                          "through the single finalize path!");
     }
 
     /// <summary>NET-005: [Step 0.75] MainWindowViewModel MVVM state, commands and seams. The ~330-line presentation-assertion block migrated to the fixture + `Expect`, so each fact is one assertion instead of a four-line throw block.</summary>

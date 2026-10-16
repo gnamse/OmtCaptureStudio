@@ -128,6 +128,12 @@ public class CaptureSession : IDisposable
     public event Action? InputRecovered;        // frames returned within grace; next segment resumed
     public event Action? InputRecoveryFailed;   // bounded grace expired; take stopped, alarm persists
 
+    // Scheduled / segmented capture events (NET-008). Raised on the same UI health tick as the ADR-0002
+    // events above, so subscribers may touch presentation state directly.
+    public event Action<int>? SegmentRolledOver;  // rollover: the take CONTINUES in segment N
+    public event Action? MaxDurationReached;      // max-duration auto-stop: the take ended
+    public event Action? ScheduledStopReached;    // wall-clock scheduled stop: the take ended
+
     /// <summary>
     /// Default constructor initializing the production engine stack.
     /// </summary>
@@ -418,6 +424,9 @@ public class CaptureSession : IDisposable
     {
         if (_disposed) return;
 
+        // NET-008: scheduled/segmented-capture boundaries ride the same tick (no timer of their own).
+        EvaluateRecordingBoundaries();
+
         UpdateWatchdogArming();
 
         switch (_inputWatchdog.Poll())
@@ -448,6 +457,53 @@ public class CaptureSession : IDisposable
                 "auto-reconnect and stopping the take. The finalized segment remains playable.");
             EndTake();
             InputRecoveryFailed?.Invoke();
+        }
+    }
+
+    /// <summary>
+    /// NET-008: the scheduled / segmented-capture boundary, evaluated on the UI health tick beside the
+    /// input-loss poll. Pure comparisons - no timer, no allocation, no I/O beyond the size probe a
+    /// configured GB rollover asks for.
+    ///
+    /// <para>A rollover is a Disarm+Arm cycle through the arm's single finalize path and leaves the take
+    /// OPEN, exactly like the ADR-0002 outage boundary. Max-duration and scheduled-stop END the take:
+    /// they run the same <see cref="EndTake"/> plus stop sequence as an operator stop, so the watchdog
+    /// and the take bookkeeping converge on one path.</para>
+    /// </summary>
+    private void EvaluateRecordingBoundaries()
+    {
+        if (!_recorder.IsRecording) return;
+        if (_activeRecordingConfig is not { } config || _activeRecordingFormat is not { } format) return;
+
+        RecordingBoundary boundary = _recorder.EvaluateBoundary(config);
+        if (boundary == RecordingBoundary.None) return;
+
+        switch (boundary)
+        {
+            case RecordingBoundary.SegmentRollover:
+                if (_recorder.RollSegment(config, format, RecordingBoundaryReasons.SegmentRollover))
+                {
+                    AppLogger.LogInfo(
+                        $"Segment rollover: recording continues in segment {_recorder.CurrentSegmentIndex}: " +
+                        $"{_recorder.CurrentRecordingPath}");
+                    SegmentRolledOver?.Invoke(_recorder.CurrentSegmentIndex);
+                }
+                break;
+
+            case RecordingBoundary.MaxDuration:
+                AppLogger.LogInfo(
+                    $"Max take duration ({config.MaxDurationMinutes:0.#} min) reached; stopping the take.");
+                EndTake();
+                _recorder.StopRecording(RecordingBoundaryReasons.MaxDuration);
+                MaxDurationReached?.Invoke();
+                break;
+
+            case RecordingBoundary.ScheduledStop:
+                AppLogger.LogInfo("Scheduled stop time reached; stopping the take.");
+                EndTake();
+                _recorder.StopRecording(RecordingBoundaryReasons.ScheduledStop);
+                ScheduledStopReached?.Invoke();
+                break;
         }
     }
 

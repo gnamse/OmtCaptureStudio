@@ -317,6 +317,57 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string _outputDirectory = "";
 
+    // ------------------------------------------------------------------------------------------
+    // NET-008: scheduled / segmented capture + named presets.
+    //
+    // Every control below lives inside the existing `IsRecordingConfigEnabled` region, so a mid-flight
+    // change can never restart a running take (the live-changing-selector locking rule).
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>The named preset catalog, plus "Custom" so the picker can never lie about the state.</summary>
+    public IReadOnlyList<string> RecordingPresetNames { get; } = BuildRecordingPresetNames();
+
+    /// <summary>The selected preset name. Selecting one applies its axis; editing any control = Custom.</summary>
+    [ObservableProperty]
+    private string _selectedRecordingPreset = RecordingPresets.CustomName;
+
+    public static IReadOnlyList<RecordingChoiceOption> RolloverMinuteOptions { get; } = new RecordingChoiceOption[]
+    {
+        new("Off", 0), new("1 min", 1), new("5 min", 5), new("10 min", 10),
+        new("15 min", 15), new("30 min", 30), new("60 min", 60)
+    };
+
+    public static IReadOnlyList<RecordingChoiceOption> RolloverGigabyteOptions { get; } = new RecordingChoiceOption[]
+    {
+        new("Off", 0), new("1 GB", 1), new("2 GB", 2), new("5 GB", 5), new("10 GB", 10)
+    };
+
+    public static IReadOnlyList<RecordingChoiceOption> MaxDurationOptions { get; } = new RecordingChoiceOption[]
+    {
+        new("Off", 0), new("15 min", 15), new("30 min", 30), new("1 h", 60),
+        new("2 h", 120), new("4 h", 240), new("8 h", 480)
+    };
+
+    public static IReadOnlyList<RecordingChoiceOption> ScheduleDelayOptions { get; } = new RecordingChoiceOption[]
+    {
+        new("Off", 0), new("1 min", 1), new("5 min", 5), new("15 min", 15), new("30 min", 30), new("60 min", 60)
+    };
+
+    [ObservableProperty]
+    private RecordingChoiceOption _selectedRolloverMinutes = RolloverMinuteOptions[0];
+
+    [ObservableProperty]
+    private RecordingChoiceOption _selectedRolloverGigabytes = RolloverGigabyteOptions[0];
+
+    [ObservableProperty]
+    private RecordingChoiceOption _selectedMaxDuration = MaxDurationOptions[0];
+
+    [ObservableProperty]
+    private RecordingChoiceOption _selectedScheduleDelay = ScheduleDelayOptions[0];
+
+    /// <summary>True while a preset is being applied, so the per-axis hooks don't flip the picker back.</summary>
+    private bool _applyingRecordingPreset;
+
     // 8. Status & Telemetry
     [ObservableProperty]
     private string _statusText = "Ready. Discovering OMT sources on network...";
@@ -549,6 +600,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             SelectedEncoderChoice = VideoEncoderChoice.AutoHardware;
         }
+
+        // NET-008: a manual container change means the config no longer matches a named preset.
+        MarkRecordingPresetCustom();
     }
 
     partial void OnSelectedSourceChanged(OmtSourceInfo? value)
@@ -1473,13 +1527,30 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 return;
             }
 
+            DateTime nowUtc = DateTime.UtcNow;
+
             var config = new RecordingConfig
             {
                 ContainerFormat = SelectedContainerFormat,
                 EncoderChoice = SelectedEncoderChoice,
                 Quality = SelectedQualityPreset,
-                OutputDirectory = outDir
+                OutputDirectory = outDir,
+
+                // NET-008: segmented / scheduled capture, read from the bound option selections so the
+                // config can never carry a value the operator cannot see in the UI.
+                SegmentRolloverMinutes = SelectedRolloverMinutes?.Value ?? 0,
+                SegmentRolloverGigabytes = SelectedRolloverGigabytes?.Value ?? 0,
+                MaxDurationMinutes = SelectedMaxDuration?.Value ?? 0,
+                ScheduledStartDelayMinutes = SelectedScheduleDelay?.Value ?? 0
             };
+
+            // A start delay is resolved to an absolute instant HERE, once, so what the arm evaluates is
+            // a plain timestamp compare rather than a moving target.
+            if (RecordingSchedule.ResolveStartUtc(config, nowUtc) is { } startUtc)
+            {
+                config.ScheduledStartUtc = startUtc;
+                config.ScheduledStartDelayMinutes = 0;
+            }
 
             bool started = _session.StartRecording(config);
             if (!started)
@@ -1488,6 +1559,92 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             }
         }
     }
+
+    // ============================================================================================
+    // NET-008: named presets + scheduled / segmented capture
+    // ============================================================================================
+
+    private static string[] BuildRecordingPresetNames()
+    {
+        var names = new string[RecordingPresets.BuiltIn.Count + 1];
+        for (int i = 0; i < RecordingPresets.BuiltIn.Count; i++)
+        {
+            names[i] = RecordingPresets.BuiltIn[i].Name;
+        }
+
+        names[^1] = RecordingPresets.CustomName;
+        return names;
+    }
+
+    /// <summary>Finds the option whose value matches, else the first (Off).</summary>
+    private static RecordingChoiceOption OptionFor(IReadOnlyList<RecordingChoiceOption> options, double value)
+    {
+        for (int i = 0; i < options.Count; i++)
+        {
+            if (options[i].Value.Equals(value)) return options[i];
+        }
+
+        return options[0];
+    }
+
+    /// <summary>
+    /// Selecting a preset writes its axis onto the controls. The destination is only written when the
+    /// preset carries one - a preset authored on another machine must not silently redirect output.
+    /// </summary>
+    partial void OnSelectedRecordingPresetChanged(string value)
+    {
+        if (_applyingRecordingPreset) return;
+
+        RecordingPreset? preset = RecordingPresets.FindByName(value);
+        if (preset == null) return; // "Custom" - nothing to apply
+
+        _applyingRecordingPreset = true;
+        try
+        {
+            SelectedContainerFormat = preset.ContainerFormat;
+            SelectedEncoderChoice = preset.EncoderChoice;
+            SelectedQualityPreset = preset.Quality;
+            SelectedRolloverMinutes = OptionFor(RolloverMinuteOptions, preset.SegmentRolloverMinutes);
+            SelectedRolloverGigabytes = OptionFor(RolloverGigabyteOptions, preset.SegmentRolloverGigabytes);
+            SelectedMaxDuration = OptionFor(MaxDurationOptions, preset.MaxDurationMinutes);
+
+            if (!string.IsNullOrWhiteSpace(preset.OutputDirectory))
+            {
+                OutputDirectory = preset.OutputDirectory!;
+            }
+
+            StatusText = $"Recording preset applied: {preset.Name}";
+        }
+        finally
+        {
+            _applyingRecordingPreset = false;
+        }
+    }
+
+    /// <summary>
+    /// Any manual edit to a preset axis means the config no longer matches a named preset, so the
+    /// picker flips to "Custom" rather than displaying a name that has stopped being true.
+    /// </summary>
+    private void MarkRecordingPresetCustom()
+    {
+        if (_applyingRecordingPreset) return;
+
+        _applyingRecordingPreset = true;
+        try
+        {
+            SelectedRecordingPreset = RecordingPresets.CustomName;
+        }
+        finally
+        {
+            _applyingRecordingPreset = false;
+        }
+    }
+
+    partial void OnSelectedEncoderChoiceChanged(VideoEncoderChoice value) => MarkRecordingPresetCustom();
+    partial void OnSelectedQualityPresetChanged(QualityPreset value) => MarkRecordingPresetCustom();
+    partial void OnSelectedRolloverMinutesChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
+    partial void OnSelectedRolloverGigabytesChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
+    partial void OnSelectedMaxDurationChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
 
     [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task BrowseOutputDirectoryAsync()
@@ -2002,3 +2159,22 @@ public sealed record AsioInputPairOption(int FirstChannelIndex, string DisplayNa
 /// <param name="Channels">Input channels the driver reported (empty when the probe failed).</param>
 /// <param name="Reason">Why the probe failed, or <c>null</c> on success.</param>
 internal sealed record AsioPairProbeResult(IReadOnlyList<AsioInputChannel> Channels, string? Reason);
+
+/// <summary>
+/// One labelled choice in a recording-settings dropdown (NET-008): the operator sees
+/// <see cref="Label"/>, the config receives <see cref="Value"/>. A class rather than a struct so a
+/// ComboBox selection matches the instance in <c>ItemsSource</c> by reference.
+/// </summary>
+public sealed class RecordingChoiceOption
+{
+    public RecordingChoiceOption(string label, double value)
+    {
+        Label = label;
+        Value = value;
+    }
+
+    public string Label { get; }
+    public double Value { get; }
+
+    public override string ToString() => Label;
+}
