@@ -333,6 +333,65 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     public IBrush RecordingUnavailableForeground { get; } = StudioPalette.MeterDanger;
 
     // ------------------------------------------------------------------------------------------
+    // NET-012 (distill): progressive disclosure. The Operate-mode primary path is
+    // pick source -> connect -> record; everything else is configuration behind smart defaults
+    // (MP4 / AutoHardware / High / no rollover / no schedule - which are already the defaults).
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// True when the recording bar's ADVANCED tier is expanded. Collapsed by default so the default
+    /// view is preset -> folder -> record and nothing else.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isAdvancedRecordingOptionsExpanded;
+
+    /// <summary>The expander's accessible name, which states the action rather than the state.</summary>
+    public string AdvancedOptionsAutomationName => IsAdvancedRecordingOptionsExpanded
+        ? "Hide advanced recording options"
+        : "Show advanced recording options";
+
+    [RelayCommand]
+    private void ToggleAdvancedRecordingOptions()
+        => IsAdvancedRecordingOptionsExpanded = !IsAdvancedRecordingOptionsExpanded;
+
+    /// <summary>
+    /// NET-012: the broadcast configuration row is revealed by the BROADCAST state only.
+    ///
+    /// <para>Deliberately keyed to broadcast state and NOT to recording state: collapsing this row must
+    /// never disturb a take. A broadcast switched off mid-recording collapses the row while the
+    /// recording keeps running - the two axes are independent.</para>
+    /// </summary>
+    public bool IsBroadcastRowVisible => IsDesktopCaptureActive;
+
+    /// <summary>
+    /// The compact broadcast summary substitutes for the row exactly when the row is hidden - the point
+    /// is that hiding the pickers never hides WHICH devices are selected.
+    /// </summary>
+    public bool IsLiveSettingSummaryVisible => !IsBroadcastRowVisible;
+
+    /// <summary>Chevron direction for the Advanced disclosure (down = collapsed, up = expanded).</summary>
+    public bool IsAdvancedChevronDown => !IsAdvancedRecordingOptionsExpanded;
+
+    /// <summary>
+    /// The compact "what is selected to go out" summary shown in the header while the broadcast row is
+    /// collapsed, so hiding the pickers never hides WHICH devices are in play.
+    /// </summary>
+    public string LiveSettingSummary
+    {
+        get
+        {
+            string target = string.IsNullOrWhiteSpace(SelectedCaptureTarget?.DisplayName)
+                ? "No target"
+                : SelectedCaptureTarget!.DisplayName;
+            string audio = string.IsNullOrWhiteSpace(SelectedCaptureAudioOption?.DisplayName)
+                ? "No audio"
+                : SelectedCaptureAudioOption!.DisplayName;
+
+            return $"{target} · {audio}";
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
     // NET-011: an optional SECOND destination. Non-empty means the take fans out through a composite
     // sink, so a primary that fills or fails is shed while the take carries on to the backup folder.
     // ------------------------------------------------------------------------------------------
@@ -689,6 +748,20 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     partial void OnIsRecordingCloseOverlayVisibleChanged(bool value)
     {
         IsMainContentEnabled = !value;
+    }
+
+    partial void OnIsDesktopCaptureActiveChanged(bool value)
+    {
+        // The row's visibility and the collapsed-state summary both ride the broadcast state.
+        OnPropertyChanged(nameof(IsBroadcastRowVisible));
+        OnPropertyChanged(nameof(IsLiveSettingSummaryVisible));
+        OnPropertyChanged(nameof(LiveSettingSummary));
+    }
+
+    partial void OnIsAdvancedRecordingOptionsExpandedChanged(bool value)
+    {
+        OnPropertyChanged(nameof(AdvancedOptionsAutomationName));
+        OnPropertyChanged(nameof(IsAdvancedChevronDown));
     }
 
     partial void OnSelectedCaptureAudioOptionChanged(HostAudioCaptureOption value)
@@ -2175,6 +2248,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         // Selector locks, derived once here from the state machine (DESIGN §7).
         IsSourceSelectorEnabled = _broadcastState.IsSourceSelectorEnabled;
         IsCaptureSelectorEnabled = _broadcastState.IsCaptureSelectorEnabled;
+
+        // NET-012: the collapsed broadcast row's summary is derived from the same projection, so it is
+        // current the moment the row hides.
+        OnPropertyChanged(nameof(LiveSettingSummary));
     }
 
     /// <summary>

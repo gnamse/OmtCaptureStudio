@@ -159,13 +159,51 @@ record actions.
 
 The top bar is a **two-row responsive grid** inside one `Border`:
 
-- **Row 0** — brand, `Source:` picker, refresh, Connect/Disconnect, divider, Test Signal.
-- **Row 1** — broadcast row: `Target:`, `Audio:`, `Network:`, refresh, Broadcast toggle.
+- **Row 0** — brand, `Source:` picker, refresh, Connect/Disconnect, divider, Test Signal,
+  **compact live-setting summary**, **Broadcast toggle**.
+- **Row 1** — broadcast configuration: `Target:`, `Audio:`, `Network:`, refresh.
 - Rows below: viewport + VU meter (star), recording config bar, status bar.
 
 Do not collapse these back into one row; that is what caused the original crowding
 at 950px. Preserve every `Grid.Column` assignment when editing — add to the row, do
 not restructure it.
+
+**NET-012 amendment — row 1 collapses until Broadcast is ON.** The broadcast configuration
+row is `IsVisible`-bound to the **broadcast state** (`IsBroadcastRowVisible`), and the
+Broadcast toggle moved up to row 0 because it is the entry point that reveals the row.
+
+- Collapsing-when-off and locking-when-on are **different axes**. Collapsing is visibility;
+  the selector locks (`IsMainContentEnabled` / `IsSourceSelectorEnabled` /
+  `IsCaptureSelectorEnabled`) still apply while a broadcast is live.
+- The row's visibility is keyed to **broadcast** state and never to **recording** state, so a
+  take is never disturbed by the collapse. A broadcast switched off mid-recording collapses
+  the row and the recording keeps running.
+- While collapsed, row 0 carries a **compact live-setting summary** (`LiveSettingSummary`,
+  e.g. `Desktop · SystemAudio`) so hiding the pickers never hides *which* target and audio are
+  selected. It is `Polite` — descriptive, not an alarm.
+- Every row-1 `Grid.Column` assignment is preserved (including the now-unused column 8) so the
+  row can be restored or extended without re-deriving the layout.
+
+### 5.4 The recording bar is two tiers (NET-012)
+
+The Operate-mode primary path is **pick source → connect → record**, so the bar shows only what
+that path needs:
+
+- **Defaults strip (always visible)** — PRESET, SAVE FOLDER (+ Browse/Open), duration, stats,
+  Record, and the `Advanced ▾` disclosure.
+- **Advanced tier (collapsed by default)** — CONTAINER, ENCODER, QUALITY, BACKUP FOLDER (+ Browse),
+  ROLL OVER, OR SIZE, MAX LENGTH, START IN.
+
+The defaults are already the right ones (MP4 / Auto Hardware / High / no rollover / no schedule),
+so nothing is hidden that the primary path needs. Collapsing is **visibility only**: every control
+still exists, still works, and still sits inside the `IsRecordingConfigEnabled` lock, so the
+live-changing-selector rule is unchanged. Editing any control still switches the preset picker to
+Custom from inside the tier.
+
+The disclosure is a `ToggleButton` with a **drawn chevron** (`IconChevronDown` / `IconChevronUp`
+`StreamGeometry`, §6 — no glyphs, no emoji), `MinHeight="30"` so it introduces no second control
+height, named and tooltipped, and keyboard reachable. Expanded state is an observable
+(`IsAdvancedRecordingOptionsExpanded`) so it is assertable headlessly.
 
 ### 5.3 The VU meter is a fixed column
 
@@ -223,3 +261,7 @@ Non-negotiable for every interactive control:
 - [ ] Verified at `MinWidth="950"` **and** maximized, not just the default 1240px
 - [ ] `MinHeight="30"` on any new toolbar control
 - [ ] Headless test suite still passes (ViewModel constructs with no Avalonia `Application`)
+- [ ] Progressive disclosure: anything hidden behind a disclosure is **visibility only** — the
+      control still exists, still works, and is still inside its enable/disable lock
+- [ ] Any collapsed row still surfaces the live/selected information it hid (a compact summary),
+      and its visibility is keyed to the axis that owns it (broadcast, not recording)
