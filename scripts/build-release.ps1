@@ -306,15 +306,30 @@ if ($isccPath) {
         if (Test-Path $setupShaPath) { Remove-Item $setupShaPath -Force -ErrorAction SilentlyContinue }
 
         & $isccPath /DMyAppVersion=$nextVersion /Qp $issScript
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $setupExePath)) {
-            $setupHash = (Get-FileHash -Path $setupExePath -Algorithm SHA256).Hash.ToLowerInvariant()
-            Set-Content -Path $setupShaPath -Value "$setupHash  $setupExeName" -NoNewline
-            $setupSizeMb = [math]::Round(((Get-Item $setupExePath).Length / 1MB), 2)
-            $setupBuilt = $true
-            Write-Host "   [OK] Setup installer built: $setupExeName ($setupSizeMb MB)" -ForegroundColor Green
-        } else {
-            Write-Host "   [WARNING] Inno Setup compilation failed with exit code $LASTEXITCODE." -ForegroundColor Yellow
+
+        # Same rule as the ffmpeg staging block: once we have invoked the installer
+        # compiler, any failure must abort the release. Previously a non-zero iscc exit
+        # only warned, and the upload block below happily published a release with no
+        # installer in it and no failure signal.
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "   [FAILED] Inno Setup compilation failed with exit code $LASTEXITCODE." -ForegroundColor Red
+            throw "iscc.exe failed (exit code $LASTEXITCODE) compiling '$issScript'. Aborting release: it would ship without its installer."
         }
+
+        $setupItem = Get-Item -LiteralPath $setupExePath -ErrorAction SilentlyContinue
+        if (-not $setupItem -or $setupItem.Length -eq 0) {
+            throw "iscc.exe reported success but no usable '$setupExePath' was produced. Aborting release: it would ship without its installer."
+        }
+
+        $setupHash = (Get-FileHash -Path $setupExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Set-Content -Path $setupShaPath -Value "$setupHash  $setupExeName" -NoNewline
+        $setupSizeMb = [math]::Round(($setupItem.Length / 1MB), 2)
+        $setupBuilt = $true
+        Write-Host "   [OK] Setup installer built: $setupExeName ($setupSizeMb MB)" -ForegroundColor Green
+    } else {
+        # iscc.exe is present, so an installer was expected; a missing script would
+        # otherwise fall through to a silent ZIP-only release.
+        throw "iscc.exe was found but the installer script '$issScript' does not exist. Aborting release: it would ship without its installer."
     }
 } else {
     Write-Host "   [INFO] Inno Setup compiler (iscc.exe) not found. Skipping installer generation." -ForegroundColor Yellow
