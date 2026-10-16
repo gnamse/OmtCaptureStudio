@@ -52,7 +52,7 @@ Name: "firewalltask"; Description: "Add Windows Defender Firewall rule for OMT n
 ; Publish folder contents (Single-file exe or complete binaries)
 Source: "..\Publish_AOT\*"; DestDir: "{app}"; Excludes: "*.pdb"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Optional: If FFmpeg was placed in tools/, bundle it directly into app folder
-Source: "..\tools\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tools\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
