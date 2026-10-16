@@ -52,7 +52,38 @@ public interface IRecordingSink : IDisposable
     string DiagnosticTail { get; }
 
     /// <summary>
-    /// Raised when an asynchronous error occurs within the recording transport sink.
+    /// Raised when an asynchronous error occurs within the recording transport sink. A sink that can
+    /// still write (a composite that shed one destination) raises this to REPORT the loss and expects
+    /// the caller to keep recording - see <see cref="IsViable"/>.
     /// </summary>
     event Action<string>? SinkError;
+
+    /// <summary>
+    /// Asked AFTER a sink error: does this sink still have a destination it can write to? (NET-011)
+    ///
+    /// <para>The default is <c>false</c> - a single-destination sink has nowhere to go once its
+    /// transport fails, so the caller's existing stop path runs exactly as before. A composite returns
+    /// <c>true</c> while a child survives, which is what turns a failure into a DEGRADE (keep recording)
+    /// rather than a stop.</para>
+    ///
+    /// <para>Note the polarity: this is deliberately <b>not</b> "is the sink healthy right now". A
+    /// healthy single-destination sink is still not survivable after a failure, and answering <c>true</c>
+    /// to a question like that would silently disable stop-on-sink-error for every existing adapter.</para>
+    /// </summary>
+    bool HasSurvivingDestination => false;
+
+    /// <summary>
+    /// Told that the destination this sink is writing to has failed for <paramref name="reason"/> (low
+    /// space, I/O error) (NET-011). Returns <c>true</c> when the sink shed that destination and has
+    /// another to continue on, reporting it through <paramref name="survivingPath"/>; <c>false</c> when
+    /// it has nowhere left, which means the caller must stop.
+    ///
+    /// <para>The default returns <c>false</c> - a single-destination sink has nowhere to move to, so
+    /// the caller's existing stop path runs unchanged.</para>
+    /// </summary>
+    bool TryShedFailedDestination(string reason, out string? survivingPath)
+    {
+        survivingPath = null;
+        return false;
+    }
 }

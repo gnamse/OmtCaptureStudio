@@ -497,6 +497,27 @@ public sealed class RecordingArm : IDisposable
         if (!RecordingStorageGuard.IsLowOnSpace(driveFormat, freeBytes)) return;
 
         string message = RecordingStorageGuard.LowDiskMessage(freeBytes, path);
+
+        // NET-011: a sink with another destination turns a full volume into a DEGRADE rather than a stop.
+        // The GUARD is unchanged and still watches the PRIMARY - only the question "what do we do about
+        // it?" is now asked of the sink, which is the composite-health consultation ADR-0005 wants the
+        // arm to own. A single-destination sink returns false and today's stop path runs untouched.
+        if (_sink.TryShedFailedDestination(message, out string? survivingPath))
+        {
+            string degraded = RecordingStorageGuard.DegradedMessage(freeBytes, path, survivingPath);
+            AppLogger.LogError(degraded);
+
+            // Follow the survivor so the path/size/bitrate readouts and the stop summary stay truthful -
+            // the primary's file stops growing the moment it is shed.
+            if (!string.IsNullOrWhiteSpace(survivingPath))
+            {
+                _currentRecordingPath = survivingPath;
+            }
+
+            RecordingError?.Invoke(degraded);
+            return;
+        }
+
         AppLogger.LogError(message);
 
         StopLowDisk(message);
@@ -523,6 +544,29 @@ public sealed class RecordingArm : IDisposable
     /// </summary>
     private void OnSinkError(string error)
     {
+        // NET-011: a DEGRADE is not a failure. A composite that shed one destination while others survive
+        // raises SinkError to REPORT the loss, and the take keeps recording - stopping here would throw
+        // away the surviving file for no reason. Only a sink with nowhere left to write ends the take,
+        // through the same single finalize path as everything else (ADR-0005).
+        bool stillViable;
+        try
+        {
+            stillViable = _sink.HasSurvivingDestination;
+        }
+        catch (Exception ex)
+        {
+            // A sink that cannot even answer is treated as gone.
+            AppLogger.LogError($"Recording arm: sink survival check failed: {ex.Message}", ex);
+            stillViable = false;
+        }
+
+        if (stillViable)
+        {
+            AppLogger.LogError($"Recording transport degraded but still writing: {error}");
+            RecordingError?.Invoke(error);
+            return;
+        }
+
         try
         {
             Disarm(RecordingStopReason.SinkError, out _);

@@ -22,9 +22,15 @@ public class StreamRecorderService : IDisposable
 {
     private readonly RecordingArm _arm;
 
-    /// <summary>Default constructor utilizing the production FFmpeg named pipe sink.</summary>
+    /// <summary>
+    /// Default constructor for the production FFmpeg named pipe sink. The concrete sink is chosen when a
+    /// take STARTS rather than here (NET-011): the arm holds its sink from construction, but whether the
+    /// take fans out to a backup destination is only known at <c>Initialize(config, …)</c> time. With no
+    /// backup configured the selector builds exactly one <see cref="FfmpegPipeSink"/>, so a
+    /// single-destination take is unchanged.
+    /// </summary>
     public StreamRecorderService()
-        : this(new FfmpegPipeSink(), ownsSink: true)
+        : this(RecordingSinkSelector.ForProduction(), ownsSink: true)
     {
     }
 

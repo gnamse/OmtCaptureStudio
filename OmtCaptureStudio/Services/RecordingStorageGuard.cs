@@ -184,6 +184,15 @@ public static class RecordingStorageGuard
         => $"Low disk space: only {FormatBytes(freeBytes)} free. Stopping and finalizing recording to {path} to keep it playable.";
 
     /// <summary>
+    /// The DEGRADE message (NET-011): a destination filled, but a surviving destination exists and the
+    /// take carried on there. Deliberately worded differently from <see cref="LowDiskMessage"/> so the
+    /// operator can tell "recording continues elsewhere" from "recording stopped".
+    /// </summary>
+    public static string DegradedMessage(long freeBytes, string filledPath, string? survivingPath)
+        => $"Low disk space: only {FormatBytes(freeBytes)} free at {filledPath}. " +
+           $"Dropping that destination and continuing the take on {survivingPath}.";
+
+    /// <summary>
     /// Resolves the volume (and its free space / format) that will hold the given file. Uses
     /// <see cref="DriveInfo"/> directly; no reflection. Returns false when the volume can't be
     /// determined (UNC or dismounted target), so callers can degrade gracefully.

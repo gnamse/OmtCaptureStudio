@@ -332,6 +332,14 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// <summary>The warning token, matching the recording path's failure colour.</summary>
     public IBrush RecordingUnavailableForeground { get; } = StudioPalette.MeterDanger;
 
+    // ------------------------------------------------------------------------------------------
+    // NET-011: an optional SECOND destination. Non-empty means the take fans out through a composite
+    // sink, so a primary that fills or fails is shed while the take carries on to the backup folder.
+    // ------------------------------------------------------------------------------------------
+
+    [ObservableProperty]
+    private string _backupOutputDirectory = "";
+
     [ObservableProperty]
     private string _diagnosticTailText = "";
 
@@ -1585,6 +1593,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 Quality = SelectedQualityPreset,
                 OutputDirectory = outDir,
 
+                // NET-011: a blank backup folder means a single destination, exactly as before.
+                BackupOutputDirectory = string.IsNullOrWhiteSpace(BackupOutputDirectory)
+                    ? null
+                    : BackupOutputDirectory.Trim(),
+
                 // NET-008: segmented / scheduled capture, read from the bound option selections so the
                 // config can never carry a value the operator cannot see in the UI.
                 SegmentRolloverMinutes = SelectedRolloverMinutes?.Value ?? 0,
@@ -1729,6 +1742,31 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     partial void OnSelectedRolloverMinutesChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
     partial void OnSelectedRolloverGigabytesChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
     partial void OnSelectedMaxDurationChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
+
+    /// <summary>
+    /// Picks the optional second destination (NET-011). Reuses the same folder-picker hook as the
+    /// primary, so no new platform surface is needed.
+    /// </summary>
+    [RelayCommand(AllowConcurrentExecutions = false)]
+    private async Task BrowseBackupDirectoryAsync()
+    {
+        if (IsRecordingCloseOverlayVisible || !IsRecordingConfigEnabled) return;
+        if (PickFolderAsync == null) return;
+
+        try
+        {
+            string? selected = await PickFolderAsync(BackupOutputDirectory);
+            if (!string.IsNullOrWhiteSpace(selected))
+            {
+                BackupOutputDirectory = selected;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Error browsing backup directory: {ex.Message}", ex);
+            StatusText = $"Backup folder selection cancelled or failed: {ex.Message}";
+        }
+    }
 
     [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task BrowseOutputDirectoryAsync()

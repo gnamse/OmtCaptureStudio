@@ -32,6 +32,9 @@ public sealed record RecordingPreset(
 
     /// <summary>Max take duration in minutes, summed across segments. <c>0</c> = unlimited.</summary>
     public double MaxDurationMinutes { get; init; }
+
+    /// <summary>Secondary destination (NET-011). <c>null</c> = keep whatever the live config points at.</summary>
+    public string? BackupOutputDirectory { get; init; }
 }
 
 /// <summary>
@@ -125,6 +128,11 @@ public static class RecordingPresets
             config.FilenamePrefix = preset.FilenamePrefix;
         }
 
+        if (!string.IsNullOrWhiteSpace(preset.BackupOutputDirectory))
+        {
+            config.BackupOutputDirectory = preset.BackupOutputDirectory;
+        }
+
         config.SegmentRolloverMinutes = preset.SegmentRolloverMinutes;
         config.SegmentRolloverGigabytes = preset.SegmentRolloverGigabytes;
         config.MaxDurationMinutes = preset.MaxDurationMinutes;
@@ -144,6 +152,7 @@ public static class RecordingPresets
         {
             OutputDirectory = config.OutputDirectory,
             FilenamePrefix = config.FilenamePrefix,
+            BackupOutputDirectory = config.BackupOutputDirectory,
             SegmentRolloverMinutes = config.SegmentRolloverMinutes,
             SegmentRolloverGigabytes = config.SegmentRolloverGigabytes,
             MaxDurationMinutes = config.MaxDurationMinutes
@@ -167,6 +176,8 @@ public static class RecordingPresets
             && (string.IsNullOrWhiteSpace(preset.OutputDirectory)
                 || string.Equals(preset.OutputDirectory, config.OutputDirectory, StringComparison.OrdinalIgnoreCase))
             && (string.IsNullOrWhiteSpace(preset.FilenamePrefix)
-                || string.Equals(preset.FilenamePrefix, config.FilenamePrefix, StringComparison.Ordinal));
+                || string.Equals(preset.FilenamePrefix, config.FilenamePrefix, StringComparison.Ordinal))
+            && (string.IsNullOrWhiteSpace(preset.BackupOutputDirectory)
+                || string.Equals(preset.BackupOutputDirectory, config.BackupOutputDirectory, StringComparison.OrdinalIgnoreCase));
     }
 }

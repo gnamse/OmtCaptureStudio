@@ -405,6 +405,8 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
                     <TextBlock Grid.Row="0" Text="SAVE FOLDER" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
                     <Grid Grid.Row="1">
@@ -429,6 +431,29 @@
                                 AutomationProperties.Name="Open Output Directory in Explorer"
                                 ToolTip.Tip="Open current destination directory in File Explorer"
                                 Command="{CompiledBinding OpenOutputDirectoryCommand}"/>
+                    </Grid>
+
+                    <!-- NET-011: optional second destination. When set, the take is written to both
+                         folders; a primary that fills or fails is shed and the take continues here
+                         instead of stopping. -->
+                    <TextBlock Grid.Row="2" Text="BACKUP FOLDER (OPTIONAL)" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,6,0,4"/>
+                    <Grid Grid.Row="3">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="TxtBackupDir" Grid.Column="0" MinHeight="30" MaxWidth="420" VerticalContentAlignment="Center"
+                                 Text="{CompiledBinding BackupOutputDirectory, Mode=TwoWay}"
+                                 IsEnabled="{CompiledBinding IsRecordingConfigEnabled}"
+                                 AutomationProperties.Name="Backup Destination Folder Path"
+                                 ToolTip.Tip="Second destination for the take. Leave empty for a single-destination recording."/>
+                        <Button x:Name="BtnBrowseBackupDir" Grid.Column="1" MinHeight="30" Width="34" Margin="4,0,0,0"
+                                IsEnabled="{CompiledBinding IsRecordingConfigEnabled}"
+                                AutomationProperties.Name="Browse Backup Destination Folder"
+                                ToolTip.Tip="Browse for a backup destination folder"
+                                Command="{CompiledBinding BrowseBackupDirectoryCommand}">
+                            <Path Data="{DynamicResource IconFolder}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="15" Height="15" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Button>
                     </Grid>
                 </Grid>
 

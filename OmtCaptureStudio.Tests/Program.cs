@@ -83,6 +83,8 @@ class Program
         TestScheduledSegmentedCapture();
         TestCrashForensics();
         TestFfmpegPreflightAndForensicsFallback();
+        TestCompositeRecordingSink();
+        TestCompositeRecordingWiring();
 
         TestMainWindowViewModel();
 
@@ -434,11 +436,13 @@ class Program
             case "0.686": TestScheduledSegmentedCapture(); break;
             case "0.687": TestCrashForensics(); break;
             case "0.688": TestFfmpegPreflightAndForensicsFallback(); break;
+            case "0.689": TestCompositeRecordingSink(); break;
+            case "0.690": TestCompositeRecordingWiring(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");
                 Console.Error.WriteLine("Known: 0, 0.5, 0.6, 0.65, 0.7, 0.71, 0.69, 0.72, 0.68, 0.67, 0.671, 0.672, " +
-                                        "0.673, 0.674, 0.675, 0.676, 0.677, 0.678, 0.679, 0.681, 0.682, 0.683, 0.684, 0.685, 0.686, 0.687, 0.688, 0.75");
+                                        "0.673, 0.674, 0.675, 0.676, 0.677, 0.678, 0.679, 0.681, 0.682, 0.683, 0.684, 0.685, 0.686, 0.687, 0.688, 0.689, 0.690, 0.75");
                 return 2;
         }
 
@@ -518,6 +522,455 @@ class Program
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> Architectural seams successfully verified!");
         Console.ResetColor();
+    }
+
+    /// <summary>NET-011 test child: scriptable initialize/viability/shed, and it CAN rent a pooled buffer.</summary>
+    private sealed class ScriptedRecordingSink : IRecordingSink
+    {
+        private readonly bool _rentsPooledBuffer;
+
+        public ScriptedRecordingSink(string name, bool rentsPooledBuffer = false, bool initializeResult = true)
+        {
+            Name = name;
+            _rentsPooledBuffer = rentsPooledBuffer;
+            InitializeResult = initializeResult;
+        }
+
+        public string Name { get; }
+        public bool InitializeResult { get; }
+        public bool Survives { get; set; }
+        public string? ShedTo { get; set; }
+        public Exception? ThrowOnVideo { get; set; }
+        public IntPtr LastVideoPointer { get; private set; }
+
+        public int InitCount;
+        public int FinalizeCount;
+        public int DisposeCount;
+        public int ShedCount;
+        public int VideoFrames;
+        public int AudioBytes;
+        public int Rents;
+        public int Returns;
+
+        public long VideoFramesDropped => 0;
+        public long AudioChunksDropped => 0;
+        public string ResolvedEncoderName => Name;
+        public string DiagnosticTail => string.Empty;
+        public event Action<string>? SinkError;
+
+        public void RaiseError(string message) => SinkError?.Invoke(message);
+
+        public bool Initialize(RecordingConfig config, StreamFormat format, string outputPath)
+        {
+            InitCount++;
+            return InitializeResult;
+        }
+
+        public void WriteVideo(IntPtr pData, int dataLength)
+        {
+            if (ThrowOnVideo != null) throw ThrowOnVideo;
+
+            LastVideoPointer = pData;
+            if (_rentsPooledBuffer)
+            {
+                byte[] rented = MediaBufferPool.Video.Rent(dataLength);
+                Rents++;
+                try { }
+                finally { MediaBufferPool.Video.Return(rented); Returns++; }
+            }
+
+            VideoFrames++;
+        }
+
+        public void WriteAudio(byte[] buffer, int offset, int count)
+        {
+            if (_rentsPooledBuffer)
+            {
+                byte[] rented = MediaBufferPool.Audio.Rent(count);
+                Rents++;
+                try { }
+                finally { MediaBufferPool.Audio.Return(rented); Returns++; }
+            }
+
+            AudioBytes += count;
+        }
+
+        public void FinalizeSink(out long totalBytesWritten)
+        {
+            FinalizeCount++;
+            totalBytesWritten = VideoFrames * 100L;
+        }
+
+        public bool HasSurvivingDestination => Survives;
+
+        public bool TryShedFailedDestination(string reason, out string? survivingPath)
+        {
+            ShedCount++;
+            survivingPath = ShedTo;
+            return ShedTo != null;
+        }
+
+        public void Dispose() => DisposeCount++;
+    }
+
+    /// <summary>
+    /// NET-011 closing pass: the wiring. The selector must choose a composite only when a backup is
+    /// configured; a REAL dual-destination take must leave both files on disk; and a backup that cannot
+    /// start must leave the primary recording intact.
+    /// </summary>
+    static void TestCompositeRecordingWiring()
+    {
+        Console.WriteLine("\n[Step 0.690] Verifying composite recording wiring (dual destination end-to-end)...");
+
+        var format = new StreamFormat { Width = 320, Height = 240, FrameRate = 10.0, SampleRate = 48000, Channels = 2 };
+
+        // ---- 1. CONFIG PATH: a backup selects the composite; no backup leaves the single sink ---------
+        var singleChosen = new ScriptedRecordingSink("single");
+        var compositeChosen = new CompositeRecordingSink(
+            new CompositeChild("primary", new ScriptedRecordingSink("primary"), "C:/t/a.mp4"),
+            new CompositeChild("backup", new ScriptedRecordingSink("backup"), "D:/t/a.mp4"));
+
+        var selector = new RecordingSinkSelector(
+            singleFactory: (_, _) => singleChosen,
+            compositeFactory: (_, _) => compositeChosen);
+
+        var noBackup = new RecordingConfig { OutputDirectory = "C:/t" };
+        Expect(!noBackup.HasBackupDestination, "A config with no backup folder must not report a fan-out.");
+        Expect(selector.Initialize(noBackup, format, "C:/t/a.mp4"), "The selector must initialize the single sink.");
+        Expect(!selector.IsComposite, "With NO backup configured the selector must choose the SINGLE sink.");
+        Expect(singleChosen.InitCount == 1, "The single sink must be the one initialized.");
+
+        var withBackup = new RecordingConfig { OutputDirectory = "C:/t", BackupOutputDirectory = "D:/t" };
+        Expect(withBackup.HasBackupDestination, "A distinct backup folder must report a fan-out.");
+        Expect(selector.Initialize(withBackup, format, "C:/t/a.mp4"), "The selector must initialize the composite.");
+        Expect(selector.IsComposite, "With a backup configured the selector must choose the COMPOSITE sink.");
+        Expect(compositeChosen.LiveChildCount == 2, $"Both destinations must be live; got {compositeChosen.LiveChildCount}.");
+
+        // A backup that POINTS AT THE PRIMARY is not a fan-out - it would write the same file twice.
+        var sameFolder = new RecordingConfig { OutputDirectory = "C:/t", BackupOutputDirectory = "C:/t/" };
+        Expect(!sameFolder.HasBackupDestination,
+            "A backup pointing at the primary folder must NOT count as a fan-out.");
+        selector.Initialize(sameFolder, format, "C:/t/a.mp4");
+        Expect(!selector.IsComposite, "A same-folder backup must fall back to the single sink.");
+
+        // The arm's degrade decision must reach the inner sink unchanged through the selector. Both
+        // directions are asserted with a NON-default answer, so forwarding cannot pass vacuously.
+        singleChosen.Survives = true;
+        selector.Initialize(noBackup, format, "C:/t/a.mp4");
+        Expect(selector.HasSurvivingDestination,
+            "The selector must forward the single sink's answer (deliberately set true) rather than its own.");
+
+        selector.Initialize(withBackup, format, "C:/t/a.mp4");
+        Expect(selector.IsComposite, "Re-initializing with a backup must select the composite again.");
+        Expect(selector.HasSurvivingDestination == compositeChosen.HasSurvivingDestination,
+            "The selector must forward the composite's answer for the take that is actually running.");
+
+        // ---- 2. REAL DUAL-DESTINATION TAKE: both files land on disk ---------------------------------
+        string sandbox = Path.Combine(Path.GetTempPath(), "omt_dual_" + Guid.NewGuid().ToString("N")[..8]);
+        string primaryDir = Path.Combine(sandbox, "primary");
+        string backupDir = Path.Combine(sandbox, "backup");
+        Directory.CreateDirectory(primaryDir);
+
+        try
+        {
+            using (var dualSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(), ownsDependencies: true))
+            {
+                long frames = 0;
+                dualSession.VideoFrameAvailable += (ptr, len, w, h, st, fps, ts) => Interlocked.Increment(ref frames);
+                dualSession.Connect(new SyntheticPatternSource());
+
+                int waitTicks = 0;
+                while (frames < 5 && waitTicks < 30)
+                {
+                    Thread.Sleep(50);
+                    waitTicks++;
+                }
+
+                Expect(frames > 0, "The dual-destination test needs a live synthetic feed.");
+
+                var dualConfig = new RecordingConfig
+                {
+                    OutputDirectory = primaryDir,
+                    FilenamePrefix = "DualDest",
+                    BackupOutputDirectory = backupDir
+                };
+
+                Expect(dualSession.StartRecording(dualConfig), "A dual-destination take must start.");
+
+                int recordTicks = 0;
+                while (recordTicks < 50 && dualSession.RecordingFramesWritten < 20)
+                {
+                    Thread.Sleep(50);
+                    recordTicks++;
+                }
+
+                dualSession.StopRecording();
+
+                string[] primaryFiles = Directory.GetFiles(primaryDir, "DualDest*.mp4");
+                string[] backupFiles = Directory.Exists(backupDir) ? Directory.GetFiles(backupDir, "DualDest*.mp4") : Array.Empty<string>();
+
+                Expect(primaryFiles.Length == 1, $"The primary folder must hold exactly one file; got {primaryFiles.Length}.");
+                Expect(backupFiles.Length == 1, $"The backup folder must hold exactly one file; got {backupFiles.Length}.");
+
+                string primaryName = Path.GetFileName(primaryFiles[0]);
+                string backupName = Path.GetFileName(backupFiles[0]);
+                Expect(primaryName == backupName,
+                    $"Both destinations must use the SAME file name; got '{primaryName}' vs '{backupName}'.");
+
+                long primarySize = new FileInfo(primaryFiles[0]).Length;
+                long backupSize = new FileInfo(backupFiles[0]).Length;
+                Expect(primarySize > 0 && backupSize > 0,
+                    $"Both files must carry data; got {primarySize} and {backupSize} bytes.");
+                Expect(primarySize == backupSize || Math.Abs(primarySize - backupSize) <= Math.Max(primarySize, backupSize) * 4 / 10,
+                    $"Both destinations encode the SAME frames, so their sizes must be close; got {primarySize} vs {backupSize}.");
+
+                Console.WriteLine($" -> Dual destination wrote '{primaryName}' to both folders ({primarySize:N0} / {backupSize:N0} bytes)");
+            }
+
+            // ---- 3. A BACKUP THAT CANNOT START leaves the primary recording intact -------------------
+            string blockedBackup = Path.Combine(sandbox, "blocked-backup");
+            string blockedPrimary = Path.Combine(sandbox, "blocked-primary");
+            Directory.CreateDirectory(blockedPrimary);
+            File.WriteAllText(blockedBackup, "not a directory");
+
+            using (var degradedSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(), ownsDependencies: true))
+            {
+                long frames = 0;
+                degradedSession.VideoFrameAvailable += (ptr, len, w, h, st, fps, ts) => Interlocked.Increment(ref frames);
+                degradedSession.Connect(new SyntheticPatternSource());
+
+                int waitTicks = 0;
+                while (frames < 5 && waitTicks < 30)
+                {
+                    Thread.Sleep(50);
+                    waitTicks++;
+                }
+
+                var degradedConfig = new RecordingConfig
+                {
+                    OutputDirectory = blockedPrimary,
+                    FilenamePrefix = "Degraded",
+                    BackupOutputDirectory = blockedBackup
+                };
+
+                Expect(degradedSession.StartRecording(degradedConfig),
+                    "A take must still start when the PRIMARY is usable, even if the backup is not.");
+
+                int recordTicks = 0;
+                while (recordTicks < 50 && degradedSession.RecordingFramesWritten < 20)
+                {
+                    Thread.Sleep(50);
+                    recordTicks++;
+                }
+
+                bool recordedSomething = degradedSession.RecordingFramesWritten > 0;
+                degradedSession.StopRecording();
+
+                string[] survived = Directory.GetFiles(blockedPrimary, "Degraded*.mp4");
+                Expect(survived.Length == 1,
+                    $"The primary must survive a backup that cannot start; got {survived.Length} file(s).");
+                Expect(new FileInfo(survived[0]).Length > 0, "The surviving primary file must carry data.");
+                Expect(!File.Exists(blockedBackup + ".mp4"), "The blocked backup path must not have produced a file.");
+                Expect(recordedSomething,
+                    $"The take must have written frames despite the unusable backup; wrote {degradedSession.RecordingFramesWritten}.");
+
+                Console.WriteLine(" -> Unusable backup folder: the take still recorded to the primary and the backup left no file");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(sandbox, recursive: true); } catch { }
+        }
+
+        Console.WriteLine(" -> A backup selects the composite, no backup keeps the single sink, both folders receive the same " +
+                          "file name, and an unusable backup degrades instead of stopping the take!");
+    }
+
+    /// <summary>
+    /// NET-011: the composite recording sink. Fan-out identity and the ledger proof that the fan-out
+    /// layer adds no copies and no double ownership; detach-on-error with a surviving destination;
+    /// all-children-failed as the real failure; exactly-once child disposal; and the arm's
+    /// degrade-vs-stop decision.
+    /// </summary>
+    static void TestCompositeRecordingSink()
+    {
+        Console.WriteLine("\n[Step 0.689] Verifying composite recording sink (fan-out, detach, degrade vs stop)...");
+
+        var config = new RecordingConfig { OutputDirectory = Path.GetTempPath(), FilenamePrefix = "CompositeTest" };
+        var format = new StreamFormat { Width = 320, Height = 240, FrameRate = 10.0, SampleRate = 48000, Channels = 2 };
+        const string PrimaryPath = "C:/take/a.mp4";
+        const string BackupPath = "D:/take/a.mp4";
+        IntPtr frame = System.Runtime.InteropServices.Marshal.AllocHGlobal(64);
+
+        try
+        {
+            // ---- 1. FAN-OUT: identical packets, same pointer, and the composite rents NOTHING --------
+            var childA = new ScriptedRecordingSink("primary", rentsPooledBuffer: true);
+            var childB = new ScriptedRecordingSink("backup", rentsPooledBuffer: true);
+            var composite = new CompositeRecordingSink(
+                new CompositeChild("primary", childA, PrimaryPath),
+                new CompositeChild("backup", childB, BackupPath));
+
+            bool ledgerWasEnabled = MediaBufferPoolLedger.Enabled;
+            MediaBufferPoolLedger.Enabled = true;
+            MediaBufferPoolLedger.Reset();
+
+            Expect(composite.Initialize(config, format, PrimaryPath),
+                "The composite must initialize when its children do.");
+            Expect(childA.InitCount == 1 && childB.InitCount == 1,
+                "Initialize must reach EVERY child.");
+
+            long rentsBeforeFanOut = MediaBufferPoolLedger.RentCount;
+            for (int i = 0; i < 5; i++)
+            {
+                composite.WriteVideo(frame, 64);
+                composite.WriteAudio(new byte[32], 0, 32);
+            }
+
+            Expect(childA.VideoFrames == 5 && childB.VideoFrames == 5,
+                $"Both children must receive every frame; got {childA.VideoFrames} and {childB.VideoFrames}.");
+            Expect(childA.AudioBytes == 160 && childB.AudioBytes == 160,
+                $"Both children must receive every audio chunk; got {childA.AudioBytes} and {childB.AudioBytes}.");
+            Expect(childA.LastVideoPointer == frame && childB.LastVideoPointer == frame,
+                "Both children must be handed the SAME source pointer - the fan-out layer makes no copy of its own.");
+
+            // 5 iterations x (1 video write + 1 audio write) = 10 leases PER CHILD, 20 across the two.
+            // The point is that the fan-out layer itself contributes ZERO of them: the count is exactly
+            // what the children would have rented had each been driven directly.
+            long fanOutRents = MediaBufferPoolLedger.RentCount - rentsBeforeFanOut;
+            Expect(fanOutRents == 20,
+                $"Only the children may rent (10 leases each across 2 children = 20); fan-out added {fanOutRents}.");
+            Expect(childA.Rents == childA.Returns && childB.Rents == childB.Returns,
+                "Each child must return exactly what it rented - fan-out must not create double ownership.");
+            Expect(MediaBufferPoolLedger.ActiveLeases == 0,
+                $"No buffer may still be leased after fan-out; {MediaBufferPoolLedger.ActiveLeases} were.");
+            Expect(MediaBufferPoolLedger.FaultCount == 0,
+                $"Fan-out must not produce ledger faults: {string.Join(" | ", MediaBufferPoolLedger.Faults)}.");
+
+            MediaBufferPoolLedger.Enabled = ledgerWasEnabled;
+
+            // ---- 2. DETACH ON ERROR: the survivor carries on, the loss is reported ONCE -------------
+            int reported = 0;
+            string lastReport = string.Empty;
+            composite.SinkError += msg => { reported++; lastReport = msg; };
+
+            childB.ThrowOnVideo = new IOException("backup volume vanished");
+            composite.WriteVideo(frame, 64);
+            composite.WriteVideo(frame, 64);
+
+            Expect(childA.VideoFrames == 7, $"The survivor must keep receiving frames; got {childA.VideoFrames}.");
+            Expect(reported == 1, $"A detach must be reported exactly ONCE, not per write; got {reported}.");
+            Expect(lastReport.Contains("backup"), $"The report must NAME the failing destination; got '{lastReport}'.");
+            Expect(composite.LiveChildCount == 1, $"One destination must remain; got {composite.LiveChildCount}.");
+            Expect(composite.HasSurvivingDestination,
+                "A composite must report a surviving destination while one child remains.");
+            Expect(childB.DisposeCount == 1, $"A detached child must be disposed exactly once; got {childB.DisposeCount}.");
+
+            childB.RaiseError("late error from an already-detached child");
+            Expect(reported == 1, $"An already-detached child must not report again; got {reported}.");
+
+            // ---- 3. THE LAST CHILD: the real failure ------------------------------------------------
+            childA.ThrowOnVideo = new IOException("primary volume failed too");
+            composite.WriteVideo(frame, 64);
+
+            Expect(!composite.HasSurvivingDestination,
+                "With no destination left the composite must report NO survivor - the real failure.");
+            Expect(reported == 2, $"The second detach must be reported too; got {reported}.");
+            Expect(composite.LiveChildCount == 0, "No destinations may remain.");
+            Expect(childA.DisposeCount == 1, "The last child must also be disposed exactly once.");
+
+            // ---- 4. EXACTLY-ONCE DISPOSAL of the composite and its children -------------------------
+            composite.Dispose();
+            composite.Dispose();
+            Expect(childA.DisposeCount == 1 && childB.DisposeCount == 1,
+                $"Disposing the composite twice must dispose each child exactly once; got {childA.DisposeCount}/{childB.DisposeCount}.");
+
+            // ---- 5. INITIALIZE degrades when one destination cannot start ---------------------------
+            var goodInit = new ScriptedRecordingSink("primary");
+            var badInit = new ScriptedRecordingSink("backup", initializeResult: false);
+            using (var partial = new CompositeRecordingSink(
+                new CompositeChild("primary", goodInit, "C:/take/b.mp4"),
+                new CompositeChild("backup", badInit, "D:/take/b.mp4")))
+            {
+                Expect(partial.Initialize(config, format, "C:/take/b.mp4"),
+                    "One destination failing to initialize must not fail the take - the other carries it.");
+                Expect(partial.LiveChildCount == 1, "The failed destination must not count as live.");
+                Expect(badInit.DisposeCount == 1, "A destination that failed to initialize must be let go exactly once.");
+            }
+
+            var deadOne = new ScriptedRecordingSink("p", initializeResult: false);
+            var deadTwo = new ScriptedRecordingSink("b", initializeResult: false);
+            using (var none = new CompositeRecordingSink(
+                new CompositeChild("primary", deadOne, "C:/take/c.mp4"),
+                new CompositeChild("backup", deadTwo, "D:/take/c.mp4")))
+            {
+                Expect(!none.Initialize(config, format, "C:/take/c.mp4"),
+                    "With NO destination available the composite must fail - that is the real failure.");
+            }
+
+            // ---- 6. THE SHED API the arm uses when the primary's volume fills -----------------------
+            var shedPrimary = new ScriptedRecordingSink("primary");
+            var shedBackup = new ScriptedRecordingSink("backup");
+            using (var shedding = new CompositeRecordingSink(
+                new CompositeChild("primary", shedPrimary, "C:/full/a.mp4"),
+                new CompositeChild("backup", shedBackup, "D:/roomy/a.mp4")))
+            {
+                shedding.Initialize(config, format, "C:/full/a.mp4");
+                int shedReports = 0;
+                shedding.SinkError += _ => shedReports++;
+
+                Expect(shedding.TryShedFailedDestination("low disk", out string? survivor),
+                    "With a survivor available the composite must shed the failing destination.");
+                Expect(survivor == "D:/roomy/a.mp4",
+                    $"The shed must report the SURVIVING path so the arm can follow it; got '{survivor}'.");
+                Expect(shedding.LiveChildCount == 1 && shedding.HasSurvivingDestination,
+                    "After a shed the composite must still report a survivor - the take continues.");
+                Expect(shedReports == 1, $"A shed must be reported once; got {shedReports}.");
+
+                Expect(!shedding.TryShedFailedDestination("low disk", out string? noSurvivor),
+                    "With no survivor the composite must refuse the shed, so the arm runs its normal stop path.");
+                Expect(noSurvivor == null, "A refused shed must not name a survivor.");
+            }
+
+            Expect(RecordingStorageGuard.DegradedMessage(1234, "C:/full/a.mp4", "D:/roomy/a.mp4").Contains("continuing the take"),
+                "The degrade message must read as 'recording continues', distinct from the stop message.");
+
+            // ---- 7. ARM: a viable sink degrades; a dead sink stops the take -------------------------
+            var armSink = new ScriptedRecordingSink("composite-ish");
+            using var arm = new RecordingArm(armSink);
+            var armConfig = new RecordingConfig { OutputDirectory = Path.GetTempPath(), FilenamePrefix = "CompositeArm" };
+
+            if (!arm.Arm(armConfig, format))
+            {
+                Console.WriteLine(" -> [SKIP] storage preflight refused the temp volume; the arm degrade-vs-stop assertions are skipped.");
+            }
+            else
+            {
+                int armErrors = 0;
+                arm.RecordingError += _ => armErrors++;
+
+                armSink.Survives = true;
+                armSink.RaiseError("Recording destination 'backup' was detached: backup volume vanished");
+
+                Expect(arm.IsRecording,
+                    "A sink error while the transport is still viable must DEGRADE - the take keeps recording.");
+                Expect(armErrors == 1, $"A degrade must still be surfaced to the operator; got {armErrors}.");
+
+                armSink.Survives = false;
+                armSink.RaiseError("all destinations gone");
+
+                Expect(!arm.IsRecording,
+                    "A sink error with nowhere left to write must STOP the take through the single finalize path.");
+                Expect(armErrors == 2, $"Both faults must be reported; got {armErrors}.");
+            }
+
+            Console.WriteLine(" -> Fan-out is copy-transparent and the ledger balances; a failed destination detaches " +
+                              "and reports once; the last one to go stops the take; children are disposed exactly once!");
+        }
+        finally
+        {
+            System.Runtime.InteropServices.Marshal.FreeHGlobal(frame);
+        }
     }
 
     /// <summary>
@@ -1404,6 +1857,11 @@ class Program
         Console.WriteLine("--------------------------------------------------------------------------------");
 
         string run1Dir = Path.Combine(baseOutDir, "Run1_Recovery");
+
+        // NET-011: Run 1 records THROUGH A COMPOSITE - the same take also lands in a backup folder - so
+        // the soak exercises the dual-destination transport over a real network feed with a real outage
+        // and segment resume, not just the headless unit path.
+        string run1BackupDir = Path.Combine(baseOutDir, "Run1_Recovery_Backup");
         Directory.CreateDirectory(run1Dir);
         string source1 = $"OMT_SOAK_Recovery_{Environment.ProcessId}";
 
@@ -1452,6 +1910,7 @@ class Program
                 EncoderChoice = VideoEncoderChoice.CpuX264,
                 Quality = QualityPreset.High,
                 OutputDirectory = run1Dir,
+                BackupOutputDirectory = run1BackupDir,
                 FilenamePrefix = "SOAK_Run1",
                 InputLossThresholdSeconds = 5.0,
                 InputRecoveryGraceSeconds = 30.0
@@ -1539,6 +1998,23 @@ class Program
         {
             throw new Exception("Run 1: the resumed segment must be a different file from segment 1.");
         }
+
+        // NET-011: the backup destination must hold the SAME take - both segments, same file names -
+        // and both copies must decode clean. A duplicate that is silently truncated or missing is a
+        // worse failure than no backup at all, so this is asserted rather than assumed.
+        string backupSeg1 = Path.Combine(run1BackupDir, Path.GetFileName(seg1Path));
+        string backupSeg2 = Path.Combine(run1BackupDir, Path.GetFileName(seg2Path));
+        if (!File.Exists(backupSeg1))
+        {
+            throw new Exception($"Dual destination: the backup folder is missing segment 1 ('{backupSeg1}').");
+        }
+        if (!File.Exists(backupSeg2))
+        {
+            throw new Exception($"Dual destination: the backup folder is missing the resumed segment ('{backupSeg2}').");
+        }
+        VerifyDecodeClean(backupSeg1, "Run 1 backup segment 1");
+        VerifyDecodeClean(backupSeg2, "Run 1 backup segment 2");
+        Console.WriteLine($"[{Now()}] Dual destination: both segments decode clean in the primary AND the backup folder.");
 
         // ---------------------------------------------------- RUN 2: grace window expires
         Console.WriteLine("\n--------------------------------------------------------------------------------");

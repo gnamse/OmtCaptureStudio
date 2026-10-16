@@ -91,6 +91,31 @@ public class RecordingConfig
     public DateTime? ScheduledStopUtc { get; set; }
 
     /// <summary>
+    /// NET-011: write a SECOND copy of the take into this directory as well. <c>null</c>/empty = a
+    /// single destination, exactly as before. When set, recording fans out through a composite sink:
+    /// if the primary's volume fills or its transport fails, that destination is shed and the take
+    /// carries on to the backup instead of stopping. The backup uses the same file name as the primary.
+    /// </summary>
+    public string? BackupOutputDirectory { get; set; }
+
+    /// <summary>
+    /// True when a backup destination is configured AND differs from the primary - i.e. when recording
+    /// should fan out to two destinations. A backup pointing at the primary folder is not a fan-out.
+    /// </summary>
+    public bool HasBackupDestination
+    {
+        get
+        {
+            string? backup = BackupOutputDirectory?.Trim();
+            string? primary = OutputDirectory?.Trim();
+            if (string.IsNullOrWhiteSpace(backup) || string.IsNullOrWhiteSpace(primary)) return false;
+
+            return !string.Equals(
+                backup.TrimEnd('\\', '/'), primary.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
     /// A plain value copy, used by the preset picker. The preset types are deliberately separate from
     /// this class so a preset can be applied without mutating a live config in place.
     /// </summary>
@@ -108,7 +133,8 @@ public class RecordingConfig
         MaxDurationMinutes = MaxDurationMinutes,
         ScheduledStartUtc = ScheduledStartUtc,
         ScheduledStartDelayMinutes = ScheduledStartDelayMinutes,
-        ScheduledStopUtc = ScheduledStopUtc
+        ScheduledStopUtc = ScheduledStopUtc,
+        BackupOutputDirectory = BackupOutputDirectory
     };
 }
 
