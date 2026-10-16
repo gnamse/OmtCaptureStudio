@@ -42,6 +42,13 @@ public readonly record struct RecordingHealthSnapshot
 
     /// <summary>Capped tail of the FFmpeg stderr stream, for the in-app diagnostics drawer.</summary>
     public string DiagnosticTail { get; init; }
+
+    /// <summary>
+    /// The ffmpeg build this session records through, resolved once at startup (NET-010). Lets a field
+    /// report be correlated with an encoder build without having to ask the operator which one they have.
+    /// Empty when the preflight could not read a version.
+    /// </summary>
+    public string FfmpegVersion { get; init; }
 }
 
 /// <summary>
@@ -160,6 +167,10 @@ public static class RecordingHealth
 
     public static string BitrateText(RecordingHealthSnapshot s) =>
         s.IsRecording ? $"{s.AchievedBitrateMbps:F1} Mbps" : "—";
+
+    /// <summary>The resolved ffmpeg build, for the health strip. Never throws on an empty snapshot.</summary>
+    public static string FfmpegText(RecordingHealthSnapshot s) =>
+        string.IsNullOrWhiteSpace(s.FfmpegVersion) ? "—" : s.FfmpegVersion;
 
     public static string DropsText(RecordingHealthSnapshot s) =>
         $"{s.VideoFramesDropped:N0}v / {s.AudioChunksDropped:N0}a";

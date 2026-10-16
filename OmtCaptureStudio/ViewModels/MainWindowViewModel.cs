@@ -309,6 +309,29 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// </summary>
     public IBrush SegmentContinuationForeground { get; } = StudioPalette.MeterNormal;
 
+    // ------------------------------------------------------------------------------------------
+    // NET-010: FFmpeg preflight. FFmpeg is the recording feature's only external dependency; when it
+    // is missing or unrunnable, recording is unavailable but preview/discovery/broadcast keep working,
+    // so this is a persistent status warning rather than a modal.
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>True when the startup preflight found no runnable ffmpeg - recording is unavailable.</summary>
+    [ObservableProperty]
+    private bool _isRecordingUnavailable;
+
+    /// <summary>The persistent warning text, including the locations that were checked.</summary>
+    [ObservableProperty]
+    private string _recordingUnavailableText = string.Empty;
+
+    [ObservableProperty]
+    private string _recordingHealthFfmpegText = "—";
+
+    /// <summary>The resolved ffmpeg version (NET-010), stamped into every projected health snapshot.</summary>
+    public string FfmpegVersion { get; private set; } = string.Empty;
+
+    /// <summary>The warning token, matching the recording path's failure colour.</summary>
+    public IBrush RecordingUnavailableForeground { get; } = StudioPalette.MeterDanger;
+
     [ObservableProperty]
     private string _diagnosticTailText = "";
 
@@ -1531,6 +1554,15 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
         else
         {
+            // NET-010: refuse with the real reason up front, rather than letting the transport fail at
+            // the worst moment - a start failure today surfaces only as a SinkError, by which time the
+            // operator has usually walked away.
+            if (IsRecordingUnavailable)
+            {
+                StatusText = RecordingUnavailableText;
+                return;
+            }
+
             if (!_session.IsConnected || !_session.CurrentFormat.HasVideo)
             {
                 StatusText = "Please connect to an active OMT stream before recording.";
@@ -1605,6 +1637,38 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
 
         return options[0];
+    }
+
+    /// <summary>
+    /// Applies the startup FFmpeg preflight (NET-010). Called once from the composition root: the
+    /// engine has no view of the preflight, so the ViewModel carries the provenance and stamps it onto
+    /// the health readout. Applying an available result CLEARS the warning, so a transient failure that
+    /// later resolves is not sticky.
+    /// </summary>
+    public void ApplyFfmpegPreflight(FfmpegPreflightResult result)
+    {
+        if (result == null) throw new ArgumentNullException(nameof(result));
+
+        FfmpegVersion = result.Version ?? string.Empty;
+        IsRecordingUnavailable = !result.IsAvailable;
+        RecordingUnavailableText = result.IsAvailable
+            ? string.Empty
+            : $"Recording unavailable: {result.Detail}";
+
+        if (result.IsAvailable)
+        {
+            AppLogger.LogInfo(
+                $"FFmpeg preflight OK: {result.VersionLine} (resolved: {result.ExecutablePath})");
+        }
+        else
+        {
+            AppLogger.LogError(
+                $"FFmpeg preflight FAILED - {result.Detail}. Preview, discovery and broadcast keep " +
+                "working; recording is unavailable.");
+            StatusText = RecordingUnavailableText;
+        }
+
+        ProjectRecordingHealth(_session.GetRecordingHealthSnapshot());
     }
 
     /// <summary>
@@ -1992,7 +2056,12 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// </summary>
     private void ProjectRecordingHealth(RecordingHealthSnapshot snapshot)
     {
+        // NET-010: stamp the app-level ffmpeg provenance onto the snapshot the UI shows - the engine
+        // never sees the preflight, and a field report needs the encoder build it recorded through.
+        snapshot = snapshot with { FfmpegVersion = FfmpegVersion };
+
         RecordingHealthEncoderText = RecordingHealth.EncoderText(snapshot);
+        RecordingHealthFfmpegText = RecordingHealth.FfmpegText(snapshot);
         RecordingHealthBitrateText = RecordingHealth.BitrateText(snapshot);
         RecordingHealthDropsText = RecordingHealth.DropsText(snapshot);
         RecordingHealthDriftText = RecordingHealth.DriftText(snapshot);

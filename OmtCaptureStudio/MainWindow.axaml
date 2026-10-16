@@ -439,6 +439,7 @@
                 <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="0,0,12,0" HorizontalAlignment="Right">
                     <TextBlock x:Name="TxtRecordDuration" Text="{CompiledBinding RecordDurationText}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="16" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Right"/>
                     <TextBlock x:Name="TxtSegmentContinuation" Text="{CompiledBinding SegmentContinuationText}" IsVisible="{CompiledBinding IsSegmentContinuationVisible}" Foreground="{CompiledBinding SegmentContinuationForeground}" FontSize="10" FontWeight="SemiBold" HorizontalAlignment="Right" Margin="0,2,0,0" AutomationProperties.Name="Segment Continuation Notice" ToolTip.Tip="Shown when a scheduled rollover finalized a segment; the take continues in the next file"/>
+                    <TextBlock x:Name="TxtRecordingUnavailable" Text="{CompiledBinding RecordingUnavailableText}" IsVisible="{CompiledBinding IsRecordingUnavailable}" Foreground="{CompiledBinding RecordingUnavailableForeground}" FontSize="10" FontWeight="SemiBold" HorizontalAlignment="Right" Margin="0,2,0,0" AutomationProperties.Name="Recording Unavailable Warning" ToolTip.Tip="FFmpeg is the recording feature's only external dependency. Preview, discovery and broadcast keep working without it."/>
                     <TextBlock x:Name="TxtRecordStats" Text="{CompiledBinding RecordStatsText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" HorizontalAlignment="Right" Margin="0,2,0,0"
                                MaxWidth="130" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Assertive"/>
                 </StackPanel>
@@ -484,6 +485,7 @@
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center" IsVisible="{CompiledBinding IsRecordingHealthVisible}">
                         <TextBlock Text="REC" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource StudioTextMuted}" VerticalAlignment="Center" Margin="12,0,5,0"
                                    ToolTip.Tip="Recording-path health (encoder, achieved bitrate, recording drops, A/V drift)"/>
+                        <TextBlock x:Name="TxtHealthFfmpeg" Text="{CompiledBinding RecordingHealthFfmpegText}" FontSize="10" Foreground="{DynamicResource StudioTextSecondary}" VerticalAlignment="Center" MaxWidth="110" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" AutomationProperties.Name="FFmpeg Version" ToolTip.Tip="ffmpeg build resolved at startup - the encoder provenance a bug report needs"/>
                         <TextBlock x:Name="TxtHealthEncoder" Text="{CompiledBinding RecordingHealthEncoderText}" FontSize="10" Foreground="{DynamicResource StudioTextSecondary}" VerticalAlignment="Center" MaxWidth="110" TextTrimming="CharacterEllipsis"
                                    ToolTip.Tip="Encoder actually used for this take (AutoHardware resolved)"/>
                         <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" Margin="6,0" VerticalAlignment="Center"/>

@@ -68,8 +68,16 @@ public static class CrashForensics
     private const uint MiniDumpNormal = 0x00000000;
     private const uint MiniDumpWithThreadInfo = 0x00001000;
 
-    private static string _logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
-    private static string _dumpDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crashdumps");
+    private static string _primaryLogDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
+    private static string _primaryDumpDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crashdumps");
+    private static string _fallbackRoot = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OmtCaptureStudio");
+
+    private static string _logDir = _primaryLogDir;
+    private static string _dumpDir = _primaryDumpDir;
+    private static bool _usingFallback;
+    private static int _locationsResolved;
+    private static Func<string, bool> _writableProbe = IsDirectoryWritable;
 
     private static Func<CrashState>? _stateProvider;
     private static int _handling;
@@ -80,6 +88,28 @@ public static class CrashForensics
 
     /// <summary>Where minidumps are written.</summary>
     public static string DumpDir => _dumpDir;
+
+    /// <summary>The portable, primary location: the application directory.</summary>
+    public static string PrimaryDumpDir => _primaryDumpDir;
+
+    /// <summary>True when the application directory was not writable and forensics fell back to LOCALAPPDATA.</summary>
+    public static bool IsUsingFallbackLocation => _usingFallback;
+
+    /// <summary>The fallback root (<c>%LOCALAPPDATA%\OmtCaptureStudio</c>).</summary>
+    public static string FallbackRoot => _fallbackRoot;
+
+    /// <summary>
+    /// Both directories the next-launch notice must inspect: the PRIMARY and, when it differs, the
+    /// ACTIVE location. A previous run may have fallen back while this one does not (the app was moved
+    /// from a read-only location to a writable one), so counting only the active directory would hide a
+    /// dump that is really there.
+    /// </summary>
+    public static string[] DumpDirectories()
+    {
+        return string.Equals(_primaryDumpDir, _dumpDir, StringComparison.OrdinalIgnoreCase)
+            ? new[] { _dumpDir }
+            : new[] { _primaryDumpDir, _dumpDir };
+    }
 
     /// <summary>True once <see cref="Install"/> has wired the handlers.</summary>
     public static bool IsInstalled => Volatile.Read(ref _installed) != 0;
@@ -93,6 +123,9 @@ public static class CrashForensics
     {
         _logDir = logDir ?? _logDir;
         _dumpDir = dumpDir ?? _dumpDir;
+        _primaryLogDir = _logDir;
+        _primaryDumpDir = _dumpDir;
+        Volatile.Write(ref _locationsResolved, 1);
     }
 
     /// <summary>
@@ -135,6 +168,10 @@ public static class CrashForensics
     public static void Install()
     {
         if (Interlocked.Exchange(ref _installed, 1) != 0) return;
+
+        // Resolve where forensics go ONCE, before anything can fault. The write probe is a real
+        // filesystem check, so it must not run per crash.
+        ResolveLocations();
 
         try
         {
@@ -191,7 +228,10 @@ public static class CrashForensics
 
             // 3. The crash report, written synchronously rather than through the queue.
             string reportPath = Path.Combine(_logDir, $"crash-{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.log");
-            string report = BuildCrashReport(source, exceptionText, state, dumpPath, DateTime.Now);
+            string? locationNote = _usingFallback
+                ? $"forensics redirected - primary location not writable ({_primaryDumpDir})"
+                : null;
+            string report = BuildCrashReport(source, exceptionText, state, dumpPath, DateTime.Now, locationNote);
             if (!TryWriteAllText(reportPath, report))
             {
                 reportPath = string.Empty;
@@ -224,12 +264,20 @@ public static class CrashForensics
     /// the exact content without a real crash.
     /// </summary>
     public static string BuildCrashReport(
-        string source, string exceptionText, CrashState state, string? dumpPath, DateTime whenLocal)
+        string source, string exceptionText, CrashState state, string? dumpPath, DateTime whenLocal,
+        string? locationNote = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("==== OMT Capture Studio crash report ====");
         sb.AppendLine($"When        : {whenLocal:yyyy-MM-dd HH:mm:ss.fff} (local)");
         sb.AppendLine($"Source      : {source}");
+
+        if (!string.IsNullOrWhiteSpace(locationNote))
+        {
+            // NET-010 rider: a reader months later must know the report is not where they expect.
+            sb.AppendLine($"Location    : {locationNote}");
+        }
+
         sb.AppendLine();
         sb.AppendLine("---- exception ----");
         sb.AppendLine(exceptionText);
@@ -249,8 +297,88 @@ public static class CrashForensics
         return sb.ToString();
     }
 
-    /// <summary>Number of minidumps currently on disk.</summary>
-    public static int CountDumps() => CountMatching(_dumpDir, "crash-*.dmp");
+    /// <summary>
+    /// Picks the crash-artifact location once. The application directory is preferred - the app ships
+    /// as a portable ZIP and <see cref="AppLogger"/> already resolves its log directory from
+    /// <c>AppDomain.CurrentDomain.BaseDirectory</c>, so forensics travel with the install. When that
+    /// directory is NOT writable (a read-only share, a locked-down Program Files install) the probe
+    /// fails and everything redirects to <c>%LOCALAPPDATA%\OmtCaptureStudio</c> rather than silently
+    /// producing nothing. Idempotent.
+    /// </summary>
+    public static void ResolveLocations()
+    {
+        if (Volatile.Read(ref _locationsResolved) != 0) return;
+
+        Volatile.Write(ref _locationsResolved, 1);
+
+        if (_writableProbe(_primaryLogDir) && _writableProbe(_primaryDumpDir))
+        {
+            _logDir = _primaryLogDir;
+            _dumpDir = _primaryDumpDir;
+            _usingFallback = false;
+            return;
+        }
+
+        _logDir = Path.Combine(_fallbackRoot, "logs");
+        _dumpDir = Path.Combine(_fallbackRoot, "crashdumps");
+        _usingFallback = true;
+
+        TryCreateDirectory(_logDir);
+        TryCreateDirectory(_dumpDir);
+
+        AppLogger.LogError(
+            $"Crash forensics redirected - primary location not writable ({_primaryDumpDir}). " +
+            $"Reports and dumps now go to {_dumpDir}.");
+    }
+
+    /// <summary>
+    /// Test seam: overrides the directory roots and the writability probe, then re-resolves. Exists so
+    /// the suite can exercise the read-only-primary fallback without a read-only disk; production never
+    /// calls it.
+    /// </summary>
+    public static void ConfigureLocations(
+        string primaryLogDir, string primaryDumpDir, string fallbackRoot, Func<string, bool>? writableProbe = null)
+    {
+        _primaryLogDir = primaryLogDir;
+        _primaryDumpDir = primaryDumpDir;
+        _fallbackRoot = fallbackRoot;
+        _writableProbe = writableProbe ?? IsDirectoryWritable;
+        Volatile.Write(ref _locationsResolved, 0);
+        ResolveLocations();
+    }
+
+    private static bool IsDirectoryWritable(string dir)
+    {
+        try
+        {
+            Directory.CreateDirectory(dir);
+            string probe = Path.Combine(dir, $".write-probe-{Environment.ProcessId}");
+            File.WriteAllText(probe, string.Empty);
+            File.Delete(probe);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void TryCreateDirectory(string dir)
+    {
+        try { Directory.CreateDirectory(dir); } catch { }
+    }
+
+    /// <summary>Number of minidumps currently on disk, across every location a run may have used.</summary>
+    public static int CountDumps()
+    {
+        int total = 0;
+        foreach (string dir in DumpDirectories())
+        {
+            total += CountMatching(dir, "crash-*.dmp");
+        }
+
+        return total;
+    }
 
     /// <summary>
     /// The next-launch notice. Returns the number of dumps present, logging a line naming the newest so
@@ -261,8 +389,9 @@ public static class CrashForensics
         int count = CountDumps();
         if (count <= 0) return 0;
 
+        string searched = string.Join(" | ", DumpDirectories());
         AppLogger.LogError(
-            $"A crash dump was saved ({count}) in {_dumpDir}. Newest: {NewestDumpPath() ?? "(unknown)"}. " +
+            $"A crash dump was saved ({count}). Looked in: {searched}. Newest: {NewestDumpPath() ?? "(unknown)"}. " +
             "Please attach the newest crash-*.log and crash-*.dmp to any bug report.");
 
         return count;
@@ -275,7 +404,16 @@ public static class CrashForensics
     /// </summary>
     public static int EnforceKeepLastCount(int keep = KeepLastCount)
     {
-        return Prune(_dumpDir, "crash-*.dmp", keep) + Prune(_logDir, "crash-*.log", keep);
+        int removed = Prune(_logDir, "crash-*.log", keep);
+        foreach (string dir in DumpDirectories())
+        {
+            removed += Prune(dir, "crash-*.dmp", keep);
+        }
+
+        // A fallback log directory from a previous run may still hold crash logs.
+        if (_usingFallback) removed += Prune(Path.Combine(_fallbackRoot, "logs"), "crash-*.log", keep);
+
+        return removed;
     }
 
     private static CrashState CaptureCurrentState()
@@ -296,29 +434,29 @@ public static class CrashForensics
 
     private static string? NewestDumpPath()
     {
-        try
-        {
-            var files = new List<string>(Directory.GetFiles(_dumpDir, "crash-*.dmp"));
-            if (files.Count == 0) return null;
+        string? newest = null;
+        DateTime newestTime = DateTime.MinValue;
 
-            string newest = files[0];
-            DateTime newestTime = File.GetLastWriteTimeUtc(newest);
-            for (int i = 1; i < files.Count; i++)
+        foreach (string dir in DumpDirectories())
+        {
+            try
             {
-                DateTime t = File.GetLastWriteTimeUtc(files[i]);
-                if (t > newestTime)
+                if (!Directory.Exists(dir)) continue;
+
+                foreach (string file in Directory.GetFiles(dir, "crash-*.dmp"))
                 {
-                    newestTime = t;
-                    newest = files[i];
+                    DateTime t = File.GetLastWriteTimeUtc(file);
+                    if (t > newestTime)
+                    {
+                        newestTime = t;
+                        newest = file;
+                    }
                 }
             }
+            catch { /* an unreadable location must not hide the others */ }
+        }
 
-            return newest;
-        }
-        catch
-        {
-            return null;
-        }
+        return newest;
     }
 
     private static int CountMatching(string dir, string pattern)

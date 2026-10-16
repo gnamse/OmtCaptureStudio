@@ -82,6 +82,7 @@ class Program
         TestFfmpegArguments();
         TestScheduledSegmentedCapture();
         TestCrashForensics();
+        TestFfmpegPreflightAndForensicsFallback();
 
         TestMainWindowViewModel();
 
@@ -432,11 +433,12 @@ class Program
             case "0.685": TestFfmpegArguments(); break;
             case "0.686": TestScheduledSegmentedCapture(); break;
             case "0.687": TestCrashForensics(); break;
+            case "0.688": TestFfmpegPreflightAndForensicsFallback(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");
                 Console.Error.WriteLine("Known: 0, 0.5, 0.6, 0.65, 0.7, 0.71, 0.69, 0.72, 0.68, 0.67, 0.671, 0.672, " +
-                                        "0.673, 0.674, 0.675, 0.676, 0.677, 0.678, 0.679, 0.681, 0.682, 0.683, 0.684, 0.685, 0.686, 0.687, 0.75");
+                                        "0.673, 0.674, 0.675, 0.676, 0.677, 0.678, 0.679, 0.681, 0.682, 0.683, 0.684, 0.685, 0.686, 0.687, 0.688, 0.75");
                 return 2;
         }
 
@@ -516,6 +518,163 @@ class Program
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> Architectural seams successfully verified!");
         Console.ResetColor();
+    }
+
+    /// <summary>
+    /// NET-010 + the crash-forensics rider: the FFmpeg resolver and its warning surface, and the
+    /// read-only-primary fallback for forensics. Every filesystem and process touch is injected, so
+    /// this asserts the whole policy without a real ffmpeg, a real PATH or a read-only disk.
+    /// </summary>
+    static void TestFfmpegPreflightAndForensicsFallback()
+    {
+        Console.WriteLine("\n[Step 0.688] Verifying FFmpeg preflight + the forensics location fallback...");
+
+        // ---- 1. Version-line parsing is pure ----------------------------------------------------
+        string banner = "ffmpeg version 7.1-full_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers";
+        Expect(FfmpegPreflight.ParseVersion(banner) == "7.1-full_build-www.gyan.dev",
+            $"The version token must be parsed out of the banner; got '{FfmpegPreflight.ParseVersion(banner)}'.");
+        Expect(FfmpegPreflight.ParseVersion("ffmpeg version n7.0.2 Copyright (c) 2000-2024") == "n7.0.2",
+            "A nightly-style version token must parse too.");
+        Expect(FfmpegPreflight.ParseVersion("not an ffmpeg banner") == null,
+            "A line with no version token must parse to null rather than guessing.");
+        Expect(FfmpegPreflight.ParseVersion(null) == null, "A missing banner must parse to null.");
+        Expect(FfmpegPreflight.ParseVersion("ffmpeg version    ") == null,
+            "A banner with nothing after 'version' must parse to null.");
+
+        // ---- 2. Resolver ORDER: application directory first, then PATH ---------------------------
+        string appDir = @"C:\app";
+        string appExe = Path.Combine(appDir, "ffmpeg.exe");
+        string pathDir = @"C:\tools";
+        string pathExe = Path.Combine(pathDir, "ffmpeg.exe");
+
+        var probed = new List<string>();
+        Func<string, string?> probe = exe =>
+        {
+            probed.Add(exe);
+            return exe == appExe || exe == pathExe ? banner : null;
+        };
+
+        FfmpegPreflightResult both = FfmpegPreflight.Run(appDir,
+            fileExists: f => f == appExe || f == pathExe, versionProbe: probe, pathVariable: pathDir);
+        Expect(probed.Count > 0 && probed[0] == appExe,
+            "The application directory must be probed FIRST - that is the documented resolution order.");
+        Expect(both.IsAvailable && both.ExecutablePath == appExe,
+            $"The app directory copy must be preferred over PATH; resolved '{both.ExecutablePath}'.");
+        Expect(both.Version == "7.1-full_build-www.gyan.dev", "The parsed version must ride on the result.");
+        Expect(both.VersionLine == banner, "The raw version line must be kept for the log.");
+
+        FfmpegPreflightResult viaPath = FfmpegPreflight.Run(appDir,
+            fileExists: f => f == pathExe, versionProbe: probe, pathVariable: pathDir);
+        Expect(viaPath.IsAvailable && viaPath.ExecutablePath == pathExe,
+            $"With no bundled binary the PATH copy must be used; resolved '{viaPath.ExecutablePath}'.");
+
+        FfmpegPreflightResult none = FfmpegPreflight.Run(appDir,
+            fileExists: _ => false, versionProbe: probe, pathVariable: pathDir);
+        Expect(!none.IsAvailable, "Neither location present must report unavailable.");
+        Expect(none.Detail.Contains(appExe) && none.Detail.Contains(pathExe),
+            $"The failure detail must NAME the locations checked; got '{none.Detail}'.");
+
+        FfmpegPreflightResult broken = FfmpegPreflight.Run(appDir,
+            fileExists: _ => true, versionProbe: _ => null, pathVariable: pathDir);
+        Expect(!broken.IsAvailable,
+            "A binary that exists but cannot answer -version is NOT usable - it must not be accepted.");
+
+        FfmpegPreflightResult throwing = FfmpegPreflight.Run(appDir,
+            fileExists: _ => true,
+            versionProbe: _ => throw new InvalidOperationException("boom"),
+            pathVariable: null);
+        Expect(!throwing.IsAvailable,
+            "A probe that throws must be handled, not propagated - a broken binary must not stop startup.");
+
+        FfmpegPreflightResult emptyPath = FfmpegPreflight.Run(appDir,
+            fileExists: f => f == FfmpegPreflight.ExecutableName, versionProbe: probe, pathVariable: ";");
+        Expect(!emptyPath.IsAvailable,
+            "An empty PATH segment must not resolve a bare 'ffmpeg.exe' relative to the working directory.");
+
+        // ---- 3. Absent binary -> persistent warning; available -> it CLEARS ----------------------
+        using (var seam = BuildHeadlessSession())
+        {
+            var vm = seam.ViewModel!;
+
+            vm.ApplyFfmpegPreflight(FfmpegPreflightResult.Missing(none.Detail));
+            Expect(vm.IsRecordingUnavailable,
+                "A failed preflight must raise the recording-unavailable warning - recording is the only thing affected.");
+            Expect(vm.RecordingUnavailableText.Contains("Recording unavailable")
+                   && vm.RecordingUnavailableText.Contains(appExe),
+                $"The warning must name the locations checked; got '{vm.RecordingUnavailableText}'.");
+            Expect(vm.StatusText == vm.RecordingUnavailableText,
+                "The warning must also reach the status line, so it is persistent and not tooltip-only.");
+
+            vm.ApplyFfmpegPreflight(FfmpegPreflightResult.Available(appExe, banner));
+            Expect(!vm.IsRecordingUnavailable, "An available preflight must CLEAR the warning - never sticky.");
+            Expect(vm.RecordingUnavailableText.Length == 0, "Clearing must empty the warning text.");
+            Expect(vm.FfmpegVersion == "7.1-full_build-www.gyan.dev",
+                $"The ViewModel must carry the resolved version; got '{vm.FfmpegVersion}'.");
+            Expect(vm.RecordingHealthFfmpegText == "7.1-full_build-www.gyan.dev",
+                "The health readout must project the resolved build - NET-010 provenance, live.");
+
+            // The engine never sees the preflight; the ViewModel stamps provenance onto its snapshot.
+            Expect(string.IsNullOrEmpty(seam.Session.GetRecordingHealthSnapshot().FfmpegVersion),
+                "The engine's own snapshot carries no provenance - the ViewModel is what stamps it.");
+            Expect(RecordingHealth.FfmpegText(default) == "—",
+                "An empty snapshot must render as a dash, not a blank cell.");
+        }
+
+        // ---- 4. RIDER: an unwritable primary location falls back to LOCALAPPDATA ------------------
+        string originalLogDir = CrashForensics.LogDir;
+        string originalDumpDir = CrashForensics.DumpDir;
+        string sandbox = Path.Combine(Path.GetTempPath(), "omt_pf_" + Guid.NewGuid().ToString("N")[..8]);
+        string primaryLog = Path.Combine(sandbox, "app", "logs");
+        string primaryDump = Path.Combine(sandbox, "app", "crashdumps");
+        string fallbackRoot = Path.Combine(sandbox, "localappdata");
+        string fallbackDump = Path.Combine(fallbackRoot, "crashdumps");
+
+        try
+        {
+            CrashForensics.ConfigureLocations(primaryLog, primaryDump, fallbackRoot, writableProbe: _ => false);
+            Expect(CrashForensics.IsUsingFallbackLocation,
+                "An unwritable application directory must activate the LOCALAPPDATA fallback.");
+            Expect(CrashForensics.DumpDir == fallbackDump,
+                $"The fallback dump directory must sit under LOCALAPPDATA; got '{CrashForensics.DumpDir}'.");
+
+            CrashForensics.RegisterStateProvider(
+                () => CrashState.Unknown with { IsRecording = true, SegmentIndex = 3 });
+            string? redirected = CrashForensics.HandleException(
+                "Test.Redirected", new InvalidOperationException("redirected fault"), fatal: false);
+
+            Expect(redirected != null, "The crash handler must still write a report from the fallback.");
+            Expect(File.Exists(redirected!), $"The redirected report must exist at {redirected}.");
+            Expect(File.ReadAllText(redirected!).Contains("Location    : forensics redirected"),
+                "The report must SAY the location was redirected - a reader months later is otherwise misled.");
+
+            // The launch notice must look in BOTH places: a previous run may have used the other one.
+            Directory.CreateDirectory(primaryDump);
+            File.WriteAllText(Path.Combine(primaryDump, "crash-2026-01-01_00-00-00.dmp"), "primary dump");
+            File.WriteAllText(Path.Combine(fallbackDump, "crash-2026-01-02_00-00-00.dmp"), "fallback dump");
+
+            Expect(CrashForensics.DumpDirectories().Length == 2,
+                "The next-launch notice must inspect BOTH locations, or a dump from another run is hidden.");
+            Expect(CrashForensics.CountDumps() == 2,
+                $"The notice must count dumps across both locations; saw {CrashForensics.CountDumps()}.");
+            Expect(CrashForensics.ReportPendingDumps() == 2,
+                "ReportPendingDumps must report the combined count.");
+
+            // A writable primary resolves back to the application directory (the portable layout).
+            CrashForensics.ConfigureLocations(primaryLog, primaryDump, fallbackRoot, writableProbe: _ => true);
+            Expect(!CrashForensics.IsUsingFallbackLocation,
+                "A writable application directory must be used directly - the portable layout is preferred.");
+            Expect(CrashForensics.DumpDir == primaryDump,
+                "Resolving with a writable primary must target the application directory.");
+        }
+        finally
+        {
+            CrashForensics.RegisterStateProvider(null);
+            CrashForensics.UseDirectories(originalLogDir, originalDumpDir);
+            try { Directory.Delete(sandbox, recursive: true); } catch { }
+        }
+
+        Console.WriteLine(" -> Resolver order app-dir > PATH; version parsed; a missing binary warns and then clears; " +
+                          "an unwritable primary falls back to LOCALAPPDATA and the notice counts both!");
     }
 
     /// <summary>
