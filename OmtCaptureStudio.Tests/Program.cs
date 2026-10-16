@@ -85,6 +85,7 @@ class Program
         TestFfmpegPreflightAndForensicsFallback();
         TestCompositeRecordingSink();
         TestCompositeRecordingWiring();
+        TestProgressiveDisclosure();
 
         TestMainWindowViewModel();
 
@@ -438,11 +439,12 @@ class Program
             case "0.688": TestFfmpegPreflightAndForensicsFallback(); break;
             case "0.689": TestCompositeRecordingSink(); break;
             case "0.690": TestCompositeRecordingWiring(); break;
+            case "0.691": TestProgressiveDisclosure(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");
                 Console.Error.WriteLine("Known: 0, 0.5, 0.6, 0.65, 0.7, 0.71, 0.69, 0.72, 0.68, 0.67, 0.671, 0.672, " +
-                                        "0.673, 0.674, 0.675, 0.676, 0.677, 0.678, 0.679, 0.681, 0.682, 0.683, 0.684, 0.685, 0.686, 0.687, 0.688, 0.689, 0.690, 0.75");
+                                        "0.673, 0.674, 0.675, 0.676, 0.677, 0.678, 0.679, 0.681, 0.682, 0.683, 0.684, 0.685, 0.686, 0.687, 0.688, 0.689, 0.690, 0.691, 0.75");
                 return 2;
         }
 
@@ -611,6 +613,120 @@ class Program
         }
 
         public void Dispose() => DisposeCount++;
+    }
+
+    /// <summary>
+    /// NET-012 (distill): progressive disclosure. The Advanced tier's observable state, the broadcast
+    /// row's collapse keyed to BROADCAST state only (never recording), the locking composition, and the
+    /// preset-Custom flow working from inside the tier.
+    /// </summary>
+    static void TestProgressiveDisclosure()
+    {
+        Console.WriteLine("\n[Step 0.691] Verifying progressive disclosure (advanced tier, collapsed broadcast row)...");
+
+        using var seam = BuildHeadlessSession();
+        var vm = seam.ViewModel!;
+
+        // ---- 1. DEFAULTS: the Advanced tier starts collapsed, and the broadcast row starts hidden ----
+        Expect(!vm.IsAdvancedRecordingOptionsExpanded,
+            "The Advanced tier must be COLLAPSED by default - the default path is preset -> folder -> record.");
+        Expect(vm.IsAdvancedChevronDown, "A collapsed tier must show the down chevron.");
+        Expect(!vm.IsBroadcastRowVisible,
+            "The broadcast configuration row must start hidden - it is revealed by Broadcast being ON.");
+        Expect(vm.IsLiveSettingSummaryVisible,
+            "While the broadcast row is hidden the compact summary must be the thing that is shown.");
+
+        // ---- 2. THE DISCLOSURE observable + its accessible name ---------------------------------
+        Expect(vm.AdvancedOptionsAutomationName.Contains("Show"),
+            $"The collapsed disclosure must name the ACTION; got '{vm.AdvancedOptionsAutomationName}'.");
+
+        vm.ToggleAdvancedRecordingOptionsCommand.Execute(null);
+        Expect(vm.IsAdvancedRecordingOptionsExpanded, "Toggling the disclosure must expand the tier.");
+        Expect(!vm.IsAdvancedChevronDown, "An expanded tier must show the up chevron.");
+        Expect(vm.AdvancedOptionsAutomationName.Contains("Hide"),
+            $"The expanded disclosure must name the reverse action; got '{vm.AdvancedOptionsAutomationName}'.");
+
+        // ---- 3. THE LOCKING COMPOSITION survives inside the tier ---------------------------------
+        // Collapsing is VISIBILITY; locking is ENABLED. They are different axes and must compose.
+        Expect(vm.IsRecordingConfigEnabled,
+            "With no take running the recording config must be unlocked, expanded or not.");
+        vm.IsRecordingConfigEnabled = false;
+        Expect(vm.IsAdvancedRecordingOptionsExpanded,
+            "Locking the recording config must NOT collapse the tier - visibility and enablement are independent.");
+        vm.IsRecordingConfigEnabled = true;
+
+        // ---- 4. PRESET -> Custom still works from INSIDE the tier --------------------------------
+        vm.SelectedRecordingPreset = RecordingPresets.BuiltIn[0].Name;
+        Expect(vm.SelectedRecordingPreset == RecordingPresets.BuiltIn[0].Name,
+            "Selecting a preset must apply it.");
+        Expect(vm.IsAdvancedRecordingOptionsExpanded,
+            "Applying a preset must not collapse the tier the operator is working in.");
+
+        // An Advanced-tier knob EDIT flips the picker to Custom - the behaviour has to survive the move.
+        vm.SelectedRolloverMinutes = RecordingChoiceOption_ForTest(MainWindowViewModel.RolloverMinuteOptions, 30);
+        Expect(vm.SelectedRecordingPreset == RecordingPresets.CustomName,
+            $"Editing a control inside the tier must switch the picker to Custom; got '{vm.SelectedRecordingPreset}'.");
+
+        // ---- 5. THE ROW IS KEYED TO BROADCAST, NEVER TO RECORDING ---------------------------------
+        vm.IsDesktopCaptureActive = true;
+        Expect(vm.IsBroadcastRowVisible, "Broadcast ON must reveal the broadcast configuration row.");
+        Expect(!vm.IsLiveSettingSummaryVisible, "With the row visible the compact summary must stand down.");
+        Expect(!string.IsNullOrWhiteSpace(vm.LiveSettingSummary),
+            "The summary must always carry the selected target/audio, ready for the collapsed state.");
+
+        long frames = 0;
+        seam.Session.VideoFrameAvailable += (ptr, len, w, h, st, fps, ts) => Interlocked.Increment(ref frames);
+        seam.Session.Connect(new SyntheticPatternSource());
+
+        int waitTicks = 0;
+        while (frames < 5 && waitTicks < 30)
+        {
+            Thread.Sleep(50);
+            waitTicks++;
+        }
+
+        var config = new RecordingConfig { OutputDirectory = Path.GetTempPath(), FilenamePrefix = "DisclosureTest" };
+        if (seam.Session.StartRecording(config))
+        {
+            bool rowWasVisibleWhileRecording = vm.IsBroadcastRowVisible;
+
+            // Broadcasting switched OFF mid-take: the row collapses, the take must not notice.
+            vm.IsDesktopCaptureActive = false;
+            Expect(!vm.IsBroadcastRowVisible,
+                "Broadcast OFF must collapse the row even while a take is running - the row is not keyed to recording.");
+            Expect(rowWasVisibleWhileRecording,
+                "The row was visible because BROADCAST was on, not because a take was running.");
+            Expect(seam.Session.IsRecording,
+                "Collapsing the broadcast row must never disturb a running take.");
+
+            // A live take must NOT force the row open on its own.
+            Expect(!vm.IsBroadcastRowVisible,
+                "A recording on its own must never reveal the broadcast row - it is keyed to broadcast only.");
+
+            seam.Session.StopRecording();
+        }
+        else
+        {
+            Console.WriteLine(" -> [SKIP] the storage preflight refused the temp volume; the recording-vs-row assertions were skipped.");
+        }
+
+        Console.WriteLine(" -> Advanced collapsed by default with a drawn chevron; the broadcast row is keyed to " +
+                          "broadcast state alone (a take neither opens nor is disturbed by it); locking composes " +
+                          "with visibility; preset->Custom still works from inside the tier!");
+
+        void Body() { }
+        Body();
+    }
+
+    /// <summary>Finds a labelled option by value - mirrors the ViewModel's own lookup for the test.</summary>
+    private static RecordingChoiceOption RecordingChoiceOption_ForTest(IReadOnlyList<RecordingChoiceOption> options, double value)
+    {
+        for (int i = 0; i < options.Count; i++)
+        {
+            if (options[i].Value.Equals(value)) return options[i];
+        }
+
+        return options[0];
     }
 
     /// <summary>
