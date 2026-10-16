@@ -41,7 +41,10 @@
                         <ColumnDefinition Width="Auto"/> <!-- 4: Connect / Disconnect Button -->
                         <ColumnDefinition Width="Auto"/> <!-- 5: Divider -->
                         <ColumnDefinition Width="Auto"/> <!-- 6: Test Signal Button -->
-                        <ColumnDefinition Width="Auto"/> <!-- 7: Compact live-setting summary (NET-012) -->
+                        <!-- NET-013 P1-01: elastic so the summary SHRINKS (and trims) before it can ever
+                             push the Broadcast toggle out of the window; MaxWidth keeps it at 240 at wide
+                             sizes so the surplus still falls at the right edge (DESIGN 5.1). -->
+                        <ColumnDefinition Width="*" MaxWidth="240"/> <!-- 7: Compact live-setting summary -->
                         <ColumnDefinition Width="Auto"/> <!-- 8: Broadcast Toggle (revelation entry point) -->
                     </Grid.ColumnDefinitions>
 
@@ -93,7 +96,7 @@
                     <Rectangle Grid.Column="5" Width="1" Height="22" Fill="{DynamicResource StudioBorderSubtle}" Margin="0,0,10,0" VerticalAlignment="Center"/>
 
                     <!-- 6: Test Signal -->
-                    <ToggleButton x:Name="BtnTestSignal" Grid.Column="6" Content="Test Signal" Padding="10,5" MinHeight="30" VerticalAlignment="Center"
+                    <ToggleButton x:Name="BtnTestSignal" Grid.Column="6" Content="Test Signal" Padding="10,5" MinHeight="30" Margin="0,0,10,0" VerticalAlignment="Center"
                                   IsChecked="{CompiledBinding IsTestSignalActive, Mode=OneWay}"
                                   Background="{CompiledBinding TestSignalBackground}"
                                   Foreground="{CompiledBinding TestSignalForeground}"
@@ -338,9 +341,26 @@
                     <ColumnDefinition Width="Auto"/> <!-- 5: Advanced disclosure (NET-012) -->
                 </Grid.ColumnDefinitions>
 
-                <!-- 0: Recording Configuration - the ADVANCED tier (NET-012). These are configuration
-                     behind smart defaults (MP4 / Auto Hardware / High), so they live one click away. -->
-                <StackPanel Grid.Row="1" Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,20,0"
+                <!-- NET-012 (distill): the PRESET picker is part of the DEFAULT path
+                     (preset -> folder -> record), so it stays in the defaults strip. Every other
+                     recording setting moves behind Advanced below. -->
+                <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center"
+                            IsEnabled="{CompiledBinding IsRecordingConfigEnabled}">
+                    <TextBlock Text="PRESET" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                    <ComboBox x:Name="CmbRecordingPreset" Width="185"
+                              ItemsSource="{CompiledBinding RecordingPresetNames}"
+                              SelectedItem="{CompiledBinding SelectedRecordingPreset, Mode=TwoWay}"
+                              AutomationProperties.Name="Recording Preset"
+                              ToolTip.Tip="Apply a named container/encoder/quality/rollover preset. Editing any control switches the picker to Custom."/>
+                </StackPanel>
+
+                <!-- NET-008/NET-012: scheduled / segmented capture, now the ADVANCED tier. Still inside
+                     the IsRecordingConfigEnabled lock, so a mid-flight change can never restart a running
+                     take (the live-changing-selector locking rule) - collapsing is visibility only. -->
+                <!-- NET-013 P2-01: ALL SEVEN advanced pickers live in this ONE StackPanel at row 1,
+                     ColumnSpan 6, so expanding Advanced can never widen the column shared with the
+                     PRESET picker and starve Save Folder. -->
+                <StackPanel Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="6" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,8,0,0"
                             IsVisible="{CompiledBinding IsAdvancedRecordingOptionsExpanded}"
                             IsEnabled="{CompiledBinding IsRecordingConfigEnabled}">
                     <!-- Container -->
@@ -372,27 +392,6 @@
                                   AutomationProperties.Name="Recording Quality Preset"
                                   ToolTip.Tip="Select recording quality and bitrate preset (High, Ultra, Master ProRes, Medium)"/>
                     </StackPanel>
-                </StackPanel>
-
-                <!-- NET-012 (distill): the PRESET picker is part of the DEFAULT path
-                     (preset -> folder -> record), so it stays in the defaults strip. Every other
-                     recording setting moves behind Advanced below. -->
-                <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center"
-                            IsEnabled="{CompiledBinding IsRecordingConfigEnabled}">
-                    <TextBlock Text="PRESET" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
-                    <ComboBox x:Name="CmbRecordingPreset" Width="185"
-                              ItemsSource="{CompiledBinding RecordingPresetNames}"
-                              SelectedItem="{CompiledBinding SelectedRecordingPreset, Mode=TwoWay}"
-                              AutomationProperties.Name="Recording Preset"
-                              ToolTip.Tip="Apply a named container/encoder/quality/rollover preset. Editing any control switches the picker to Custom."/>
-                </StackPanel>
-
-                <!-- NET-008/NET-012: scheduled / segmented capture, now the ADVANCED tier. Still inside
-                     the IsRecordingConfigEnabled lock, so a mid-flight change can never restart a running
-                     take (the live-changing-selector locking rule) - collapsing is visibility only. -->
-                <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="4" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,8,0,0"
-                            IsVisible="{CompiledBinding IsAdvancedRecordingOptionsExpanded}"
-                            IsEnabled="{CompiledBinding IsRecordingConfigEnabled}">
                     <StackPanel Margin="0,0,16,0">
                         <TextBlock Text="ROLL OVER" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
                         <ComboBox x:Name="CmbRolloverMinutes" Width="90"
@@ -517,7 +516,7 @@
                      glyphs, no emoji. Named + tooltipped, keyboard reachable, MinHeight 30 like every
                      other toolbar control. -->
                 <ToggleButton x:Name="BtnAdvancedRecording" Grid.Row="0" Grid.Column="5" MinHeight="30"
-                              Padding="10,5" VerticalAlignment="Center"
+                              Padding="10,5" Margin="8,0,0,0" VerticalAlignment="Center"
                               IsChecked="{CompiledBinding IsAdvancedRecordingOptionsExpanded, Mode=TwoWay}"
                               AutomationProperties.Name="{CompiledBinding AdvancedOptionsAutomationName}"
                               ToolTip.Tip="Show or hide container, encoder, quality, backup folder, rollover and schedule settings">

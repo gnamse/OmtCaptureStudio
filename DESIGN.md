@@ -181,6 +181,13 @@ Broadcast toggle moved up to row 0 because it is the entry point that reveals th
 - While collapsed, row 0 carries a **compact live-setting summary** (`LiveSettingSummary`,
   e.g. `Desktop · SystemAudio`) so hiding the pickers never hides *which* target and audio are
   selected. It is `Polite` — descriptive, not an alarm.
+- **NET-013 P1-01 — the summary's column is ELASTIC (`Width="*" MaxWidth="240"`).** At the 950px
+  floor the summary must SHRINK (and `TextTrimming="CharacterEllipsis"`) rather than push the
+  Broadcast toggle past the window edge; at wide sizes `MaxWidth` caps it at 240 so the surplus
+  still falls at the right edge (§5.1) and the toggle does not drift. Measured before the fix:
+  the summary occupied `716..956` and pushed `BtnDesktopCapture` to `966..1056` — 16px past a
+  950px window, i.e. **the toggle was unreachable at the minimum size.** Any control placed to the
+  right of an elastic summary must be an `Auto` column that the summary can never displace.
 - Every row-1 `Grid.Column` assignment is preserved (including the now-unused column 8) so the
   row can be restored or extended without re-deriving the layout.
 
@@ -204,6 +211,19 @@ The disclosure is a `ToggleButton` with a **drawn chevron** (`IconChevronDown` /
 `StreamGeometry`, §6 — no glyphs, no emoji), `MinHeight="30"` so it introduces no second control
 height, named and tooltipped, and keyboard reachable. Expanded state is an observable
 (`IsAdvancedRecordingOptionsExpanded`) so it is assertable headlessly.
+
+**NET-013 P2-01 — the Advanced tier is ONE `StackPanel` at `Grid.Row="1" Grid.Column="0"
+Grid.ColumnSpan="6`."** It holds all seven advanced pickers (CONTAINER, ENCODER, QUALITY,
+ROLL OVER, OR SIZE, MAX LENGTH, START IN) in that order. Previously the codec pickers sat in
+column 0, which the bar shares with the PRESET picker, so expanding Advanced widened that shared
+`Auto` column by ~156px and starved Save Folder — measured: `TxtOutputDir` crushed to 64px and
+overlapping `BtnBrowseDir` by 9px. Spanning six columns decouples row 1's width from column 0
+entirely, so column 0 stays at the preset's width and Save Folder keeps its width in **both**
+states. Do not put a row-1 control back into a single column.
+
+Gaps between adjacent toolbar controls are **not** implicit: `BtnAdvancedRecording` carries
+`Margin="8,0,0,0"` and `BtnTestSignal` carries `Margin="0,0,10,0"`, because two controls that abut
+at 0px read as one control (NET-013 P2-02).
 
 ### 5.3 The VU meter is a fixed column
 
