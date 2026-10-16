@@ -447,9 +447,22 @@ public sealed class RecordingArm : IDisposable
         string message = RecordingStorageGuard.LowDiskMessage(freeBytes, path);
         AppLogger.LogError(message);
 
-        _ = DisarmAsync(RecordingStopReason.LowDisk);
-        RecordingError?.Invoke(message);
+        StopLowDisk(message);
     }
+
+    /// <summary>
+    /// The low-disk stop. The error is raised in the DISARM CONTINUATION, not synchronously here.
+    ///
+    /// <para>DEF-02/OBS-03: raising it inline flashed "Recording Error: Low disk space…" at T+0 and
+    /// then <see cref="DisarmAsync"/>'s stop summary overwrote the status line ~500 ms later, masking
+    /// the reason in the bottom bar (the drawer verdict was already correct). This mirrors
+    /// <see cref="OnSinkError"/>, whose <see cref="Disarm"/> runs synchronously first so its error
+    /// stays last. The async hop lives in <see cref="DisarmAsync"/>, so the only thread hop around a
+    /// finalize is still that one place.</para>
+    /// </summary>
+    public void StopLowDisk(string message)
+        => _ = DisarmAsync(RecordingStopReason.LowDisk)
+            .ContinueWith(_ => RecordingError?.Invoke(message), TaskScheduler.Default);
 
     /// <summary>
     /// A sink failure. The transport itself is sick, so this is best-effort: finalize what is on disk

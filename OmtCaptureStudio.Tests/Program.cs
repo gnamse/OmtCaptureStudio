@@ -2701,6 +2701,10 @@ class Program
         public readonly List<string> Steps = new();
         public Action<string>? OnStep;
         public System.Threading.ManualResetEventSlim? BlockVideoWrite;
+        /// <summary>When set, <see cref="FinalizeSink"/> blocks here until the gate is set (DEF-02 ordering test).</summary>
+        public System.Threading.ManualResetEventSlim? BlockFinalize;
+        /// <summary>Non-zero once a finalize has entered the sink — the DEF-02 test waits on this, not on a sleep.</summary>
+        public int FinalizeEntered;
         public bool ThrowOnFinalize;
 
         private long _video, _audio;
@@ -2739,6 +2743,8 @@ class Program
         public void FinalizeSink(out long totalBytesWritten)
         {
             Step("finalize");
+            System.Threading.Interlocked.Increment(ref FinalizeEntered);
+            BlockFinalize?.Wait(5000);
             totalBytesWritten = _audio + 4096;
             if (ThrowOnFinalize) throw new InvalidOperationException("transport already dead");
         }
@@ -2926,6 +2932,68 @@ class Program
         arm4.Dispose();
         arm.Dispose();
         arm3.Dispose();
+
+        // ---- DEF-02 / OBS-03: the low-disk error must be raised AFTER Disarm(LowDisk) completes, not
+        //      synchronously at T+0. Raised inline it flashed "Recording Error: Low disk space…" first,
+        //      and the stop summary then overwrote it ~500 ms later — masking the reason in the bottom
+        //      bar (the drawer verdict was already correct). Mirrors OnSinkError, whose Disarm runs
+        //      synchronously first so its error stays last.
+        {
+            var diskSink = new SignalRecordingSink();
+            var diskArm = new RecordingArm(diskSink);
+            var order = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            diskArm.RecordingStopped += _ => order.Enqueue("stopped");
+            diskArm.RecordingError += _ => order.Enqueue("error");
+
+            if (!diskArm.Arm(config, format))
+            {
+                Console.WriteLine(" -> [SKIP] low-disk ordering: storage preflight refused the temp volume in this environment (policy covered by Step 0.681).");
+            }
+            else
+            {
+                // Hold the finalize open so the T+0-vs-after-disarm distinction is observable.
+                var finalizeGate = new System.Threading.ManualResetEventSlim(false);
+                diskSink.BlockFinalize = finalizeGate;
+
+                diskArm.StopLowDisk("Recording stopped: low disk space on the destination volume.");
+
+                // Wait for the background disarm to reach (and block inside) FinalizeSink.
+                var spin = System.Diagnostics.Stopwatch.StartNew();
+                while (System.Threading.Volatile.Read(ref diskSink.FinalizeEntered) == 0 && spin.ElapsedMilliseconds < 3000)
+                {
+                    System.Threading.Thread.Sleep(5);
+                }
+                if (System.Threading.Volatile.Read(ref diskSink.FinalizeEntered) == 0)
+                {
+                    throw new Exception("DEF-02: the background low-disk disarm never reached FinalizeSink.");
+                }
+
+                // THE discriminating assertion: while the finalize is still blocked, the low-disk error
+                // must NOT have been raised. Raising it at T+0 is exactly the bug.
+                if (!order.IsEmpty)
+                {
+                    throw new Exception($"DEF-02: the low-disk error must wait for the disarm to complete; saw [{string.Join(",", order)}] while finalize was still blocked.");
+                }
+
+                finalizeGate.Set(); // let the finalize finish and the continuation run
+
+                spin.Restart();
+                while (order.Count < 2 && spin.ElapsedMilliseconds < 3000)
+                {
+                    System.Threading.Thread.Sleep(5);
+                }
+
+                var seq = order.ToArray();
+                if (seq.Length != 2 || seq[0] != "stopped" || seq[1] != "error")
+                {
+                    throw new Exception($"DEF-02: expected [stopped,error] (low-disk error AFTER the stop summary); got [{string.Join(",", seq)}].");
+                }
+                if (diskArm.IsRecording) throw new Exception("DEF-02: the low-disk stop must close the gate.");
+                Console.WriteLine(" -> Low-disk ordering: error raised only AFTER Disarm(LowDisk) completed; the stop summary is not masked.");
+            }
+
+            diskArm.Dispose();
+        }
 
         // ---- Locality: ONE finalize call site in the whole app outside the sink implementations, and
         //      no Task.Run finalize left in the orchestration classes (AC3).
