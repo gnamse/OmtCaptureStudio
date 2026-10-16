@@ -165,6 +165,7 @@ class Program
         TestConversionPlacement();
         TestRecordingStorageGuard();
         TestRecordingArm();
+        TestMediaBufferPool();
 
         Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
         using (var vmSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(new NullRecordingSink())))
@@ -2128,6 +2129,147 @@ class Program
         Console.ResetColor();
     }
 
+    /// <summary>
+    /// The exactly-once return invariant, made OBSERVABLE. A double return or a pool mix-up is a
+    /// silent leak, not a crash, so structure alone cannot prove it: the ledger is armed here and the
+    /// tests assert lease balance across the real queue code paths (drop, drain, dispose, consumer),
+    /// and assert that the detector FIRES on a deliberately broken loop.
+    /// </summary>
+    static void TestMediaBufferPool()
+    {
+        Console.WriteLine("\n[Step 0.683] Verifying MediaBufferPool (exactly-once return, ledger, pool identity)...");
+
+        // ---- Pool identity travels with the packet, and video frames still pool in the 16 MB pool.
+        // This is the regression that matters: routing video to ArrayPool<byte>.Shared would silently
+        // stop pooling 1080p frames (8.29 MB > its 1 MB ceiling) and reintroduce the LOH churn
+        // LargeArrayPool exists to prevent — with no error, just churn.
+        byte[] firstFrame = MediaBufferPool.Video.Rent(8_290_000);
+        if (firstFrame.Length < 8_290_000) throw new Exception($"The video pool must serve an 8.29 MB frame; got {firstFrame.Length}.");
+        MediaBufferPool.Video.Return(firstFrame);
+        byte[] secondFrame = MediaBufferPool.Video.Rent(8_290_000);
+        if (!ReferenceEquals(firstFrame, secondFrame))
+        {
+            throw new Exception("Video frames must POOL (same array back), not reallocate per frame — the LargeArrayPool contract.");
+        }
+        MediaBufferPool.Video.Return(secondFrame);
+
+        byte[] firstChunk = MediaBufferPool.Audio.Rent(4096);
+        MediaBufferPool.Audio.Return(firstChunk);
+        byte[] secondChunk = MediaBufferPool.Audio.Rent(4096);
+        if (!ReferenceEquals(firstChunk, secondChunk)) throw new Exception("Audio chunks must pool on the shared pool.");
+        MediaBufferPool.Audio.Return(secondChunk);
+
+        if (ReferenceEquals(MediaBufferPool.Video, MediaBufferPool.Audio))
+        {
+            throw new Exception("Video and audio must be distinct pools — that asymmetry is the whole reason the packet carries its owner.");
+        }
+
+        // ---- Lease balance across the REAL queue paths, with the ledger armed.
+        MediaBufferPoolLedger.Reset();
+        MediaBufferPoolLedger.Enabled = true;
+        try
+        {
+            var videoQueue = new BoundedMediaQueue<VideoFramePacket>(4, p => p.Release());
+            var audioQueue = new BoundedMediaQueue<AudioDataPacket>(3, p => p.Release());
+
+            // Phase A: normal enqueue → consumer dequeue → release (the writer-loop path).
+            for (int i = 0; i < 3; i++)
+            {
+                videoQueue.Enqueue(new VideoFramePacket(MediaBufferPool.Video.Rent(1000), 1000, MediaBufferPool.Video));
+            }
+            int consumed = 0;
+            while (videoQueue.TryDequeue(out var packet)) { packet.Release(); consumed++; }
+            if (consumed != 3) throw new Exception($"Consumer path consumed {consumed}/3.");
+
+            // Phase B: overflow — the drop-oldest path returns the evicted buffer.
+            for (int i = 0; i < 6; i++)
+            {
+                videoQueue.Enqueue(new VideoFramePacket(MediaBufferPool.Video.Rent(1000), 1000, MediaBufferPool.Video));
+            }
+            if (videoQueue.DroppedCount != 2) throw new Exception($"Expected 2 drops into capacity 4; got {videoQueue.DroppedCount}.");
+            while (videoQueue.TryDequeue(out var packet)) { packet.Release(); }
+
+            // Phase C: enqueue while adding is complete — dropped immediately, still returned once.
+            videoQueue.CompleteAdding();
+            videoQueue.Enqueue(new VideoFramePacket(MediaBufferPool.Video.Rent(1000), 1000, MediaBufferPool.Video));
+            if (videoQueue.DroppedCount != 3) throw new Exception("An enqueue after CompleteAdding must count as a drop.");
+
+            // Phase D: disposal drains whatever is still queued through the drop callback.
+            for (int i = 0; i < 2; i++)
+            {
+                audioQueue.Enqueue(new AudioDataPacket(MediaBufferPool.Audio.Rent(512), 512, MediaBufferPool.Audio));
+            }
+            audioQueue.Dispose();
+            videoQueue.Dispose();
+
+            if (MediaBufferPoolLedger.ActiveLeases != 0)
+            {
+                throw new Exception($"Lease leak: {MediaBufferPoolLedger.ActiveLeases} buffer(s) never returned across drop/drain/dispose/consumer paths.");
+            }
+            if (MediaBufferPoolLedger.FaultCount != 0)
+            {
+                throw new Exception($"Ledger faults on the healthy paths: {string.Join(" | ", MediaBufferPoolLedger.Faults)}");
+            }
+            if (MediaBufferPoolLedger.RentCount != MediaBufferPoolLedger.ReturnCount)
+            {
+                throw new Exception($"Rent/return imbalance: {MediaBufferPoolLedger.RentCount} vs {MediaBufferPoolLedger.ReturnCount}.");
+            }
+            Console.WriteLine($" -> Lease balance across drop/drain/complete/dispose/consumer paths: {MediaBufferPoolLedger.RentCount} rents, {MediaBufferPoolLedger.ReturnCount} returns, 0 leaks, 0 faults.");
+
+            // ---- The detector must FIRE, or it proves nothing. A deliberately broken loop.
+            MediaBufferPoolLedger.Reset();
+            BorkedWriterLoop();
+            if (MediaBufferPoolLedger.FaultCount == 0)
+            {
+                throw new Exception("The double-return detector did NOT fire on a deliberately broken loop — the invariant is unobservable.");
+            }
+            if (!MediaBufferPoolLedger.Faults[0].Contains("not on loan"))
+            {
+                throw new Exception($"The double-return fault should say the buffer was not on loan; got: {MediaBufferPoolLedger.Faults[0]}");
+            }
+            Console.WriteLine($" -> Broken loop detected: \"{MediaBufferPoolLedger.Faults[0]}\"");
+
+            // ---- And the silent one: a pool mix-up.
+            MediaBufferPoolLedger.Reset();
+            byte[] mixed = MediaBufferPool.Video.Rent(2000);
+            MediaBufferPool.Audio.Return(mixed); // wrong pool: silent leak in the old code
+            if (MediaBufferPoolLedger.FaultCount == 0 || !MediaBufferPoolLedger.Faults[0].Contains("WRONG POOL"))
+            {
+                throw new Exception("A pool mix-up must be reported as WRONG POOL, not leaked silently.");
+            }
+            Console.WriteLine($" -> Pool mix-up detected: \"{MediaBufferPoolLedger.Faults[0]}\"");
+
+            if (MediaBufferPoolLedger.ActiveLeases != 1)
+            {
+                throw new Exception("A wrong-pool return must leave the lease open (it did not actually return it).");
+            }
+        }
+        finally
+        {
+            MediaBufferPoolLedger.Enabled = false;
+            MediaBufferPoolLedger.Reset();
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> Exactly-once return is now observable (lease ledger, drop/drain/dispose paths, broken-loop detector)!");
+        Console.ResetColor();
+    }
+
+    /// <summary>A deliberately broken writer loop: returns one packet twice.</summary>
+    static void BorkedWriterLoop()
+    {
+        var queue = new BoundedMediaQueue<VideoFramePacket>(4, p => p.Release());
+        queue.Enqueue(new VideoFramePacket(MediaBufferPool.Video.Rent(1000), 1000, MediaBufferPool.Video));
+
+        while (queue.TryDequeue(out var packet))
+        {
+            packet.Release();
+            packet.Release(); // the bug this detector exists to catch
+        }
+
+        queue.Dispose();
+    }
+
     /// <summary>Walks up from the test binary to the repo root and resolves a repo-relative source path.</summary>
     static string? FindRepoSource(string relativePath)
     {
@@ -2516,7 +2658,7 @@ class Program
             {
                 throw new Exception("The arm must be the ONLY place the gate is assigned (1 open, 2 closes) and no other class may touch it.");
             }
-            Console.WriteLine(" -> Finalize locality: 1 FinalizeSink site (arm), 0 in the facade/session, 1 thread hop, gate assigned in exactly two places.");
+            Console.WriteLine(" -> Finalize locality: 1 FinalizeSink site (the arm), 0 in the facade/session, 1 thread hop; the gate is assigned in NO other class (the arm itself has 1 open + 2 closes: Arm, Disarm, and Arm's failure rollback).");
         }
 
         Console.ForegroundColor = ConsoleColor.Green;

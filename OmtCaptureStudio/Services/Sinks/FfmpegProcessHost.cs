@@ -315,7 +315,8 @@ public class FfmpegProcessHost : IDisposable
                 }
                 finally
                 {
-                    LargeArrayPool.Shared.Return(packet.Buffer);
+                    // Exactly-once return, to the pool that rented it (MediaBufferPool owns the rule).
+                    packet.Release();
                 }
             }
             else
@@ -391,7 +392,8 @@ public class FfmpegProcessHost : IDisposable
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(packet.Buffer);
+                    // Exactly-once return, to the pool that rented it (MediaBufferPool owns the rule).
+                    packet.Release();
                 }
             }
             else

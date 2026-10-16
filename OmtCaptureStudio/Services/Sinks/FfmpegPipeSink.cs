@@ -31,11 +31,11 @@ public class FfmpegPipeSink : IRecordingSink
             {
                 _hasAudio = format.Channels > 0 && format.SampleRate > 0;
 
-                _videoQueue = new BoundedMediaQueue<VideoFramePacket>(MaxQueuedVideoFrames, p => LargeArrayPool.Shared.Return(p.Buffer));
+                _videoQueue = new BoundedMediaQueue<VideoFramePacket>(MaxQueuedVideoFrames, p => p.Release());
                 
                 if (_hasAudio)
                 {
-                    _audioQueue = new BoundedMediaQueue<AudioDataPacket>(MaxQueuedAudioChunks, p => ArrayPool<byte>.Shared.Return(p.Buffer));
+                    _audioQueue = new BoundedMediaQueue<AudioDataPacket>(MaxQueuedAudioChunks, p => p.Release());
                 }
 
                 _host = new FfmpegProcessHost(_videoQueue, _audioQueue);
@@ -69,7 +69,7 @@ public class FfmpegPipeSink : IRecordingSink
         byte[]? rented = null;
         try
         {
-            rented = LargeArrayPool.Shared.Rent(dataLength);
+            rented = MediaBufferPool.Video.Rent(dataLength);
             fixed (byte* pDst = rented)
             {
                 Buffer.MemoryCopy((void*)pData, pDst, dataLength, dataLength);
@@ -79,7 +79,7 @@ public class FfmpegPipeSink : IRecordingSink
         {
             if (rented != null)
             {
-                LargeArrayPool.Shared.Return(rented);
+                MediaBufferPool.Video.Return(rented);
             }
             AppLogger.LogError($"[Video MemoryCopy Error] {ex.Message}", ex);
             return;
@@ -92,17 +92,17 @@ public class FfmpegPipeSink : IRecordingSink
         // A Set() on a disposed signal or a lost rented buffer must never escape into the source loop.
         if (_disposed)
         {
-            LargeArrayPool.Shared.Return(rented);
+            MediaBufferPool.Video.Return(rented);
             return;
         }
 
         try
         {
-            videoQueue.Enqueue(new VideoFramePacket(rented, dataLength));
+            videoQueue.Enqueue(new VideoFramePacket(rented, dataLength, MediaBufferPool.Video));
         }
         catch
         {
-            LargeArrayPool.Shared.Return(rented);
+            MediaBufferPool.Video.Return(rented);
             throw;
         }
     }
@@ -115,14 +115,14 @@ public class FfmpegPipeSink : IRecordingSink
         byte[]? rented = null;
         try
         {
-            rented = ArrayPool<byte>.Shared.Rent(count);
+            rented = MediaBufferPool.Audio.Rent(count);
             Buffer.BlockCopy(buffer, offset, rented, 0, count);
         }
         catch (Exception ex)
         {
             if (rented != null)
             {
-                ArrayPool<byte>.Shared.Return(rented);
+                MediaBufferPool.Audio.Return(rented);
             }
             AppLogger.LogError($"[Audio Buffer Copy Error] {ex.Message}", ex);
             return;
@@ -131,17 +131,17 @@ public class FfmpegPipeSink : IRecordingSink
         // Same stop-edge guard as WriteVideo — drop the rented buffer exactly once.
         if (_disposed)
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            MediaBufferPool.Audio.Return(rented);
             return;
         }
 
         try
         {
-            audioQueue.Enqueue(new AudioDataPacket(rented, count));
+            audioQueue.Enqueue(new AudioDataPacket(rented, count, MediaBufferPool.Audio));
         }
         catch
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            MediaBufferPool.Audio.Return(rented);
             throw;
         }
     }
