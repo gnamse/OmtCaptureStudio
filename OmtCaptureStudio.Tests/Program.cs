@@ -167,6 +167,7 @@ class Program
         TestRecordingArm();
         TestMediaBufferPool();
         TestPipeWriterLoop();
+        TestFfmpegArguments();
 
         Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
         using (var vmSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(new NullRecordingSink())))
@@ -2262,11 +2263,9 @@ class Program
         public long BytesWritten;
         public int PacketsWritten;
         public int FailAfterPackets = -1;      // >= 0: throw on this packet index
-        public bool DisconnectAfter;           // return Disconnected from the 2nd packet on
 
         public PipeWriteResult Write(byte[] buffer, int length)
         {
-            if (DisconnectAfter && PacketsWritten >= 1) return PipeWriteResult.Disconnected;
             if (FailAfterPackets >= 0 && PacketsWritten >= FailAfterPackets)
             {
                 throw new InvalidOperationException("simulated pipe failure");
@@ -2436,6 +2435,140 @@ class Program
         }
 
         queue.Dispose();
+    }
+
+    /// <summary>
+    /// NET-004 AC3: the encoder×quality → argv table and the AutoHardware resolution rule are pure, so
+    /// they are asserted as a table — no ffmpeg spawn, no GPU, no registry. The detector is injected, and
+    /// the test proves it is NOT consulted when a concrete encoder is requested.
+    /// </summary>
+    static void TestFfmpegArguments()
+    {
+        Console.WriteLine("\n[Step 0.685] Verifying FfmpegArguments (encoder×quality matrix, injected detector)...");
+
+        // --- Quality → CRF: the four presets, exact values. ---
+        var crfExpect = new (QualityPreset Quality, int Crf)[]
+        {
+            (QualityPreset.Ultra, 16),
+            (QualityPreset.High, 20),
+            (QualityPreset.Medium, 24),
+            (QualityPreset.Low, 28),
+        };
+        foreach (var (quality, expected) in crfExpect)
+        {
+            int actual = FfmpegArguments.QualityToCrf(quality);
+            if (actual != expected)
+            {
+                throw new Exception($"QualityToCrf({quality}) = {actual}, expected {expected}.");
+            }
+        }
+
+        // --- Video argv: every concrete encoder × every quality. ProRes ignores quality. ---
+        // The expected token is the codec selector; the CRF token is appended for CRF encoders only.
+        var encoders = new (VideoEncoderChoice Encoder, string CodecToken, string? CrfFlag)[]
+        {
+            (VideoEncoderChoice.NvidiaNvenc,    "h264_nvenc",  "-cq"),
+            (VideoEncoderChoice.IntelQuickSync, "h264_qsv",    "-global_quality"),
+            (VideoEncoderChoice.AmdAmf,         "h264_amf",    null),   // AMF uses a quality knob, not CRF
+            (VideoEncoderChoice.ProRes,         "prores_ks",   null),   // profile-fixed, no CRF
+            (VideoEncoderChoice.CpuX264,        "libx264",     "-crf"),
+        };
+
+        int cells = 0;
+        foreach (var (encoder, codecToken, crfFlag) in encoders)
+        {
+            foreach (var (quality, crf) in crfExpect)
+            {
+                string args = FfmpegArguments.VideoCodecArguments(encoder, quality);
+                cells++;
+
+                if (!args.Contains($"-c:v {codecToken}", StringComparison.Ordinal))
+                {
+                    throw new Exception($"[{encoder}/{quality}] argv must select {codecToken}; got \"{args}\".");
+                }
+
+                if (crfFlag != null)
+                {
+                    if (!args.Contains($"{crfFlag} {crf}", StringComparison.Ordinal))
+                    {
+                        throw new Exception($"[{encoder}/{quality}] argv must carry {crfFlag} {crf}; got \"{args}\".");
+                    }
+                }
+                else if (encoder == VideoEncoderChoice.ProRes)
+                {
+                    // ProRes must be quality-independent: the same argv for all four presets.
+                    if (args != FfmpegArguments.VideoCodecArguments(encoder, QualityPreset.Ultra))
+                    {
+                        throw new Exception($"[ProRes/{quality}] ProRes must not vary with quality; got \"{args}\".");
+                    }
+                }
+            }
+        }
+
+        // --- Audio argv: PCM only for MOV+ProRes, AAC everywhere else. ---
+        if (FfmpegArguments.AudioCodecArguments(OutputContainerFormat.MOV, VideoEncoderChoice.ProRes) != "-c:a pcm_s24le ")
+        {
+            throw new Exception("MOV+ProRes must use PCM audio.");
+        }
+        if (!FfmpegArguments.AudioCodecArguments(OutputContainerFormat.MOV, VideoEncoderChoice.CpuX264).Contains("aac", StringComparison.Ordinal))
+        {
+            throw new Exception("MOV+x264 must use AAC audio.");
+        }
+        if (!FfmpegArguments.AudioCodecArguments(OutputContainerFormat.MKV, VideoEncoderChoice.ProRes).Contains("aac", StringComparison.Ordinal))
+        {
+            throw new Exception("MKV+ProRes must NOT use PCM (the PCM rule is MOV-specific).");
+        }
+
+        // --- AutoHardware resolution: the detector is consulted ONLY for AutoHardware. ---
+        int detectorCalls = 0;
+        VideoEncoderChoice Detector() { detectorCalls++; return VideoEncoderChoice.NvidiaNvenc; }
+
+        VideoEncoderChoice resolved = FfmpegArguments.Resolve(VideoEncoderChoice.AutoHardware, Detector);
+        if (resolved != VideoEncoderChoice.NvidiaNvenc)
+        {
+            throw new Exception($"AutoHardware must resolve to the detected encoder; got {resolved}.");
+        }
+        if (detectorCalls != 1)
+        {
+            throw new Exception($"The detector must be called exactly once for AutoHardware; got {detectorCalls}.");
+        }
+
+        VideoEncoderChoice passthrough = FfmpegArguments.Resolve(VideoEncoderChoice.CpuX264, Detector);
+        if (passthrough != VideoEncoderChoice.CpuX264)
+        {
+            throw new Exception($"A concrete encoder must pass through unchanged; got {passthrough}.");
+        }
+        if (detectorCalls != 1)
+        {
+            throw new Exception($"The detector must NOT be consulted for a concrete encoder; calls rose to {detectorCalls}.");
+        }
+
+        // --- Structural: the moved logic really left the host. ---
+        string? hostPath = FindRepoSource(Path.Combine("OmtCaptureStudio", "Services", "Sinks", "FfmpegProcessHost.cs"));
+        if (hostPath != null)
+        {
+            string hostText = File.ReadAllText(hostPath);
+            if (hostText.Contains("GetVideoCodecArguments", StringComparison.Ordinal))
+            {
+                throw new Exception("GetVideoCodecArguments must be gone from FfmpegProcessHost (moved to FfmpegArguments).");
+            }
+            if (hostText.Contains("private static VideoEncoderChoice ResolveEncoder", StringComparison.Ordinal))
+            {
+                throw new Exception("ResolveEncoder must be gone from FfmpegProcessHost (moved to FfmpegArguments.Resolve).");
+            }
+            if (!hostText.Contains("DetectHardwareEncoderFromRegistry", StringComparison.Ordinal))
+            {
+                throw new Exception("The registry probe must remain in the host as the default detector.");
+            }
+        }
+        else
+        {
+            Console.WriteLine(" [SKIP] FfmpegProcessHost.cs not reachable from the test binary — structural check skipped.");
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($" -> Encoder×quality matrix: {cells} argv cells asserted; quality→CRF 16/20/24/28; ProRes quality-independent; PCM only for MOV+ProRes; detector called only for AutoHardware; host no longer owns the table!");
+        Console.ResetColor();
     }
 
     /// <summary>Walks up from the test binary to the repo root and resolves a repo-relative source path.</summary>

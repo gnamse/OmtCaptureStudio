@@ -49,6 +49,10 @@ public class FfmpegProcessHost : IDisposable
     private PipeWriterLoop<VideoFramePacket>? _videoLoop;
     private PipeWriterLoop<AudioDataPacket>? _audioLoop;
 
+    // Hardware detection is injectable (NET-004 AC3): production uses the registry probe; tests pass a
+    // constant so the encoder×quality table can be asserted without a GPU or ffmpeg.
+    private readonly Func<VideoEncoderChoice> _detectHardware;
+
     private readonly BoundedMediaQueue<VideoFramePacket> _videoQueue;
     private readonly BoundedMediaQueue<AudioDataPacket>? _audioQueue;
     private string? _outputPath;
@@ -69,10 +73,12 @@ public class FfmpegProcessHost : IDisposable
 
     public FfmpegProcessHost(
         BoundedMediaQueue<VideoFramePacket> videoQueue,
-        BoundedMediaQueue<AudioDataPacket>? audioQueue)
+        BoundedMediaQueue<AudioDataPacket>? audioQueue,
+        Func<VideoEncoderChoice>? detectHardware = null)
     {
         _videoQueue = videoQueue;
         _audioQueue = audioQueue;
+        _detectHardware = detectHardware ?? DetectHardwareEncoderFromRegistry;
     }
 
     public bool Start(RecordingConfig config, StreamFormat format, string outputPath)
@@ -119,8 +125,11 @@ public class FfmpegProcessHost : IDisposable
 
         double fps = format.FrameRate > 0 ? format.FrameRate : 60.0;
         string fpsStr = fps.ToString("0.###", CultureInfo.InvariantCulture);
-        ResolvedEncoder = ResolveEncoder(config.EncoderChoice);
-        string vCodecArgs = GetVideoCodecArguments(config.EncoderChoice, config.Quality);
+
+        // Resolve AutoHardware first (via the injectable detector), then hand the CONCRETE encoder to the
+        // pure argv table. The table never consults the registry, so it is a testable matrix (NET-004 AC3).
+        ResolvedEncoder = FfmpegArguments.Resolve(config.EncoderChoice, _detectHardware);
+        string vCodecArgs = FfmpegArguments.VideoCodecArguments(ResolvedEncoder, config.Quality);
 
         string aInputArgs = "";
         string aCodecArgs = "-an ";
@@ -128,9 +137,7 @@ public class FfmpegProcessHost : IDisposable
         if (hasAudio)
         {
             aInputArgs = $"-thread_queue_size 512 -f f32le -ar {format.SampleRate} -ac {format.Channels} -i \\\\.\\pipe\\{audioPipeName} ";
-            aCodecArgs = config.ContainerFormat == OutputContainerFormat.MOV && config.EncoderChoice == VideoEncoderChoice.ProRes
-                ? "-c:a pcm_s24le "
-                : "-c:a aac -b:a 320k ";
+            aCodecArgs = FfmpegArguments.AudioCodecArguments(config.ContainerFormat, ResolvedEncoder);
         }
 
         // MP4/MOV are fragmented (-frag_keyframe+empty_moov) instead of a
@@ -497,11 +504,13 @@ public class FfmpegProcessHost : IDisposable
 
     private static VideoEncoderChoice _detectedHardware = VideoEncoderChoice.AutoHardware;
 
-    /// <summary>AutoHardware resolves to the detected hardware encoder, else stays as requested.</summary>
-    private static VideoEncoderChoice ResolveEncoder(VideoEncoderChoice encoder) =>
-        encoder == VideoEncoderChoice.AutoHardware ? DetectHardwareEncoder() : encoder;
-
-    private static VideoEncoderChoice DetectHardwareEncoder()
+    /// <summary>
+    /// Default hardware detector: probes the display-class registry for a known GPU vendor and caches
+    /// the verdict process-wide. Kept here (not in <see cref="FfmpegArguments"/>) because it is the one
+    /// part of the argv decision that touches the machine; <see cref="FfmpegArguments"/> stays pure and
+    /// takes this as an injected delegate so tests can bypass the registry.
+    /// </summary>
+    private static VideoEncoderChoice DetectHardwareEncoderFromRegistry()
     {
         if (_detectedHardware != VideoEncoderChoice.AutoHardware)
         {
@@ -546,30 +555,6 @@ public class FfmpegProcessHost : IDisposable
         }
 
         return _detectedHardware = VideoEncoderChoice.CpuX264;
-    }
-
-    private static string GetVideoCodecArguments(VideoEncoderChoice encoder, QualityPreset quality)
-    {
-        int crf = quality switch
-        {
-            QualityPreset.Ultra => 16,
-            QualityPreset.High => 20,
-            QualityPreset.Medium => 24,
-            QualityPreset.Low => 28,
-            _ => 20
-        };
-
-        encoder = ResolveEncoder(encoder);
-
-        return encoder switch
-        {
-            VideoEncoderChoice.NvidiaNvenc => $"-c:v h264_nvenc -preset p4 -cq {crf} -pix_fmt yuv420p",
-            VideoEncoderChoice.IntelQuickSync => $"-c:v h264_qsv -global_quality {crf} -pix_fmt yuv420p",
-            VideoEncoderChoice.AmdAmf => $"-c:v h264_amf -quality quality -pix_fmt yuv420p",
-            VideoEncoderChoice.ProRes => "-c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le",
-            VideoEncoderChoice.CpuX264 => $"-c:v libx264 -preset ultrafast -tune zerolatency -crf {crf} -pix_fmt yuv420p",
-            _ => $"-c:v libx264 -preset ultrafast -tune zerolatency -crf {crf} -pix_fmt yuv420p"
-        };
     }
 
     public void Dispose()
