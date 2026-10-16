@@ -163,6 +163,7 @@ class Program
         TestHostAudioSourceInterface();
         TestFixedRatioStereoResampler();
         TestConversionPlacement();
+        TestRecordingStorageGuard();
 
         Console.WriteLine("\n[Step 0.75] Verifying MainWindowViewModel (MVVM State, Commands & Seams)...");
         using (var vmSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(new NullRecordingSink())))
@@ -2138,6 +2139,113 @@ class Program
             dir = dir.Parent;
         }
         return null;
+    }
+
+    /// <summary>
+    /// ADR-0005: disk-storage policy is a pure module now, so preflight and low-water decisions are
+    /// tested as functions of drive facts — no real volume, no mocks, no disk I/O.
+    /// </summary>
+    static void TestRecordingStorageGuard()
+    {
+        Console.WriteLine("\n[Step 0.681] Verifying RecordingStorageGuard (preflight, low-water, size estimate)...");
+
+        // --- File-system guard: FAT/FAT32 carry a 4 GB single-file limit; exFAT/NTFS do not. ---
+        if (!RecordingStorageGuard.IsFattishFileSystem("FAT32")) throw new Exception("FAT32 must be flagged.");
+        if (!RecordingStorageGuard.IsFattishFileSystem("fat")) throw new Exception("The file-system check must be case-insensitive.");
+        if (RecordingStorageGuard.IsFattishFileSystem("NTFS")) throw new Exception("NTFS must not be flagged.");
+        if (RecordingStorageGuard.IsFattishFileSystem("exFAT")) throw new Exception("exFAT has no 4 GB limit and must not be flagged.");
+        if (RecordingStorageGuard.IsFattishFileSystem(null) || RecordingStorageGuard.IsFattishFileSystem("  ")) throw new Exception("A blank format must not be flagged.");
+
+        // --- Preflight verdicts, as pure functions of the drive facts. ---
+        var fat = RecordingStorageGuard.Classify("D:\\", "FAT32", 100L * 1024 * 1024 * 1024, 1_000_000_000);
+        if (fat.Outcome != StoragePreflightOutcome.RefusedFatFileSystem || fat.CanRecord || !fat.IsRefusal)
+        {
+            throw new Exception($"FAT32 must be refused outright; got {fat.Outcome}.");
+        }
+        if (fat.Message == null || !fat.Message.Contains("4 GB")) throw new Exception("The FAT32 refusal must explain the 4 GB limit.");
+
+        // Estimated 9 GB at Medium/1080p60 → required floor is 4x = 36 GB, so 8 GB free is refused.
+        var tight = RecordingStorageGuard.Classify("D:\\", "NTFS", 8L * 1024 * 1024 * 1024, 9_000_000_000);
+        if (tight.Outcome != StoragePreflightOutcome.RefusedInsufficientSpace || tight.CanRecord || !tight.IsRefusal)
+        {
+            throw new Exception($"Insufficient space must be refused; got {tight.Outcome}.");
+        }
+        if (tight.RequiredBytes != 36_000_000_000L)
+        {
+            throw new Exception($"Required headroom must be 4x the estimate (36000000000); got {tight.RequiredBytes}.");
+        }
+        if (tight.Message == null || !tight.Message.Contains("60-minute"))
+        {
+            throw new Exception($"The space refusal must state the preflight window; got: {tight.Message}");
+        }
+
+        var ok = RecordingStorageGuard.Classify("D:\\", "NTFS", 100L * 1024 * 1024 * 1024, 9_000_000_000);
+        if (ok.Outcome != StoragePreflightOutcome.Ok || !ok.CanRecord || ok.IsRefusal)
+        {
+            throw new Exception($"A roomy NTFS volume must pass; got {ok.Outcome}.");
+        }
+
+        // The absolute floor dominates a tiny estimate.
+        var floor = RecordingStorageGuard.Classify("D:\\", "NTFS", 3L * 1024 * 1024 * 1024, 1_000);
+        if (floor.RequiredBytes != RecordingStorageGuard.MinimumPreflightFreeBytes)
+        {
+            throw new Exception($"A tiny estimate must fall back to the 2 GB floor; got {floor.RequiredBytes}.");
+        }
+        if (RecordingStorageGuard.RequiredPreflightBytes(1_000_000_000) != 4_000_000_000L)
+        {
+            throw new Exception("An above-floor estimate must require 4x.");
+        }
+
+        // An unreadable volume proceeds rather than faking a verdict.
+        var unknown = RecordingStorageGuard.Undetermined();
+        if (!unknown.CanRecord || unknown.IsRefusal) throw new Exception("An undetermined volume must proceed.");
+
+        // --- Low-water verdict. ---
+        if (!RecordingStorageGuard.IsLowOnSpace("NTFS", 500L * 1024 * 1024)) throw new Exception("500 MB free on NTFS is below the 1 GB low-water mark.");
+        if (RecordingStorageGuard.IsLowOnSpace("NTFS", 5L * 1024 * 1024 * 1024)) throw new Exception("5 GB free on NTFS is above the low-water mark.");
+        if (RecordingStorageGuard.IsLowOnSpace("FAT32", 10L * 1024 * 1024)) throw new Exception("FAT32 must be exempt from the low-water mark (preflight refuses it).");
+        if (RecordingStorageGuard.LowWaterMarkBytes != 1024L * 1024 * 1024) throw new Exception("The documented 1 GB low-water mark changed.");
+
+        // --- Session-size estimate: locked to the documented baseline. ---
+        var medium = new RecordingConfig { Quality = QualityPreset.Medium, EncoderChoice = VideoEncoderChoice.CpuX264 };
+        var high = new RecordingConfig { Quality = QualityPreset.High, EncoderChoice = VideoEncoderChoice.CpuX264 };
+        var prores = new RecordingConfig { Quality = QualityPreset.Medium, EncoderChoice = VideoEncoderChoice.ProRes };
+        var hd60 = new StreamFormat { Width = 1920, Height = 1080, FrameRate = 60.0 };
+
+        long mediumHd60 = RecordingStorageGuard.EstimateSessionSize(medium, hd60);
+        if (mediumHd60 != 9_000_000_000L)
+        {
+            throw new Exception($"Medium 1080p60 must estimate 9 GB (20 Mbps x 1 h); got {mediumHd60}.");
+        }
+        if (RecordingStorageGuard.EstimateSessionSize(high, hd60) != 13_500_000_000L)
+        {
+            throw new Exception("High quality must scale the estimate by 1.5x.");
+        }
+        if (RecordingStorageGuard.EstimateSessionSize(prores, hd60) != 54_000_000_000L)
+        {
+            throw new Exception("ProRes must scale the estimate by 6x.");
+        }
+        if (RecordingStorageGuard.EstimateSessionSize(medium, hd60 with { Width = 3840, Height = 2160 }) != 36_000_000_000L)
+        {
+            throw new Exception("4x the pixels must estimate 4x the bytes.");
+        }
+        if (RecordingStorageGuard.EstimateSessionSize(medium, hd60 with { FrameRate = 30.0 }) != 4_500_000_000L)
+        {
+            throw new Exception("Half the frame rate must halve the estimate.");
+        }
+        // A zero/absent frame rate falls back to 60 rather than dividing by zero.
+        if (RecordingStorageGuard.EstimateSessionSize(medium, hd60 with { FrameRate = 0.0 }) != 9_000_000_000L)
+        {
+            throw new Exception("A zero frame rate must fall back to the 60 fps baseline.");
+        }
+
+        // --- Byte formatting used in operator-facing messages. ---
+        if (RecordingStorageGuard.FormatBytes(3L * 1024 * 1024 * 1024) != "3.0 GB") throw new Exception("GB formatting changed.");
+        if (RecordingStorageGuard.FormatBytes(500L * 1024 * 1024) != "500 MB") throw new Exception("MB formatting changed.");
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> Storage guard verified (FAT32, headroom, low-water, estimate scaling, formatting)!");
+        Console.ResetColor();
     }
 
     private static void WaitForFormat(CaptureSession session, string what)
