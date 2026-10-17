@@ -76,6 +76,8 @@ Open `OmtCaptureStudio.sln` in Visual Studio 2022, JetBrains Rider, or VS Code, 
 dotnet build OmtCaptureStudio.sln -c Release
 ```
 
+> **Installer builds need FFmpeg first:** `installer/OmtCaptureStudio.iss` bundles `tools\ffmpeg.exe`, which is gitignored and therefore absent from a fresh clone — place `ffmpeg.exe` in `tools\` before compiling, or a missing one fails the compile (and `scripts/build-release.ps1` throws before iscc is ever invoked).
+
 ### 2. Launching the App
 Double-click `Launch-OmtCaptureStudio.bat` or run:
 ```powershell

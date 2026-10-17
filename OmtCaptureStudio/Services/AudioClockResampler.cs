@@ -59,6 +59,7 @@ public sealed class AudioClockResampler
     private long _videoFrames;
     private long _audioInFrames;
     private double _ratio = 1.0;
+    private volatile bool _ratioClamped;
 
     // Streaming resampler state. `_fifo` holds interleaved input frames — the
     // HalfWidth-1 frames of FIR history plus the not-yet-consumed tail, oldest first.
@@ -79,6 +80,13 @@ public sealed class AudioClockResampler
     /// <summary>Current resample ratio (output frames per input frame).</summary>
     public double Ratio => _ratio;
 
+    /// <summary>
+    /// True when the ratio is pinned against the [0.9, 1.1] safety clamp — i.e. the measured A/V
+    /// clock drift has run past what the resampler is willing to correct, which is worth surfacing
+    /// (FEAT-07). Read cross-thread, hence volatile.
+    /// </summary>
+    public bool IsRatioClamped => _ratioClamped;
+
     public long VideoFramesSeen => Interlocked.Read(ref _videoFrames);
 
     /// <summary>
@@ -95,6 +103,7 @@ public sealed class AudioClockResampler
             Interlocked.Exchange(ref _videoFrames, 0);
             _audioInFrames = 0;
             _ratio = 1.0;
+            _ratioClamped = false;
             _outAcc = 0.0;
 
             // Prime the FIFO with HalfWidth frames of silence so the FIR has its left-edge
@@ -146,8 +155,20 @@ public sealed class AudioClockResampler
             {
                 double measured = (videoFrames * SamplesPerFrame) / _audioInFrames;
                 _ratio += (measured - _ratio) * RatioSmoothing;
-                if (_ratio < MinRatio) _ratio = MinRatio;
-                else if (_ratio > MaxRatio) _ratio = MaxRatio;
+                if (_ratio < MinRatio)
+                {
+                    _ratio = MinRatio;
+                    _ratioClamped = true;
+                }
+                else if (_ratio > MaxRatio)
+                {
+                    _ratio = MaxRatio;
+                    _ratioClamped = true;
+                }
+                else
+                {
+                    _ratioClamped = false;
+                }
             }
 
             // 2. Append the incoming chunk to the FIFO.

@@ -41,6 +41,11 @@
                         <ColumnDefinition Width="Auto"/> <!-- 4: Connect / Disconnect Button -->
                         <ColumnDefinition Width="Auto"/> <!-- 5: Divider -->
                         <ColumnDefinition Width="Auto"/> <!-- 6: Test Signal Button -->
+                        <!-- NET-013 P1-01: elastic so the summary SHRINKS (and trims) before it can ever
+                             push the Broadcast toggle out of the window; MaxWidth keeps it at 240 at wide
+                             sizes so the surplus still falls at the right edge (DESIGN 5.1). -->
+                        <ColumnDefinition Width="*" MaxWidth="240"/> <!-- 7: Compact live-setting summary -->
+                        <ColumnDefinition Width="Auto"/> <!-- 8: Broadcast Toggle (revelation entry point) -->
                     </Grid.ColumnDefinitions>
 
                     <!-- 0: App Branding -->
@@ -91,7 +96,7 @@
                     <Rectangle Grid.Column="5" Width="1" Height="22" Fill="{DynamicResource StudioBorderSubtle}" Margin="0,0,10,0" VerticalAlignment="Center"/>
 
                     <!-- 6: Test Signal -->
-                    <ToggleButton x:Name="BtnTestSignal" Grid.Column="6" Content="Test Signal" Padding="10,5" MinHeight="30" VerticalAlignment="Center"
+                    <ToggleButton x:Name="BtnTestSignal" Grid.Column="6" Content="Test Signal" Padding="10,5" MinHeight="30" Margin="0,0,10,0" VerticalAlignment="Center"
                                   IsChecked="{CompiledBinding IsTestSignalActive, Mode=OneWay}"
                                   Background="{CompiledBinding TestSignalBackground}"
                                   Foreground="{CompiledBinding TestSignalForeground}"
@@ -99,10 +104,36 @@
                                   AutomationProperties.Name="{CompiledBinding TestSignalAutomationName}"
                                   ToolTip.Tip="Toggle internal SMPTE color bars test generator"
                                   Command="{CompiledBinding ToggleTestSignalCommand}"/>
+
+                    <!-- 7: Compact broadcast summary (NET-012). Shown ONLY while the broadcast row is
+                         collapsed, so collapsing never hides which target and audio are selected. -->
+                    <TextBlock x:Name="TxtLiveSettingSummary" Grid.Column="7"
+                               Text="{CompiledBinding LiveSettingSummary}"
+                               IsVisible="{CompiledBinding IsLiveSettingSummaryVisible}"
+                               Foreground="{DynamicResource StudioTextSecondary}" FontSize="11"
+                               VerticalAlignment="Center" Margin="0,0,10,0"
+                               MaxWidth="240" TextTrimming="CharacterEllipsis"
+                               AutomationProperties.Name="Selected broadcast target and audio"
+                               AutomationProperties.LiveSetting="Polite"
+                               ToolTip.Tip="The screen/window and audio device selected for broadcast. Pickers appear when Broadcast is on."/>
+
+                    <!-- 8: Broadcast Toggle - the ENTRY POINT that reveals the broadcast row, so it must
+                         stay visible while the row is collapsed (NET-012). -->
+                    <ToggleButton x:Name="BtnDesktopCapture" Grid.Column="8" Content="Broadcast" Padding="10,5" MinHeight="30" VerticalAlignment="Center"
+                                  IsChecked="{CompiledBinding IsDesktopCaptureActive, Mode=OneWay}"
+                                  Background="{CompiledBinding DesktopCaptureBackground}"
+                                  Foreground="{CompiledBinding DesktopCaptureForeground}"
+                                  BorderBrush="{DynamicResource StudioAccentPrimary}" BorderThickness="1"
+                                  AutomationProperties.Name="{CompiledBinding DesktopCaptureAutomationName}"
+                                  ToolTip.Tip="Broadcast the selected screen or window and audio device over the selected OMT network"
+                                  Command="{CompiledBinding ToggleDesktopCaptureCommand}"/>
                 </Grid>
 
-                <!-- Row 1: Host Broadcast Studio Bar (Screen/Window Target, Audio Device, Network Interface) -->
-                <Border Grid.Row="1" BorderBrush="{DynamicResource StudioBorderSubtle}" BorderThickness="0,1,0,0" Margin="0,7,0,0" Padding="0,7,0,0">
+                <!-- Row 1: Host Broadcast Studio Bar (Screen/Window Target, Audio Device, Network
+                     Interface). NET-012: revealed BY THE BROADCAST STATE only - never by recording state,
+                     so collapsing it can never disturb a running take. -->
+                <Border Grid.Row="1" BorderBrush="{DynamicResource StudioBorderSubtle}" BorderThickness="0,1,0,0" Margin="0,7,0,0" Padding="0,7,0,0"
+                        IsVisible="{CompiledBinding IsBroadcastRowVisible}">
                     <Grid VerticalAlignment="Center">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/> <!-- 0: Broadcast Badge -->
@@ -113,7 +144,11 @@
                             <ColumnDefinition Width="Auto"/> <!-- 5: Network Label -->
                             <ColumnDefinition Width="1*" MinWidth="130" MaxWidth="280"/> <!-- 6: Network Adapter ComboBox -->
                             <ColumnDefinition Width="Auto"/> <!-- 7: Refresh Targets/Devices/Networks Button -->
-                            <ColumnDefinition Width="Auto"/> <!-- 8: Broadcast Toggle Button -->
+                            <!-- NET-014: the freed toggle column is now the selection hint. ELASTIC with
+                                 MinWidth 0 so it shrinks and trims before it can push the row's action
+                                 button out of the window (the P1-01 lesson). MaxWidth caps it at wide sizes. -->
+                            <ColumnDefinition Width="*" MinWidth="0" MaxWidth="260"/> <!-- 8: select hint -->
+                            <ColumnDefinition Width="Auto"/> <!-- 9: Start/Stop Broadcasting -->
                         </Grid.ColumnDefinitions>
 
                         <Border Grid.Column="0" Background="{DynamicResource StudioSurfaceElevated}" BorderBrush="{DynamicResource StudioBorderSubtle}" BorderThickness="1" CornerRadius="{DynamicResource RadiusSm}" Padding="6,3" Margin="0,0,10,0" VerticalAlignment="Center">
@@ -201,15 +236,28 @@
                             <Path Data="{DynamicResource IconRefresh}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center"/>
                         </Button>
 
-                        <!-- Broadcast Toggle -->
-                        <ToggleButton x:Name="BtnDesktopCapture" Grid.Column="8" Content="Broadcast" Padding="10,5" MinHeight="30" VerticalAlignment="Center"
-                                      IsChecked="{CompiledBinding IsDesktopCaptureActive, Mode=OneWay}"
-                                      Background="{CompiledBinding DesktopCaptureBackground}"
-                                      Foreground="{CompiledBinding DesktopCaptureForeground}"
-                                      BorderBrush="{DynamicResource StudioAccentPrimary}" BorderThickness="1"
-                                      AutomationProperties.Name="{CompiledBinding DesktopCaptureAutomationName}"
-                                      ToolTip.Tip="Broadcast the selected screen or window and audio device over the selected OMT network"
-                                      Command="{CompiledBinding ToggleDesktopCaptureCommand}"/>
+                        <!-- NET-014: shown only in the SELECTING state, so the operator knows the row is
+                             waiting on them and nothing is live yet. Polite - it is guidance, not an alarm. -->
+                        <TextBlock x:Name="TxtBroadcastSelectHint" Grid.Column="8"
+                                   Text="Choose target, audio and network, then Start Broadcasting"
+                                   IsVisible="{CompiledBinding IsBroadcastSelecting}"
+                                   Foreground="{DynamicResource StudioTextSecondary}" FontSize="11"
+                                   VerticalAlignment="Center" Margin="0,0,10,0"
+                                   TextTrimming="CharacterEllipsis"
+                                   AutomationProperties.Name="Broadcast selection hint"
+                                   AutomationProperties.LiveSetting="Polite"
+                                   ToolTip.Tip="Pick what to broadcast, then press Start Broadcasting to go live"/>
+
+                        <!-- NET-014: the in-row action. Reveal shows it as Start Broadcasting; once live it
+                             reads Stop Broadcasting. MinHeight 30 like every other toolbar control. -->
+                        <Button x:Name="BtnStartStopBroadcast" Grid.Column="9" MinHeight="30"
+                                Content="{CompiledBinding BroadcastActionText}"
+                                Background="{CompiledBinding BroadcastActionBackground}"
+                                Foreground="{CompiledBinding BroadcastActionForeground}"
+                                Padding="12,5" VerticalAlignment="Center" FontWeight="Bold"
+                                AutomationProperties.Name="{CompiledBinding BroadcastActionAutomationName}"
+                                ToolTip.Tip="Start broadcasting the selected target and audio, or stop a live broadcast"
+                                Command="{CompiledBinding StartStopBroadcastCommand}"/>
                     </Grid>
                 </Border>
             </Grid>
@@ -240,6 +288,44 @@
                         </StackPanel>
                     </Border>
 
+                    <!-- Input-loss alarm banner (ADR-0002). Visibility and text are projections of the
+                         BroadcastState outage states (Reconnecting / InputLost), not set ad hoc. -->
+                    <Border x:Name="InputLossBanner" VerticalAlignment="Top" HorizontalAlignment="Stretch" Margin="8,44,8,0"
+                            Background="{DynamicResource StudioAccentDanger}" CornerRadius="{DynamicResource RadiusSm}" Padding="10,6"
+                            IsVisible="{CompiledBinding IsInputLossBannerVisible}">
+                        <TextBlock Text="{CompiledBinding InputLossBannerText}" Foreground="{DynamicResource StudioTextOnAccent}"
+                                   FontSize="12" FontWeight="Bold" TextWrapping="Wrap" TextAlignment="Center"
+                                   AutomationProperties.LiveSetting="Assertive"/>
+                    </Border>
+
+                    <!-- Diagnostics drawer (FEAT-07): the capped FFmpeg stderr tail plus the stop verdict. -->
+                    <Border x:Name="DiagnosticsDrawer" VerticalAlignment="Bottom" HorizontalAlignment="Stretch" Margin="8"
+                            Background="{DynamicResource StudioHudScrim}" BorderBrush="{DynamicResource StudioBorderSubtle}" BorderThickness="1"
+                            CornerRadius="{DynamicResource RadiusSm}" Padding="10,8" MaxHeight="240"
+                            IsVisible="{CompiledBinding IsDiagnosticsDrawerOpen}"
+                            AutomationProperties.Name="FFmpeg diagnostics drawer">
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,6">
+                                <TextBlock Text="FFMPEG DIAGNOSTICS" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource StudioTextMuted}" VerticalAlignment="Center"/>
+                                <TextBlock Text="{CompiledBinding RecordingHealthEncoderText}" FontSize="10" Foreground="{DynamicResource StudioTextSecondary}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                <Button x:Name="BtnCloseDiagnostics" Content="Close" FontSize="10" MinHeight="22" Padding="8,0" Margin="10,0,0,0" VerticalAlignment="Center"
+                                        AutomationProperties.Name="Close FFmpeg diagnostics drawer"
+                                        ToolTip.Tip="Hide the diagnostics drawer"
+                                        Command="{CompiledBinding ToggleDiagnosticsDrawerCommand}"/>
+                            </StackPanel>
+
+                            <!-- Stop-summary verdict: media-duration parity, recording drops, finalize time. -->
+                            <TextBlock DockPanel.Dock="Top" Text="{CompiledBinding StopSummaryText}" IsVisible="{CompiledBinding IsStopSummaryVisible}"
+                                       Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,6"
+                                       AutomationProperties.LiveSetting="Assertive"/>
+
+                            <ScrollViewer MaxHeight="160" HorizontalScrollBarVisibility="Disabled">
+                                <TextBlock x:Name="TxtDiagnosticTail" Text="{CompiledBinding DiagnosticTailText}" FontFamily="Consolas, monospace" FontSize="10"
+                                           Foreground="{DynamicResource StudioTextSecondary}" TextWrapping="Wrap"/>
+                            </ScrollViewer>
+                        </DockPanel>
+                    </Border>
+
                     <!-- Video Viewport HUD Overlay (Top-Left) -->
                     <Border Background="{DynamicResource StudioHudScrim}" CornerRadius="{DynamicResource RadiusSm}" Padding="8,4" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8">
                         <StackPanel Orientation="Horizontal">
@@ -265,16 +351,40 @@
         <Border Grid.Row="2" Background="{DynamicResource StudioSurface}" BorderBrush="{DynamicResource StudioBorder}" BorderThickness="0,1,0,0" Padding="{DynamicResource BarPadding}" MinHeight="72"
                 IsEnabled="{CompiledBinding IsMainContentEnabled}">
             <Grid VerticalAlignment="Center">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/> <!-- 0: Container, Encoder, Quality -->
                     <ColumnDefinition Width="*" MinWidth="180" MaxWidth="460"/> <!-- 1: Save Folder -->
                     <ColumnDefinition Width="Auto"/> <!-- 2: Divider -->
                     <ColumnDefinition Width="Auto"/> <!-- 3: Recording Duration & Stats -->
                     <ColumnDefinition Width="Auto"/> <!-- 4: Record Button -->
+                    <ColumnDefinition Width="Auto"/> <!-- 5: Advanced disclosure (NET-012) -->
                 </Grid.ColumnDefinitions>
 
-                <!-- 0: Recording Configuration -->
-                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,20,0"
+                <!-- NET-012 (distill): the PRESET picker is part of the DEFAULT path
+                     (preset -> folder -> record), so it stays in the defaults strip. Every other
+                     recording setting moves behind Advanced below. -->
+                <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,16,0" VerticalAlignment="Center"
+                            IsEnabled="{CompiledBinding IsRecordingConfigEnabled}">
+                    <TextBlock Text="PRESET" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                    <ComboBox x:Name="CmbRecordingPreset" Width="185"
+                              ItemsSource="{CompiledBinding RecordingPresetNames}"
+                              SelectedItem="{CompiledBinding SelectedRecordingPreset, Mode=TwoWay}"
+                              AutomationProperties.Name="Recording Preset"
+                              ToolTip.Tip="Apply a named container/encoder/quality/rollover preset. Editing any control switches the picker to Custom."/>
+                </StackPanel>
+
+                <!-- NET-008/NET-012: scheduled / segmented capture, now the ADVANCED tier. Still inside
+                     the IsRecordingConfigEnabled lock, so a mid-flight change can never restart a running
+                     take (the live-changing-selector locking rule) - collapsing is visibility only. -->
+                <!-- NET-013 P2-01: ALL SEVEN advanced pickers live in this ONE StackPanel at row 1,
+                     ColumnSpan 6, so expanding Advanced can never widen the column shared with the
+                     PRESET picker and starve Save Folder. -->
+                <StackPanel Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="6" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,8,0,0"
+                            IsVisible="{CompiledBinding IsAdvancedRecordingOptionsExpanded}"
                             IsEnabled="{CompiledBinding IsRecordingConfigEnabled}">
                     <!-- Container -->
                     <StackPanel Margin="0,0,16,0">
@@ -305,11 +415,48 @@
                                   AutomationProperties.Name="Recording Quality Preset"
                                   ToolTip.Tip="Select recording quality and bitrate preset (High, Ultra, Master ProRes, Medium)"/>
                     </StackPanel>
+                    <StackPanel Margin="0,0,16,0">
+                        <TextBlock Text="ROLL OVER" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbRolloverMinutes" Width="90"
+                                  ItemsSource="{CompiledBinding RolloverMinuteOptions}"
+                                  SelectedItem="{CompiledBinding SelectedRolloverMinutes, Mode=TwoWay}"
+                                  AutomationProperties.Name="Segment Rollover Interval"
+                                  ToolTip.Tip="Finalize the current segment and continue in the next _partNN file after this long. Off never rolls by time."/>
+                    </StackPanel>
+
+                    <StackPanel Margin="0,0,16,0">
+                        <TextBlock Text="OR SIZE" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbRolloverGigabytes" Width="85"
+                                  ItemsSource="{CompiledBinding RolloverGigabyteOptions}"
+                                  SelectedItem="{CompiledBinding SelectedRolloverGigabytes, Mode=TwoWay}"
+                                  AutomationProperties.Name="Segment Rollover Size"
+                                  ToolTip.Tip="Finalize the current segment after this much data. Off never rolls by size."/>
+                    </StackPanel>
+
+                    <StackPanel Margin="0,0,16,0">
+                        <TextBlock Text="MAX LENGTH" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbMaxDuration" Width="90"
+                                  ItemsSource="{CompiledBinding MaxDurationOptions}"
+                                  SelectedItem="{CompiledBinding SelectedMaxDuration, Mode=TwoWay}"
+                                  AutomationProperties.Name="Maximum Recording Duration"
+                                  ToolTip.Tip="Stop the take automatically after this long, counted across all segments. Off is unlimited."/>
+                    </StackPanel>
+
+                    <StackPanel>
+                        <TextBlock Text="START IN" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbScheduleDelay" Width="90"
+                                  ItemsSource="{CompiledBinding ScheduleDelayOptions}"
+                                  SelectedItem="{CompiledBinding SelectedScheduleDelay, Mode=TwoWay}"
+                                  AutomationProperties.Name="Scheduled Start Delay"
+                                  ToolTip.Tip="Delay the start of the next take by this long. Off starts immediately."/>
+                    </StackPanel>
                 </StackPanel>
 
                 <!-- 1: Output Folder Selection -->
                 <Grid Grid.Column="1" VerticalAlignment="Center">
                     <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
@@ -337,6 +484,30 @@
                                 ToolTip.Tip="Open current destination directory in File Explorer"
                                 Command="{CompiledBinding OpenOutputDirectoryCommand}"/>
                     </Grid>
+
+                    <!-- NET-011: optional second destination. When set, the take is written to both
+                         folders; a primary that fills or fails is shed and the take continues here
+                         instead of stopping. -->
+                    <TextBlock Grid.Row="2" Text="BACKUP FOLDER (OPTIONAL)" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,6,0,4"
+                               IsVisible="{CompiledBinding IsAdvancedRecordingOptionsExpanded}"/>
+                    <Grid Grid.Row="3" IsVisible="{CompiledBinding IsAdvancedRecordingOptionsExpanded}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="TxtBackupDir" Grid.Column="0" MinHeight="30" MaxWidth="420" VerticalContentAlignment="Center"
+                                 Text="{CompiledBinding BackupOutputDirectory, Mode=TwoWay}"
+                                 IsEnabled="{CompiledBinding IsRecordingConfigEnabled}"
+                                 AutomationProperties.Name="Backup Destination Folder Path"
+                                 ToolTip.Tip="Second destination for the take. Leave empty for a single-destination recording."/>
+                        <Button x:Name="BtnBrowseBackupDir" Grid.Column="1" MinHeight="30" Width="34" Margin="4,0,0,0"
+                                IsEnabled="{CompiledBinding IsRecordingConfigEnabled}"
+                                AutomationProperties.Name="Browse Backup Destination Folder"
+                                ToolTip.Tip="Browse for a backup destination folder"
+                                Command="{CompiledBinding BrowseBackupDirectoryCommand}">
+                            <Path Data="{DynamicResource IconFolder}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="15" Height="15" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Button>
+                    </Grid>
                 </Grid>
 
                 <!-- 2: Divider -->
@@ -345,6 +516,8 @@
                 <!-- 3: Recording Timer & Stats Readout -->
                 <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="0,0,12,0" HorizontalAlignment="Right">
                     <TextBlock x:Name="TxtRecordDuration" Text="{CompiledBinding RecordDurationText}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="16" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Right"/>
+                    <TextBlock x:Name="TxtSegmentContinuation" Text="{CompiledBinding SegmentContinuationText}" IsVisible="{CompiledBinding IsSegmentContinuationVisible}" Foreground="{CompiledBinding SegmentContinuationForeground}" FontSize="10" FontWeight="SemiBold" HorizontalAlignment="Right" Margin="0,2,0,0" AutomationProperties.Name="Segment Continuation Notice" ToolTip.Tip="Shown when a scheduled rollover finalized a segment; the take continues in the next file"/>
+                    <TextBlock x:Name="TxtRecordingUnavailable" Text="{CompiledBinding RecordingUnavailableText}" IsVisible="{CompiledBinding IsRecordingUnavailable}" Foreground="{CompiledBinding RecordingUnavailableForeground}" FontSize="10" FontWeight="SemiBold" HorizontalAlignment="Right" Margin="0,2,0,0" AutomationProperties.Name="Recording Unavailable Warning" ToolTip.Tip="FFmpeg is the recording feature's only external dependency. Preview, discovery and broadcast keep working without it."/>
                     <TextBlock x:Name="TxtRecordStats" Text="{CompiledBinding RecordStatsText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" HorizontalAlignment="Right" Margin="0,2,0,0"
                                MaxWidth="130" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Assertive"/>
                 </StackPanel>
@@ -361,6 +534,27 @@
                         HotKey="Ctrl+R"
                         ToolTip.Tip="Start or stop recording stream to disk (Ctrl+R)"
                         Command="{CompiledBinding ToggleRecordCommand}"/>
+
+                <!-- 5: Advanced disclosure (NET-012). Drawn chevron StreamGeometry per DESIGN 6 - no
+                     glyphs, no emoji. Named + tooltipped, keyboard reachable, MinHeight 30 like every
+                     other toolbar control. -->
+                <ToggleButton x:Name="BtnAdvancedRecording" Grid.Row="0" Grid.Column="5" MinHeight="30"
+                              Padding="10,5" Margin="8,0,0,0" VerticalAlignment="Center"
+                              IsChecked="{CompiledBinding IsAdvancedRecordingOptionsExpanded, Mode=TwoWay}"
+                              AutomationProperties.Name="{CompiledBinding AdvancedOptionsAutomationName}"
+                              ToolTip.Tip="Show or hide container, encoder, quality, backup folder, rollover and schedule settings">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock Text="Advanced" VerticalAlignment="Center"/>
+                        <Path x:Name="AdvancedChevron" Data="{DynamicResource IconChevronDown}"
+                              Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8"
+                              Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center"
+                              IsVisible="{CompiledBinding IsAdvancedChevronDown}"/>
+                        <Path x:Name="AdvancedChevronUp" Data="{DynamicResource IconChevronUp}"
+                              Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8"
+                              Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center"
+                              IsVisible="{CompiledBinding IsAdvancedRecordingOptionsExpanded}"/>
+                    </StackPanel>
+                </ToggleButton>
             </Grid>
         </Border>
 
@@ -383,6 +577,31 @@
                     <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" VerticalAlignment="Center"/>
                     <TextBlock x:Name="TxtDroppedFrames" Text="{CompiledBinding DroppedFramesText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0,0,0" AutomationProperties.LiveSetting="Polite"/>
                     <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" VerticalAlignment="Center" Margin="12,0,0,0"/>
+
+                    <!-- Recording Health (FEAT-07). RECORDING-path drops and A/V drift — distinct from the
+                         receiver-side "Dropped" counter above. Readouts are projections of
+                         CaptureSession.GetRecordingHealthSnapshot(); warning colours come from the VM. -->
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" IsVisible="{CompiledBinding IsRecordingHealthVisible}">
+                        <TextBlock Text="REC" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource StudioTextMuted}" VerticalAlignment="Center" Margin="12,0,5,0"
+                                   ToolTip.Tip="Recording-path health (encoder, achieved bitrate, recording drops, A/V drift)"/>
+                        <TextBlock x:Name="TxtHealthFfmpeg" Text="{CompiledBinding RecordingHealthFfmpegText}" FontSize="10" Foreground="{DynamicResource StudioTextSecondary}" VerticalAlignment="Center" MaxWidth="110" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" AutomationProperties.Name="FFmpeg Version" ToolTip.Tip="ffmpeg build resolved at startup - the encoder provenance a bug report needs"/>
+                        <TextBlock x:Name="TxtHealthEncoder" Text="{CompiledBinding RecordingHealthEncoderText}" FontSize="10" Foreground="{DynamicResource StudioTextSecondary}" VerticalAlignment="Center" MaxWidth="110" TextTrimming="CharacterEllipsis"
+                                   ToolTip.Tip="Encoder actually used for this take (AutoHardware resolved)"/>
+                        <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" Margin="6,0" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="TxtHealthBitrate" Text="{CompiledBinding RecordingHealthBitrateText}" FontSize="10" Foreground="{DynamicResource StudioTextSecondary}" VerticalAlignment="Center"
+                                   ToolTip.Tip="Achieved output bitrate (file size / media duration)"/>
+                        <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" Margin="6,0" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="TxtHealthDrops" Text="{CompiledBinding RecordingHealthDropsText}" FontSize="10" FontWeight="SemiBold" Foreground="{CompiledBinding RecordingDropsForeground}" VerticalAlignment="Center"
+                                   ToolTip.Tip="Recording-path frames/chunks dropped (warning above threshold)"/>
+                        <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" Margin="6,0" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="TxtHealthDrift" Text="{CompiledBinding RecordingHealthDriftText}" FontSize="10" FontWeight="SemiBold" Foreground="{CompiledBinding RecordingDriftForeground}" VerticalAlignment="Center"
+                                   ToolTip.Tip="Live A/V resample ratio; warns when pinned at the 0.9/1.1 clamp"/>
+                        <Button x:Name="BtnDiagnostics" Content="Diagnostics" FontSize="10" MinHeight="22" Padding="6,0" Margin="8,0,0,0" VerticalAlignment="Center"
+                                AutomationProperties.Name="Toggle FFmpeg diagnostics drawer"
+                                ToolTip.Tip="Show the FFmpeg diagnostic output and the last stop verdict"
+                                Command="{CompiledBinding ToggleDiagnosticsDrawerCommand}"/>
+                    </StackPanel>
+
                     <TextBlock x:Name="TxtVersion" Text="{CompiledBinding VersionText}" Foreground="{DynamicResource StudioTextMuted}" FontSize="11" Margin="12,0,0,0"/>
                 </StackPanel>
             </Grid>
@@ -396,7 +615,7 @@
             <Border Background="{DynamicResource StudioSurface}" BorderThickness="0"
                     CornerRadius="{DynamicResource RadiusLg}" Padding="24"
                     MaxWidth="480" HorizontalAlignment="Center" VerticalAlignment="Center"
-                    BoxShadow="0 12 32 0 #80000000">
+                    BoxShadow="{DynamicResource StudioShadowModal}">
                 <StackPanel Spacing="16">
                     <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
                         <Border Background="{DynamicResource StudioAccentDanger}" Width="36" Height="36" CornerRadius="18"

@@ -36,7 +36,13 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private readonly OmtDiscoveryService _discoveryService;
     private readonly DispatcherTimer? _recordUiTimer;
     private readonly DispatcherTimer? _captureTargetsTimer;
+    private readonly DispatcherTimer? _inputHealthTimer;
     private readonly bool _ownsDependencies;
+
+    // The broadcast-mode state machine (ADR-0001). Headless-constructible; presentation below is a
+    // projection of this state, never an input to it.
+    private readonly BroadcastSessionState _broadcastState = new();
+    private readonly IBroadcastSessionEffects _broadcastEffects;
 
     private OmtDesktopCaptureGenerator? _desktopCapture;
 
@@ -242,6 +248,187 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string _videoSpecsText = "-- x -- @ -- fps";
 
+    // Input-loss alarm banner (ADR-0002) — a projection of the Reconnecting / InputLost states.
+    [ObservableProperty]
+    private bool _isInputLossBannerVisible;
+
+    [ObservableProperty]
+    private string _inputLossBannerText = "";
+
+    // Recording Health panel (FEAT-07) — a projection of CaptureSession.GetRecordingHealthSnapshot().
+    // Aggregation lives in the engine/model; this is presentation only.
+    [ObservableProperty]
+    private bool _isRecordingHealthVisible;
+
+    [ObservableProperty]
+    private string _recordingHealthEncoderText = "—";
+
+    [ObservableProperty]
+    private string _recordingHealthBitrateText = "—";
+
+    [ObservableProperty]
+    private string _recordingHealthDropsText = "—";
+
+    [ObservableProperty]
+    private string _recordingHealthDriftText = "—";
+
+    [ObservableProperty]
+    private bool _isRecordingDropWarning;
+
+    [ObservableProperty]
+    private bool _isRecordingDriftWarning;
+
+    [ObservableProperty]
+    private IBrush _recordingDropsForeground = StudioPalette.ButtonLightForeground;
+
+    [ObservableProperty]
+    private IBrush _recordingDriftForeground = StudioPalette.ButtonLightForeground;
+
+    // Stop-summary verdict (FEAT-07) and the diagnostics drawer.
+    [ObservableProperty]
+    private string _stopSummaryText = "";
+
+    /// <summary>True when a stop verdict is available (drives the drawer's verdict row).</summary>
+    [ObservableProperty]
+    private bool _isStopSummaryVisible;
+
+    /// <summary>
+    /// NET-008: the quiet "Segment N complete - continuing" notice shown at a ROLLOVER boundary.
+    /// Deliberately separate from <c>StopSummaryText</c>: an unattended take rolling every 15 minutes
+    /// must not flash an alarming stop verdict each time - the take did not stop.
+    /// </summary>
+    [ObservableProperty]
+    private string _segmentContinuationText = string.Empty;
+
+    [ObservableProperty]
+    private bool _isSegmentContinuationVisible;
+
+    /// <summary>
+    /// The continuation notice uses the healthy token, deliberately distinct from the stop verdict's
+    /// text colour: a rollover is a normal scheduled event, not a failure (NET-008).
+    /// </summary>
+    public IBrush SegmentContinuationForeground { get; } = StudioPalette.MeterNormal;
+
+    // ------------------------------------------------------------------------------------------
+    // NET-010: FFmpeg preflight. FFmpeg is the recording feature's only external dependency; when it
+    // is missing or unrunnable, recording is unavailable but preview/discovery/broadcast keep working,
+    // so this is a persistent status warning rather than a modal.
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>True when the startup preflight found no runnable ffmpeg - recording is unavailable.</summary>
+    [ObservableProperty]
+    private bool _isRecordingUnavailable;
+
+    /// <summary>The persistent warning text, including the locations that were checked.</summary>
+    [ObservableProperty]
+    private string _recordingUnavailableText = string.Empty;
+
+    [ObservableProperty]
+    private string _recordingHealthFfmpegText = "—";
+
+    /// <summary>The resolved ffmpeg version (NET-010), stamped into every projected health snapshot.</summary>
+    public string FfmpegVersion { get; private set; } = string.Empty;
+
+    /// <summary>The warning token, matching the recording path's failure colour.</summary>
+    public IBrush RecordingUnavailableForeground { get; } = StudioPalette.MeterDanger;
+
+    // ------------------------------------------------------------------------------------------
+    // NET-012 (distill): progressive disclosure. The Operate-mode primary path is
+    // pick source -> connect -> record; everything else is configuration behind smart defaults
+    // (MP4 / AutoHardware / High / no rollover / no schedule - which are already the defaults).
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// True when the recording bar's ADVANCED tier is expanded. Collapsed by default so the default
+    /// view is preset -> folder -> record and nothing else.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isAdvancedRecordingOptionsExpanded;
+
+    /// <summary>The expander's accessible name, which states the action rather than the state.</summary>
+    public string AdvancedOptionsAutomationName => IsAdvancedRecordingOptionsExpanded
+        ? "Hide advanced recording options"
+        : "Show advanced recording options";
+
+    [RelayCommand]
+    private void ToggleAdvancedRecordingOptions()
+        => IsAdvancedRecordingOptionsExpanded = !IsAdvancedRecordingOptionsExpanded;
+
+    /// <summary>
+    /// NET-014: the broadcast row is REVEALED for selection before anything is sent. Revealing shows the
+    /// pickers ENABLED; the send only starts when the operator presses Start Broadcasting.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isBroadcastRevealed;
+
+    /// <summary>
+    /// NET-012/NET-014: the broadcast configuration row's visibility.
+    ///
+    /// <para>Driven by the REVEAL (so the pickers can be worked on before anything is live) and OR'd with
+    /// the live state, so a running broadcast can never be orphaned behind a hidden row.</para>
+    ///
+    /// <para>Deliberately keyed to broadcast state and NOT to recording state: hiding this row must never
+    /// disturb a take.</para>
+    /// </summary>
+    public bool IsBroadcastRowVisible => IsBroadcastRevealed || IsDesktopCaptureActive;
+
+    /// <summary>True in the middle state: the row is open for selection and nothing is being sent yet.</summary>
+    public bool IsBroadcastSelecting => IsBroadcastRowVisible && !IsDesktopCaptureActive;
+
+    /// <summary>The in-row action: arm the live state, or stop it (NET-014).</summary>
+    public string BroadcastActionText => IsDesktopCaptureActive ? "Stop Broadcasting" : "Start Broadcasting";
+
+    /// <summary>States the action, not the state - screen readers announce what the press will do.</summary>
+    public string BroadcastActionAutomationName => BroadcastActionText;
+
+    /// <summary>Stop reads like the app's other stop affordances; Start is the accent call to action.</summary>
+    public IBrush BroadcastActionBackground =>
+        IsDesktopCaptureActive ? RecordStopBrush : TestSignalActiveBrush;
+
+    public IBrush BroadcastActionForeground => StudioPalette.ButtonWhiteForeground;
+
+    /// <summary>
+    /// The compact broadcast summary substitutes for the row exactly when the row is hidden - the point
+    /// is that hiding the pickers never hides WHICH devices are selected.
+    /// </summary>
+    public bool IsLiveSettingSummaryVisible => !IsBroadcastRowVisible;
+
+    /// <summary>Chevron direction for the Advanced disclosure (down = collapsed, up = expanded).</summary>
+    public bool IsAdvancedChevronDown => !IsAdvancedRecordingOptionsExpanded;
+
+    /// <summary>
+    /// The compact "what is selected to go out" summary shown in the header while the broadcast row is
+    /// collapsed, so hiding the pickers never hides WHICH devices are in play.
+    /// </summary>
+    public string LiveSettingSummary
+    {
+        get
+        {
+            string target = string.IsNullOrWhiteSpace(SelectedCaptureTarget?.DisplayName)
+                ? "No target"
+                : SelectedCaptureTarget!.DisplayName;
+            string audio = string.IsNullOrWhiteSpace(SelectedCaptureAudioOption?.DisplayName)
+                ? "No audio"
+                : SelectedCaptureAudioOption!.DisplayName;
+
+            return $"{target} · {audio}";
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // NET-011: an optional SECOND destination. Non-empty means the take fans out through a composite
+    // sink, so a primary that fills or fails is shed while the take carries on to the backup folder.
+    // ------------------------------------------------------------------------------------------
+
+    [ObservableProperty]
+    private string _backupOutputDirectory = "";
+
+    [ObservableProperty]
+    private string _diagnosticTailText = "";
+
+    [ObservableProperty]
+    private bool _isDiagnosticsDrawerOpen;
+
     // 7. Recording Configuration Choices
     public IReadOnlyList<OutputContainerFormat> ContainerFormats { get; } = Enum.GetValues<OutputContainerFormat>();
 
@@ -260,6 +447,57 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private string _outputDirectory = "";
+
+    // ------------------------------------------------------------------------------------------
+    // NET-008: scheduled / segmented capture + named presets.
+    //
+    // Every control below lives inside the existing `IsRecordingConfigEnabled` region, so a mid-flight
+    // change can never restart a running take (the live-changing-selector locking rule).
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>The named preset catalog, plus "Custom" so the picker can never lie about the state.</summary>
+    public IReadOnlyList<string> RecordingPresetNames { get; } = BuildRecordingPresetNames();
+
+    /// <summary>The selected preset name. Selecting one applies its axis; editing any control = Custom.</summary>
+    [ObservableProperty]
+    private string _selectedRecordingPreset = RecordingPresets.CustomName;
+
+    public static IReadOnlyList<RecordingChoiceOption> RolloverMinuteOptions { get; } = new RecordingChoiceOption[]
+    {
+        new("Off", 0), new("1 min", 1), new("5 min", 5), new("10 min", 10),
+        new("15 min", 15), new("30 min", 30), new("60 min", 60)
+    };
+
+    public static IReadOnlyList<RecordingChoiceOption> RolloverGigabyteOptions { get; } = new RecordingChoiceOption[]
+    {
+        new("Off", 0), new("1 GB", 1), new("2 GB", 2), new("5 GB", 5), new("10 GB", 10)
+    };
+
+    public static IReadOnlyList<RecordingChoiceOption> MaxDurationOptions { get; } = new RecordingChoiceOption[]
+    {
+        new("Off", 0), new("15 min", 15), new("30 min", 30), new("1 h", 60),
+        new("2 h", 120), new("4 h", 240), new("8 h", 480)
+    };
+
+    public static IReadOnlyList<RecordingChoiceOption> ScheduleDelayOptions { get; } = new RecordingChoiceOption[]
+    {
+        new("Off", 0), new("1 min", 1), new("5 min", 5), new("15 min", 15), new("30 min", 30), new("60 min", 60)
+    };
+
+    [ObservableProperty]
+    private RecordingChoiceOption _selectedRolloverMinutes = RolloverMinuteOptions[0];
+
+    [ObservableProperty]
+    private RecordingChoiceOption _selectedRolloverGigabytes = RolloverGigabyteOptions[0];
+
+    [ObservableProperty]
+    private RecordingChoiceOption _selectedMaxDuration = MaxDurationOptions[0];
+
+    [ObservableProperty]
+    private RecordingChoiceOption _selectedScheduleDelay = ScheduleDelayOptions[0];
+
+    /// <summary>True while a preset is being applied, so the per-axis hooks don't flip the picker back.</summary>
+    private bool _applyingRecordingPreset;
 
     // 8. Status & Telemetry
     [ObservableProperty]
@@ -305,6 +543,13 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     public bool IsRecording => _session.IsRecording;
     public bool IsConnected => _session.IsConnected;
+
+    /// <summary>The named broadcast-mode state (ADR-0001); all presentation is a projection of it.</summary>
+    public BroadcastState BroadcastState => _broadcastState.State;
+
+    /// <summary>True while the host desktop/window broadcast is live.</summary>
+    public bool IsBroadcasting => _broadcastState.IsBroadcasting;
+
     public bool IsSafeExitConfirmed
     {
         get => _isSafeExitConfirmed;
@@ -334,6 +579,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _discoveryService = discoveryService ?? throw new ArgumentNullException(nameof(discoveryService));
         _ownsDependencies = ownsDependencies;
+        _broadcastEffects = new SessionEffects(_session);
         _updateVideoHudDelegate = UpdateVideoHudOnUIThread;
 
         // Load version info
@@ -377,6 +623,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
 
         HookEvents();
+        ApplyBroadcastStateProjection();
         _discoveryService.Start();
 
         // Seed the capture-target picker, audio device picker, and broadcast network picker
@@ -421,10 +668,25 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             // Headless testing environment without Avalonia dispatcher
         }
+
+        // Input-loss watchdog tick (ADR-0002). Always running, like the capture-targets tick, so it
+        // also covers the outage window when no recording is active. Runs on the UI thread, so the
+        // state/banner mutations it triggers need no extra marshaling.
+        try
+        {
+            _inputHealthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            _inputHealthTimer.Tick += InputHealthTimer_Tick;
+            _inputHealthTimer.Start();
+        }
+        catch
+        {
+            // Headless testing environment without Avalonia dispatcher
+        }
     }
 
     private void HookEvents()
     {
+        _broadcastState.StateChanged += OnBroadcastStateChanged;
         _discoveryService.SourcesUpdated += OnSourcesUpdated;
 
         _session.VideoFrameAvailable += OnVideoFrameAvailable;
@@ -436,7 +698,21 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         _session.RecordingStarted += OnRecordingStarted;
         _session.RecordingStopped += OnRecordingStopped;
         _session.RecordingError += OnRecordingError;
+
+        _session.InputLost += OnSessionInputLost;
+        _session.InputRecovered += OnSessionInputRecovered;
+        _session.InputRecoveryFailed += OnSessionInputRecoveryFailed;
     }
+
+    /// <summary>
+    /// ADR-0002 outage transitions. Raised from the UI health tick, so the state change (and the
+    /// banner projection it triggers) already happens on the UI thread.
+    /// </summary>
+    private void OnSessionInputLost() => _broadcastState.BeginReconnecting();
+
+    private void OnSessionInputRecovered() => _broadcastState.EndReconnecting();
+
+    private void OnSessionInputRecoveryFailed() => _broadcastState.MarkInputLost();
 
     public void SetAudioMonitoring(bool enabled)
     {
@@ -455,6 +731,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             SelectedEncoderChoice = VideoEncoderChoice.AutoHardware;
         }
+
+        // NET-008: a manual container change means the config no longer matches a named preset.
+        MarkRecordingPresetCustom();
     }
 
     partial void OnSelectedSourceChanged(OmtSourceInfo? value)
@@ -497,14 +776,28 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     partial void OnIsDesktopCaptureActiveChanged(bool value)
     {
-        IsCaptureSelectorEnabled = !value;
+        // The row's visibility and the collapsed-state summary both ride the broadcast state.
+        OnPropertyChanged(nameof(IsBroadcastRowVisible));
+        OnPropertyChanged(nameof(IsBroadcastSelecting));
+        OnPropertyChanged(nameof(IsLiveSettingSummaryVisible));
+        OnPropertyChanged(nameof(LiveSettingSummary));
+        OnPropertyChanged(nameof(BroadcastActionText));
+        OnPropertyChanged(nameof(BroadcastActionAutomationName));
+        OnPropertyChanged(nameof(BroadcastActionBackground));
     }
 
-    partial void OnConnectButtonTextChanged(string value)
+    partial void OnIsBroadcastRevealedChanged(bool value)
     {
-        // Every connect/disconnect path funnels through ConnectButtonText, so one handler
-        // keeps the Source picker lock in sync without touching each call site.
-        IsSourceSelectorEnabled = value != "Disconnect";
+        OnPropertyChanged(nameof(IsBroadcastRowVisible));
+        OnPropertyChanged(nameof(IsBroadcastSelecting));
+        OnPropertyChanged(nameof(IsLiveSettingSummaryVisible));
+        OnPropertyChanged(nameof(LiveSettingSummary));
+    }
+
+    partial void OnIsAdvancedRecordingOptionsExpandedChanged(bool value)
+    {
+        OnPropertyChanged(nameof(AdvancedOptionsAutomationName));
+        OnPropertyChanged(nameof(IsAdvancedChevronDown));
     }
 
     partial void OnSelectedCaptureAudioOptionChanged(HostAudioCaptureOption value)
@@ -588,24 +881,17 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
         try
         {
-            if (_session.IsConnected || ConnectButtonText == "Disconnect")
+            if (_broadcastState.IsSessionActive)
             {
                 if (_session.IsRecording)
                 {
                     StatusText = "Finalizing active recording before disconnecting...";
-                    await _session.StopRecordingAsync();
                 }
 
-                _session.Disconnect();
+                // The module owns the "stop-recording-first, then disconnect" ordering; the
+                // resulting state change drives every visual through ApplyBroadcastStateProjection.
+                await _broadcastState.LeaveReceiveModeAsync(_broadcastEffects);
                 AppLogger.LogInfo("Disconnected from stream.");
-                ViewportClearRequested?.Invoke();
-                MetersResetRequested?.Invoke();
-                ResetOfflineState();
-
-                IsTestSignalActive = false;
-                TestSignalBackground = TestSignalInactiveBrush;
-                TestSignalForeground = StudioPalette.ButtonLightForeground;
-                TestSignalAutomationName = "Enable Test Signal Generator";
             }
             else
             {
@@ -617,11 +903,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
                 SourceNameText = info.DisplayName;
                 AppLogger.LogInfo($"Connecting to stream at {info.Address}");
-                _session.Connect(info.Address);
-                ConnectButtonText = "Disconnect";
-                ConnectButtonBackground = DisconnectBrush;
-                ConnectButtonForeground = StudioPalette.ButtonWhiteForeground;
-                ConnectButtonAutomationName = "Disconnect Stream";
+                await _broadcastState.EnterNetworkConnectedAsync(_broadcastEffects, () => _session.Connect(info.Address));
             }
         }
         catch (Exception ex)
@@ -644,53 +926,37 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (active)
             {
-                if (_session.IsConnected)
+                if (_broadcastState.IsSessionActive && _session.IsRecording)
                 {
-                    if (_session.IsRecording)
-                    {
-                        StatusText = "Finalizing active recording before switching source...";
-                        await _session.StopRecordingAsync();
-                    }
-                    _session.Disconnect();
+                    StatusText = "Finalizing active recording before switching source...";
                 }
 
-                IsTestSignalActive = true;
-                TestSignalBackground = TestSignalActiveBrush;
-                TestSignalForeground = StudioPalette.ButtonWhiteForeground;
-                TestSignalAutomationName = "Disable Test Signal Generator";
+                // Leaves any active receive mode (stop-recording-first), enters TestSignal and
+                // connects the synthetic source. The projection owns the resulting visuals.
+                await _broadcastState.EnterTestSignalAsync(_broadcastEffects, () =>
+                {
+                    StatusText = "Connected to internal synthetic test generator.";
+                    _session.Connect(new SyntheticPatternSource());
+                });
+
                 SourceNameText = "Local Test Pattern (SMPTE)";
-                StatusText = "Connected to internal synthetic test generator.";
                 AppLogger.LogInfo("Started local test signal generator.");
-
-                _session.Connect(new SyntheticPatternSource());
-
-                ConnectButtonText = "Disconnect";
-                ConnectButtonBackground = DisconnectBrush;
-                ConnectButtonForeground = StudioPalette.ButtonWhiteForeground;
-                ConnectButtonAutomationName = "Disconnect Stream";
             }
             else
             {
-                IsTestSignalActive = false;
-                TestSignalBackground = TestSignalInactiveBrush;
-                TestSignalForeground = StudioPalette.ButtonLightForeground;
-                TestSignalAutomationName = "Enable Test Signal Generator";
                 StatusText = "Test pattern stopped.";
 
-                if (_session.IsConnected)
+                if (_broadcastState.IsSessionActive && _session.IsRecording)
                 {
-                    if (_session.IsRecording)
-                    {
-                        StatusText = "Finalizing active recording before disconnecting...";
-                        await _session.StopRecordingAsync();
-                    }
-                    _session.Disconnect();
-                    AppLogger.LogInfo("Disconnected test signal generator.");
+                    StatusText = "Finalizing active recording before disconnecting...";
                 }
 
-                ViewportClearRequested?.Invoke();
-                MetersResetRequested?.Invoke();
-                ResetOfflineState();
+                bool wasReceiving = _broadcastState.IsSessionActive;
+                await _broadcastState.LeaveReceiveModeAsync(_broadcastEffects);
+                if (wasReceiving)
+                {
+                    AppLogger.LogInfo("Disconnected test signal generator.");
+                }
             }
         }
         catch (Exception ex)
@@ -705,7 +971,39 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private async Task ToggleDesktopCaptureAsync()
     {
         if (IsRecordingCloseOverlayVisible) return;
-        await SetDesktopCaptureActiveAsync(!IsDesktopCaptureActive);
+
+        // NET-014: while LIVE this button is the DISMISS - it stops the send and hides the panel. A live
+        // broadcast is never orphaned behind a hidden row: it is stopped, not hidden.
+        if (IsBroadcasting)
+        {
+            await SetDesktopCaptureActiveAsync(false);
+            IsBroadcastRevealed = false;
+            return;
+        }
+
+        // While OFF it is the reveal/hide entry only - revealing NEVER starts a send (that was the bug:
+        // the pickers the operator needed to touch appeared already locked).
+        IsBroadcastRevealed = !IsBroadcastRevealed;
+        if (IsBroadcastRevealed && CaptureTargets.Count == 0)
+        {
+            PopulateCaptureTargets();
+        }
+    }
+
+    /// <summary>
+    /// The in-row action (NET-014). Start arms the live state through the SAME single gate as before -
+    /// <see cref="SetDesktopCaptureActiveAsync"/> still owns the OmtDesktopCaptureGenerator lifecycle, so
+    /// the send path is unchanged and this is a UI-state change only.
+    ///
+    /// <para>Stop leaves the panel REVEALED so the operator can adjust and restart without the controls
+    /// vanishing under the cursor.</para>
+    /// </summary>
+    [RelayCommand(AllowConcurrentExecutions = false)]
+    private async Task StartStopBroadcastAsync()
+    {
+        if (IsRecordingCloseOverlayVisible) return;
+
+        await SetDesktopCaptureActiveAsync(!IsBroadcasting);
     }
 
     public async Task SetDesktopCaptureActiveAsync(bool active)
@@ -766,10 +1064,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 }
 
                 _activeCaptureTarget = target;
-                IsDesktopCaptureActive = true;
-                DesktopCaptureBackground = TestSignalActiveBrush;
-                DesktopCaptureForeground = StudioPalette.ButtonWhiteForeground;
-                DesktopCaptureAutomationName = "Disable Host Broadcast";
+                _broadcastState.StartBroadcasting();
                 string audioLabel = SelectedCaptureAudioOption?.DisplayName ?? "System Audio";
                 string networkLabel = SelectedBroadcastNetwork?.DisplayName ?? "All Networks (Auto)";
                 string endpointUrl = _desktopCapture.BroadcastEndpointUrl ?? _desktopCapture.Address ?? "OMT";
@@ -781,10 +1076,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 _desktopCapture?.Dispose();
                 _desktopCapture = null;
                 _activeCaptureTarget = null;
-                IsDesktopCaptureActive = false;
-                DesktopCaptureBackground = TestSignalInactiveBrush;
-                DesktopCaptureForeground = StudioPalette.ButtonLightForeground;
-                DesktopCaptureAutomationName = "Enable Host Broadcast";
+                _broadcastState.StopBroadcasting();
                 StatusText = "Host capture stopped.";
                 AppLogger.LogInfo("Stopped host desktop capture.");
             }
@@ -792,10 +1084,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         catch (Exception ex)
         {
             AppLogger.LogError($"Error toggling desktop capture: {ex.Message}", ex);
-            IsDesktopCaptureActive = false;
-            DesktopCaptureBackground = TestSignalInactiveBrush;
-            DesktopCaptureForeground = StudioPalette.ButtonLightForeground;
-            DesktopCaptureAutomationName = "Enable Host Broadcast";
+            _broadcastState.StopBroadcasting();
             StatusText = $"Host capture error: {ex.Message}";
         }
     }
@@ -1195,15 +1484,15 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private static IHostAudioSource CreateCaptureAudioSource(HostAudioCaptureOption option)
     {
         IHostAudioSource source = HostAudioSourceFactory.Create(option);
-        if (source is AsioHostAudioSource asio)
-        {
-            LogAsioStateDeferred(asio, option.DisplayName);
-        }
+
+        // ADR-0003: no downcast to a concrete driver adapter — the negotiated state is on the
+        // interface now, so every source can report it the same way.
+        LogSourceStateDeferred(source, option.DisplayName);
 
         return source;
     }
 
-    private static void LogAsioStateDeferred(AsioHostAudioSource asio, string displayName)
+    private static void LogSourceStateDeferred(IHostAudioSource source, string displayName)
     {
         try
         {
@@ -1212,7 +1501,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 try
                 {
                     await Task.Delay(AsioTelemetryDelayMs).ConfigureAwait(false);
-                    AppLogger.LogInfo($"[ASIO] {displayName}: {DescribeAsioState(asio)}");
+                    AppLogger.LogInfo($"[HostAudio] {displayName}: {DescribeSourceState(source)}");
                 }
                 catch
                 {
@@ -1226,28 +1515,30 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
-    /// <summary>One-line summary of an ASIO source's negotiated state, for logs and status text.</summary>
-    private static string DescribeAsioState(AsioHostAudioSource asio)
+    /// <summary>One-line summary of a host source's negotiated state, for logs and status text.</summary>
+    private static string DescribeSourceState(IHostAudioSource source)
     {
-        int sampleRate = asio.SampleRate > 0 ? asio.SampleRate : 48000;
+        int sampleRate = source.SampleRate > 0 ? source.SampleRate : 48000;
 
-        string rate = asio.IsResamplingRequired
-            ? $"driver runs at {asio.DriverActualSampleRate} Hz, resampling to {sampleRate} Hz"
+        string rate = source.IsResamplingRequired
+            ? $"device runs at {source.DeviceSampleRate} Hz, resampling to {sampleRate} Hz"
             : $"native {sampleRate} Hz (no resampling)";
 
-        string note = string.IsNullOrWhiteSpace(asio.SampleRateNegotiationNote)
+        string note = string.IsNullOrWhiteSpace(source.RateNegotiationNote)
             ? string.Empty
-            : $" [{asio.SampleRateNegotiationNote}]";
+            : $" [{source.RateNegotiationNote}]";
 
-        string latency = asio.InputLatencySamples > 0
-            ? $", input latency {asio.InputLatencySamples * 1000 / sampleRate} ms ({asio.InputLatencySamples} samples)"
+        string latency = source.InputLatencyFrames > 0
+            ? $", input latency {source.InputLatencyFrames * 1000 / sampleRate} ms ({source.InputLatencyFrames} samples)"
             : string.Empty;
 
-        string error = string.IsNullOrWhiteSpace(asio.LastError)
+        string error = string.IsNullOrWhiteSpace(source.LastError)
             ? string.Empty
-            : $", ERROR: {asio.LastError}";
+            : $", ERROR: {source.LastError}";
 
-        return $"{rate}{note}{latency}{error}";
+        string active = source.IsHardwareActive ? string.Empty : ", hardware INACTIVE (silence)";
+
+        return $"{rate}{note}{latency}{error}{active}";
     }
 
     private void PopulateBroadcastNetworks()
@@ -1352,6 +1643,23 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>
+    /// Periodic input-health poll driving the ADR-0002 watchdog. On the UI thread, so the state and
+    /// banner mutations it triggers need no extra marshaling.
+    /// </summary>
+    private void InputHealthTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_disposed) return;
+        try
+        {
+            _session.CheckInputHealth();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Input-health poll failed: {ex.Message}");
+        }
+    }
+
     [RelayCommand]
     private void RefreshCaptureTargets()
     {
@@ -1395,6 +1703,15 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
         else
         {
+            // NET-010: refuse with the real reason up front, rather than letting the transport fail at
+            // the worst moment - a start failure today surfaces only as a SinkError, by which time the
+            // operator has usually walked away.
+            if (IsRecordingUnavailable)
+            {
+                StatusText = RecordingUnavailableText;
+                return;
+            }
+
             if (!_session.IsConnected || !_session.CurrentFormat.HasVideo)
             {
                 StatusText = "Please connect to an active OMT stream before recording.";
@@ -1408,19 +1725,187 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 return;
             }
 
+            DateTime nowUtc = DateTime.UtcNow;
+
             var config = new RecordingConfig
             {
                 ContainerFormat = SelectedContainerFormat,
                 EncoderChoice = SelectedEncoderChoice,
                 Quality = SelectedQualityPreset,
-                OutputDirectory = outDir
+                OutputDirectory = outDir,
+
+                // NET-011: a blank backup folder means a single destination, exactly as before.
+                BackupOutputDirectory = string.IsNullOrWhiteSpace(BackupOutputDirectory)
+                    ? null
+                    : BackupOutputDirectory.Trim(),
+
+                // NET-008: segmented / scheduled capture, read from the bound option selections so the
+                // config can never carry a value the operator cannot see in the UI.
+                SegmentRolloverMinutes = SelectedRolloverMinutes?.Value ?? 0,
+                SegmentRolloverGigabytes = SelectedRolloverGigabytes?.Value ?? 0,
+                MaxDurationMinutes = SelectedMaxDuration?.Value ?? 0,
+                ScheduledStartDelayMinutes = SelectedScheduleDelay?.Value ?? 0
             };
+
+            // A start delay is resolved to an absolute instant HERE, once, so what the arm evaluates is
+            // a plain timestamp compare rather than a moving target.
+            if (RecordingSchedule.ResolveStartUtc(config, nowUtc) is { } startUtc)
+            {
+                config.ScheduledStartUtc = startUtc;
+                config.ScheduledStartDelayMinutes = 0;
+            }
+
+            // A new take clears any rollover notice left over from the previous one.
+            SegmentContinuationText = string.Empty;
 
             bool started = _session.StartRecording(config);
             if (!started)
             {
                 StatusText = "Failed to initiate recording. Ensure FFmpeg is available and destination folder is writable.";
             }
+        }
+    }
+
+    // ============================================================================================
+    // NET-008: named presets + scheduled / segmented capture
+    // ============================================================================================
+
+    private static string[] BuildRecordingPresetNames()
+    {
+        var names = new string[RecordingPresets.BuiltIn.Count + 1];
+        for (int i = 0; i < RecordingPresets.BuiltIn.Count; i++)
+        {
+            names[i] = RecordingPresets.BuiltIn[i].Name;
+        }
+
+        names[^1] = RecordingPresets.CustomName;
+        return names;
+    }
+
+    /// <summary>Finds the option whose value matches, else the first (Off).</summary>
+    private static RecordingChoiceOption OptionFor(IReadOnlyList<RecordingChoiceOption> options, double value)
+    {
+        for (int i = 0; i < options.Count; i++)
+        {
+            if (options[i].Value.Equals(value)) return options[i];
+        }
+
+        return options[0];
+    }
+
+    /// <summary>
+    /// Applies the startup FFmpeg preflight (NET-010). Called once from the composition root: the
+    /// engine has no view of the preflight, so the ViewModel carries the provenance and stamps it onto
+    /// the health readout. Applying an available result CLEARS the warning, so a transient failure that
+    /// later resolves is not sticky.
+    /// </summary>
+    public void ApplyFfmpegPreflight(FfmpegPreflightResult result)
+    {
+        if (result == null) throw new ArgumentNullException(nameof(result));
+
+        FfmpegVersion = result.Version ?? string.Empty;
+        IsRecordingUnavailable = !result.IsAvailable;
+        RecordingUnavailableText = result.IsAvailable
+            ? string.Empty
+            : $"Recording unavailable: {result.Detail}";
+
+        if (result.IsAvailable)
+        {
+            AppLogger.LogInfo(
+                $"FFmpeg preflight OK: {result.VersionLine} (resolved: {result.ExecutablePath})");
+        }
+        else
+        {
+            AppLogger.LogError(
+                $"FFmpeg preflight FAILED - {result.Detail}. Preview, discovery and broadcast keep " +
+                "working; recording is unavailable.");
+            StatusText = RecordingUnavailableText;
+        }
+
+        ProjectRecordingHealth(_session.GetRecordingHealthSnapshot());
+    }
+
+    /// <summary>
+    /// Selecting a preset writes its axis onto the controls. The destination is only written when the
+    /// preset carries one - a preset authored on another machine must not silently redirect output.
+    /// </summary>
+    partial void OnSelectedRecordingPresetChanged(string value)
+    {
+        if (_applyingRecordingPreset) return;
+
+        RecordingPreset? preset = RecordingPresets.FindByName(value);
+        if (preset == null) return; // "Custom" - nothing to apply
+
+        _applyingRecordingPreset = true;
+        try
+        {
+            SelectedContainerFormat = preset.ContainerFormat;
+            SelectedEncoderChoice = preset.EncoderChoice;
+            SelectedQualityPreset = preset.Quality;
+            SelectedRolloverMinutes = OptionFor(RolloverMinuteOptions, preset.SegmentRolloverMinutes);
+            SelectedRolloverGigabytes = OptionFor(RolloverGigabyteOptions, preset.SegmentRolloverGigabytes);
+            SelectedMaxDuration = OptionFor(MaxDurationOptions, preset.MaxDurationMinutes);
+
+            if (!string.IsNullOrWhiteSpace(preset.OutputDirectory))
+            {
+                OutputDirectory = preset.OutputDirectory!;
+            }
+
+            StatusText = $"Recording preset applied: {preset.Name}";
+        }
+        finally
+        {
+            _applyingRecordingPreset = false;
+        }
+    }
+
+    /// <summary>
+    /// Any manual edit to a preset axis means the config no longer matches a named preset, so the
+    /// picker flips to "Custom" rather than displaying a name that has stopped being true.
+    /// </summary>
+    private void MarkRecordingPresetCustom()
+    {
+        if (_applyingRecordingPreset) return;
+
+        _applyingRecordingPreset = true;
+        try
+        {
+            SelectedRecordingPreset = RecordingPresets.CustomName;
+        }
+        finally
+        {
+            _applyingRecordingPreset = false;
+        }
+    }
+
+    partial void OnSelectedEncoderChoiceChanged(VideoEncoderChoice value) => MarkRecordingPresetCustom();
+    partial void OnSelectedQualityPresetChanged(QualityPreset value) => MarkRecordingPresetCustom();
+    partial void OnSelectedRolloverMinutesChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
+    partial void OnSelectedRolloverGigabytesChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
+    partial void OnSelectedMaxDurationChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
+
+    /// <summary>
+    /// Picks the optional second destination (NET-011). Reuses the same folder-picker hook as the
+    /// primary, so no new platform surface is needed.
+    /// </summary>
+    [RelayCommand(AllowConcurrentExecutions = false)]
+    private async Task BrowseBackupDirectoryAsync()
+    {
+        if (IsRecordingCloseOverlayVisible || !IsRecordingConfigEnabled) return;
+        if (PickFolderAsync == null) return;
+
+        try
+        {
+            string? selected = await PickFolderAsync(BackupOutputDirectory);
+            if (!string.IsNullOrWhiteSpace(selected))
+            {
+                BackupOutputDirectory = selected;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Error browsing backup directory: {ex.Message}", ex);
+            StatusText = $"Backup folder selection cancelled or failed: {ex.Message}";
         }
     }
 
@@ -1640,13 +2125,47 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             RecordButtonBackground = RecordStopBrush;
             RecordButtonAutomationName = "Stop Recording Stream";
             RecordStatsText = $"Recording to {Path.GetFileName(filePath)}";
+
+            // A new take clears the previous verdict, then the panel re-projects.
+            StopSummaryText = string.Empty;
             _recordUiTimer?.Start();
+            ProjectRecordingHealth(_session.GetRecordingHealthSnapshot());
         });
     }
 
-    private void OnRecordingStopped(string filePath, TimeSpan duration, long fileSize)
+    private void OnRecordingStopped(RecordingStopSummary summary)
     {
-        AppLogger.LogInfo($"Recording stopped: {filePath} (Duration: {duration}, Size: {fileSize} bytes)");
+        // NET-008: a ROLLOVER boundary is not a stop. The take continues in the next …_partNN, so none
+        // of the stop-side teardown below may run - no timer stop, no button flip back to START, no
+        // config re-unlock, no stop verdict, no "saved" copy. It gets its own quiet continuation line.
+        if (RecordingHealth.IsSegmentBoundary(summary.Reason))
+        {
+            string note = RecordingHealth.BuildSegmentContinuationText(summary);
+            AppLogger.LogInfo(
+                $"Segment boundary (roller): {summary.Path} (media duration: {summary.MediaDuration}, " +
+                $"size: {summary.FileSizeBytes} bytes); the take continues in segment {summary.SegmentIndex + 1}.");
+
+            PostToUIThread(() =>
+            {
+                SegmentContinuationText = note;
+                StatusText = note;
+
+                // The take is still live, so the health panel must stay up - and the STOP panel is
+                // explicitly not used for a boundary.
+                IsRecordingHealthVisible = true;
+            });
+
+            return;
+        }
+
+        // DEF-01: this used to report Stopwatch wall clock, which counted the input-loss dead air (QA
+        // measured 11.05s reported against 5.92s on disk). It now reports MEDIA duration — frames /
+        // stamped fps — and logs wall clock separately, clearly labelled.
+        AppLogger.LogInfo(
+            $"Recording stopped: {summary.Path} (media duration: {summary.MediaDuration}, " +
+            $"wall-clock duration: {summary.WallClockDuration} [includes input-loss dead air], size: {summary.FileSizeBytes} bytes)");
+        AppLogger.LogInfo(RecordingHealth.BuildStopVerdict(summary));
+
         PostToUIThread(() =>
         {
             IsRecordingCloseOverlayVisible = false;
@@ -1657,11 +2176,19 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             RecordButtonBackground = RecordStartBrush;
             RecordButtonAutomationName = "Start Recording Stream";
 
-            double mb = fileSize / (1024.0 * 1024.0);
+            double mb = summary.FileSizeBytes / (1024.0 * 1024.0);
             RecordDurationText = "00:00:00";
-            RecordStatsText = $"Saved: {Path.GetFileName(filePath)} ({mb:F1} MB, {duration:mm\\:ss})";
 
-            StatusText = $"Recording completed and saved to {filePath}";
+            // A genuine stop supersedes any rollover notice from earlier in the take.
+            SegmentContinuationText = string.Empty;
+            RecordStatsText = $"Saved: {Path.GetFileName(summary.Path)} ({mb:F1} MB, {summary.MediaDuration:mm\\:ss})";
+
+            // FEAT-07: the stop-summary verdict, shown in the UI (and logged above) from the summary's
+            // own snapshot, since the live session has already torn the transport down.
+            StopSummaryText = RecordingHealth.BuildStopVerdict(summary);
+            ProjectRecordingHealth(summary.ToHealthSnapshot());
+
+            StatusText = $"Recording completed and saved to {summary.Path}";
         });
     }
 
@@ -1695,12 +2222,136 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
             long frames = _session.RecordingFramesWritten;
             RecordStatsText = $"Writing... {frames:N0} frames";
+
+            // FEAT-07: refresh the recording-health projection once per tick (Interlocked reads plus at
+            // most one file-size query — no per-frame work, and we are already on the UI thread).
+            ProjectRecordingHealth(_session.GetRecordingHealthSnapshot());
         }
+    }
+
+    /// <summary>
+    /// Projects one health snapshot onto the panel (FEAT-07). Pure mapping — thresholds and text come
+    /// from <see cref="RecordingHealth"/>, so the UI and the headless tests agree by construction.
+    /// </summary>
+    private void ProjectRecordingHealth(RecordingHealthSnapshot snapshot)
+    {
+        // NET-010: stamp the app-level ffmpeg provenance onto the snapshot the UI shows - the engine
+        // never sees the preflight, and a field report needs the encoder build it recorded through.
+        snapshot = snapshot with { FfmpegVersion = FfmpegVersion };
+
+        RecordingHealthEncoderText = RecordingHealth.EncoderText(snapshot);
+        RecordingHealthFfmpegText = RecordingHealth.FfmpegText(snapshot);
+        RecordingHealthBitrateText = RecordingHealth.BitrateText(snapshot);
+        RecordingHealthDropsText = RecordingHealth.DropsText(snapshot);
+        RecordingHealthDriftText = RecordingHealth.DriftText(snapshot);
+
+        IsRecordingDropWarning = RecordingHealth.IsDropWarning(snapshot);
+        IsRecordingDriftWarning = RecordingHealth.IsDriftWarning(snapshot);
+        RecordingDropsForeground = IsRecordingDropWarning ? StudioPalette.MeterDanger : StudioPalette.ButtonLightForeground;
+        RecordingDriftForeground = IsRecordingDriftWarning ? StudioPalette.MeterWarnHigh : StudioPalette.ButtonLightForeground;
+
+        DiagnosticTailText = snapshot.DiagnosticTail ?? string.Empty;
+
+        // The panel stays up after a stop so the verdict remains readable, and hides once the verdict
+        // is cleared by the next take.
+        IsRecordingHealthVisible = snapshot.IsRecording || !string.IsNullOrEmpty(StopSummaryText);
+    }
+
+    partial void OnStopSummaryTextChanged(string value)
+    {
+        IsStopSummaryVisible = !string.IsNullOrEmpty(value);
+    }
+
+    partial void OnSegmentContinuationTextChanged(string value)
+    {
+        IsSegmentContinuationVisible = !string.IsNullOrEmpty(value);
+    }
+
+    [RelayCommand]
+    private void ToggleDiagnosticsDrawer()
+    {
+        IsDiagnosticsDrawerOpen = !IsDiagnosticsDrawerOpen;
     }
 
     #endregion
 
-    private void ResetOfflineState()
+    /// <summary>
+    /// Projects the broadcast state machine onto the presentation layer — the single place state
+    /// becomes button text, brushes, automation names and selector locks (ADR-0001 decision 3).
+    /// Display text is an output of state here, never an input to it.
+    /// </summary>
+    private void ApplyBroadcastStateProjection()
+    {
+        BroadcastState state = _broadcastState.State;
+        bool receiving = _broadcastState.IsSessionActive;
+
+        // ADR-0002 input-loss alarm banner — part of this single projection, not set ad hoc.
+        bool reconnecting = state == BroadcastState.Reconnecting;
+        bool inputLost = state == BroadcastState.InputLost;
+        IsInputLossBannerVisible = reconnecting || inputLost;
+        InputLossBannerText = inputLost
+            ? "INPUT LOST — no video arrived within the input-loss window. The take was finalized and auto-reconnect has given up; reconnect the source to continue."
+            : "INPUT LOST — no video is arriving. Finalized the current segment; reconnecting automatically…";
+
+        // Connect / Disconnect action button.
+        ConnectButtonText = receiving ? "Disconnect" : "Connect";
+        ConnectButtonBackground = receiving ? DisconnectBrush : ConnectBrush;
+        ConnectButtonForeground = receiving ? StudioPalette.ButtonWhiteForeground : StudioPalette.ButtonDarkForeground;
+        ConnectButtonAutomationName = receiving ? "Disconnect Stream" : "Connect Stream";
+
+        // Test-signal toggle.
+        bool testSignalActive = state == BroadcastState.TestSignal;
+        IsTestSignalActive = testSignalActive;
+        TestSignalBackground = testSignalActive ? TestSignalActiveBrush : TestSignalInactiveBrush;
+        TestSignalForeground = testSignalActive ? StudioPalette.ButtonWhiteForeground : StudioPalette.ButtonLightForeground;
+        TestSignalAutomationName = testSignalActive ? "Disable Test Signal Generator" : "Enable Test Signal Generator";
+
+        // Host-broadcast toggle.
+        bool broadcasting = _broadcastState.IsBroadcasting;
+        IsDesktopCaptureActive = broadcasting;
+        DesktopCaptureBackground = broadcasting ? TestSignalActiveBrush : TestSignalInactiveBrush;
+        DesktopCaptureForeground = broadcasting ? StudioPalette.ButtonWhiteForeground : StudioPalette.ButtonLightForeground;
+        DesktopCaptureAutomationName = broadcasting ? "Disable Host Broadcast" : "Enable Host Broadcast";
+
+        // Selector locks, derived once here from the state machine (DESIGN §7).
+        IsSourceSelectorEnabled = _broadcastState.IsSourceSelectorEnabled;
+        IsCaptureSelectorEnabled = _broadcastState.IsCaptureSelectorEnabled;
+
+        // NET-012: the collapsed broadcast row's summary is derived from the same projection, so it is
+        // current the moment the row hides.
+        OnPropertyChanged(nameof(LiveSettingSummary));
+    }
+
+    /// <summary>
+    /// Reacts to one module transition: re-project the presentation, and when a receive mode is
+    /// left, clear the viewport/meters and reset the offline HUD readouts (<see cref="ResetOfflineHud"/>)
+    /// — replacing the previously scattered <c>ResetOfflineState()</c> call sites.
+    /// </summary>
+    private void OnBroadcastStateChanged(object? sender, BroadcastStateChangedEventArgs e)
+    {
+        ApplyBroadcastStateProjection();
+
+        if (IsSessionMode(e.OldState) && !IsSessionMode(e.NewState))
+        {
+            ViewportClearRequested?.Invoke();
+            MetersResetRequested?.Invoke();
+            ResetOfflineHud();
+        }
+    }
+
+    /// <summary>
+    /// True for any state in which a session is attached — the two receiving modes plus the ADR-0002
+    /// outage states (frames have stopped, but the session is still attached, so nothing is torn down).
+    /// </summary>
+    private static bool IsSessionMode(BroadcastState state) =>
+        state is BroadcastState.NetworkConnected or BroadcastState.TestSignal
+               or BroadcastState.Reconnecting or BroadcastState.InputLost;
+
+    /// <summary>
+    /// Resets the viewport HUD and telemetry readouts shown while no stream is being received.
+    /// Button text/brushes are no longer reset here — they are projections of the state machine.
+    /// </summary>
+    private void ResetOfflineHud()
     {
         _isLive = false;
         _lastWidth = 0;
@@ -1708,10 +2359,6 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         _lastFps = 0;
         _lastHudUpdateTick = 0;
         IsRecordingConfigEnabled = true;
-        ConnectButtonText = "Connect";
-        ConnectButtonBackground = ConnectBrush;
-        ConnectButtonForeground = StudioPalette.ButtonDarkForeground;
-        ConnectButtonAutomationName = "Connect Stream";
         IsNoSignalOverlayVisible = true;
         LiveIndicatorBrush = LiveIndicatorInactiveBrush;
         LiveStatusText = "OFFLINE";
@@ -1724,6 +2371,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private void UnhookEvents()
     {
+        _broadcastState.StateChanged -= OnBroadcastStateChanged;
         _discoveryService.SourcesUpdated -= OnSourcesUpdated;
 
         _session.VideoFrameAvailable -= OnVideoFrameAvailable;
@@ -1735,6 +2383,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         _session.RecordingStarted -= OnRecordingStarted;
         _session.RecordingStopped -= OnRecordingStopped;
         _session.RecordingError -= OnRecordingError;
+
+        _session.InputLost -= OnSessionInputLost;
+        _session.InputRecovered -= OnSessionInputRecovered;
+        _session.InputRecoveryFailed -= OnSessionInputRecoveryFailed;
     }
 
     public void Dispose()
@@ -1752,6 +2404,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             _captureTargetsTimer.Tick -= CaptureTargetsTimer_Tick;
         }
+        _inputHealthTimer?.Stop();
+        if (_inputHealthTimer != null)
+        {
+            _inputHealthTimer.Tick -= InputHealthTimer_Tick;
+        }
         UnhookEvents();
         PickFolderAsync = null;
         VideoFrameReceived = null;
@@ -1768,6 +2425,23 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             _discoveryService.Dispose();
             _session.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Adapts <see cref="CaptureSession"/> to the state machine's <see cref="IBroadcastSessionEffects"/>
+    /// seam, so the module owns the stop-recording-first ordering without knowing the session type.
+    /// </summary>
+    private sealed class SessionEffects : IBroadcastSessionEffects
+    {
+        private readonly CaptureSession _session;
+
+        public SessionEffects(CaptureSession session) => _session = session;
+
+        public bool IsRecording => _session.IsRecording;
+
+        public Task StopRecordingAsync() => _session.StopRecordingAsync();
+
+        public void DisconnectSession() => _session.Disconnect();
     }
 }
 
@@ -1788,3 +2462,22 @@ public sealed record AsioInputPairOption(int FirstChannelIndex, string DisplayNa
 /// <param name="Channels">Input channels the driver reported (empty when the probe failed).</param>
 /// <param name="Reason">Why the probe failed, or <c>null</c> on success.</param>
 internal sealed record AsioPairProbeResult(IReadOnlyList<AsioInputChannel> Channels, string? Reason);
+
+/// <summary>
+/// One labelled choice in a recording-settings dropdown (NET-008): the operator sees
+/// <see cref="Label"/>, the config receives <see cref="Value"/>. A class rather than a struct so a
+/// ComboBox selection matches the instance in <c>ItemsSource</c> by reference.
+/// </summary>
+public sealed class RecordingChoiceOption
+{
+    public RecordingChoiceOption(string label, double value)
+    {
+        Label = label;
+        Value = value;
+    }
+
+    public string Label { get; }
+    public double Value { get; }
+
+    public override string ToString() => Label;
+}

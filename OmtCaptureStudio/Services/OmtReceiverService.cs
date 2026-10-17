@@ -106,6 +106,22 @@ public class OmtReceiverService : IDisposable
         ConnectionStatusChanged?.Invoke("Disconnected");
     }
 
+    /// <summary>
+    /// Re-establishes the feed after an input-loss gap (ADR-0002 auto-reconnect). Reuses
+    /// <see cref="Connect"/>, which bounds-joins the previous receive loop and starts a fresh receiver:
+    /// the loop owns the receiver it runs and disposes it exactly once behind the identity check, so a
+    /// join that times out never disposes a receiver a live loop still holds.
+    /// </summary>
+    public void EnsureConnected(string address)
+    {
+        if (_disposed || string.IsNullOrWhiteSpace(address))
+        {
+            return;
+        }
+
+        Connect(address);
+    }
+
     private void ReceiveLoop(OMTReceive receiver)
     {
         OMTMediaFrame frame = new();

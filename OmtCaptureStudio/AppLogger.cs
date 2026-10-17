@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Channels;
@@ -45,6 +46,31 @@ public static class AppLogger
     private static string GetLogFilePath()
     {
         return Path.Combine(LogDir, $"{DateTime.Now:yyyy-MM-dd}.log");
+    }
+
+    /// <summary>
+    /// Best-effort bounded drain of the queued lines (NET-009). Called on the crash path: the process
+    /// may not survive long enough for the background writer to reach them, and the lines immediately
+    /// before a crash are the most valuable ones in the file. Never throws, never blocks longer than
+    /// <paramref name="timeoutMs"/>.
+    /// </summary>
+    public static void Flush(int timeoutMs = 1500)
+    {
+        var watch = Stopwatch.StartNew();
+        try
+        {
+            while (watch.ElapsedMilliseconds < timeoutMs)
+            {
+                if (_logChannel.Reader.Count == 0) return;
+                Thread.Sleep(5);
+            }
+        }
+        catch
+        {
+            // Reader.Count is not supported by every channel implementation; fall back to a short fixed
+            // grace period so the background writer still gets its chance.
+            try { Thread.Sleep(50); } catch { }
+        }
     }
 
     public static void LogInfo(string message) => Log("INFO", message);

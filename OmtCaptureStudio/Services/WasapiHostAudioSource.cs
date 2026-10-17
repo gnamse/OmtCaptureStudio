@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using OmtCaptureStudio.Models;
+using OmtCaptureStudio.Services.Audio;
 
 namespace OmtCaptureStudio.Services;
 
@@ -14,9 +15,8 @@ namespace OmtCaptureStudio.Services;
 /// </summary>
 public sealed class WasapiHostAudioSource : IHostAudioSource
 {
-    public const int TargetSampleRate = 48000;
-    public const int TargetChannels = 2;
-    private const int MaxSamplesPerFill = TargetSampleRate; // up to 1 second per read
+    // Shared audio-layer vocabulary now lives in HostAudioFormat (ADR-0003).
+    private const int MaxSamplesPerFill = HostAudioFormat.TargetSampleRate; // up to 1 second per read
 
     private readonly HostAudioCaptureMode _mode;
     private readonly WasapiEndpointCapture? _systemCapture;
@@ -25,12 +25,29 @@ public sealed class WasapiHostAudioSource : IHostAudioSource
     private readonly float[] _mixScratchR;
     private int _disposed;
 
-    public int SampleRate => TargetSampleRate;
-    public int Channels => TargetChannels;
+    public int SampleRate => HostAudioFormat.TargetSampleRate;
+    public int Channels => HostAudioFormat.TargetChannels;
 
     /// <summary>True if at least one requested hardware capture endpoint started successfully.</summary>
     public bool IsHardwareActive =>
         (_systemCapture?.IsActive ?? false) || (_micCapture?.IsActive ?? false);
+
+    // ---- IHostAudioSource (ADR-0003 interface widening; kills the caller downcast) --------------
+    /// <summary>WASAPI capture failures are swallowed and surface as silence, so no error is latched.</summary>
+    public string? LastError => null;
+
+    /// <summary>Device mix rate in use (48000 when the endpoint already runs at the target rate).</summary>
+    public int DeviceSampleRate =>
+        _systemCapture?.DeviceSampleRate ?? _micCapture?.DeviceSampleRate ?? HostAudioFormat.TargetSampleRate;
+
+    /// <summary>True when the endpoint negotiated a mix rate other than 48 kHz.</summary>
+    public bool IsResamplingRequired => DeviceSampleRate != HostAudioFormat.TargetSampleRate;
+
+    /// <summary>WASAPI mix-format negotiation has no operator-facing note.</summary>
+    public string? RateNegotiationNote => null;
+
+    /// <summary>WASAPI does not report input latency in frames.</summary>
+    public int InputLatencyFrames => 0;
 
     public WasapiHostAudioSource(HostAudioCaptureMode mode, string? deviceId = null)
     {
@@ -63,7 +80,7 @@ public sealed class WasapiHostAudioSource : IHostAudioSource
 
     public void FillPlanarAudio(Span<float> planarDestination, int samplesPerChannel)
     {
-        if (samplesPerChannel <= 0 || planarDestination.Length < samplesPerChannel * TargetChannels)
+        if (samplesPerChannel <= 0 || planarDestination.Length < samplesPerChannel * HostAudioFormat.TargetChannels)
         {
             planarDestination.Clear();
             return;
@@ -149,17 +166,22 @@ public sealed class WasapiHostAudioSource : IHostAudioSource
 /// </summary>
 internal sealed unsafe class WasapiEndpointCapture : IDisposable
 {
-    private const int RingCapacitySamples = WasapiHostAudioSource.TargetSampleRate; // 1.0s buffer
-    private const int MaxLatencySamples = WasapiHostAudioSource.TargetSampleRate * 120 / 1000; // 120 ms max latency
-
     private readonly bool _isLoopback;
     private readonly string? _deviceId;
-    private readonly object _ringLock = new();
-    private readonly float[] _ringLeft = new float[RingCapacitySamples];
-    private readonly float[] _ringRight = new float[RingCapacitySamples];
-    private int _readIndex;
-    private int _writeIndex;
-    private int _availableSamples;
+
+    // One shared ring implementation, rate-agnostic (ADR-0003).
+    private readonly StereoCaptureRing _ring = new();
+
+    // Negotiated device mix rate, published for the widened IHostAudioSource surface.
+    private int _deviceSampleRate = HostAudioFormat.TargetSampleRate;
+
+    // ADR-0003 (Slice 2): rate conversion moved to the CONSUMER thread, so the ring now holds
+    // DEVICE-rate frames. Set on the capture thread before the stream goes active; null means the
+    // device already runs at the stream rate, so the ring is read straight through (bit-exact).
+    private volatile FixedRatioStereoResampler? _resampler;
+
+    private float[] _pullLeft = Array.Empty<float>();      // resampler feed buffers (consumer thread)
+    private float[] _pullRight = Array.Empty<float>();
 
     private Thread? _captureThread;
     private volatile bool _running;
@@ -167,6 +189,9 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
     private int _disposed;
 
     public bool IsActive => _isActive;
+
+    /// <summary>Device mix rate this endpoint negotiated (published for the interface, ADR-0003).</summary>
+    public int DeviceSampleRate => Volatile.Read(ref _deviceSampleRate);
 
     public WasapiEndpointCapture(bool isLoopback, string? deviceId = null)
     {
@@ -187,53 +212,53 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
         _captureThread.Start();
     }
 
+    /// <summary>
+    /// Consumer-side read at the stream rate (48 kHz). Ring policy (capacity, latency cap,
+    /// underrun→silence) lives in <see cref="StereoCaptureRing"/>; rate conversion — when the device
+    /// negotiated something other than 48 kHz — lives in the shared <see cref="FixedRatioStereoResampler"/>.
+    /// </summary>
     public void ReadPlanar(Span<float> leftDest, Span<float> rightDest)
     {
-        int needed = leftDest.Length;
-        int copied = 0;
-
-        lock (_ringLock)
+        FixedRatioStereoResampler? resampler = _resampler;
+        if (resampler == null)
         {
-            int toCopy = Math.Min(needed, _availableSamples);
-            while (copied < toCopy)
-            {
-                int contiguous = Math.Min(toCopy - copied, RingCapacitySamples - _readIndex);
-                _ringLeft.AsSpan(_readIndex, contiguous).CopyTo(leftDest.Slice(copied, contiguous));
-                _ringRight.AsSpan(_readIndex, contiguous).CopyTo(rightDest.Slice(copied, contiguous));
-                _readIndex = (_readIndex + contiguous) % RingCapacitySamples;
-                copied += contiguous;
-            }
-            _availableSamples -= toCopy;
+            // Device rate == stream rate: bit-exact passthrough.
+            _ring.Read(leftDest, rightDest, leftDest.Length);
+            return;
         }
 
-        if (copied < needed)
+        FillResampled(resampler, leftDest, rightDest, leftDest.Length);
+    }
+
+    /// <summary>
+    /// ADR-0003 (Slice 2): pull device-rate frames from the ring and convert them on the CONSUMER
+    /// thread, mirroring the ASIO path so both adapters share exactly one rate-conversion policy.
+    /// This is what keeps the 96-tap sinc (~96 MACs/sample/channel) off the real-time capture callback.
+    /// </summary>
+    private void FillResampled(FixedRatioStereoResampler resampler, Span<float> leftDest, Span<float> rightDest, int wanted)
+    {
+        int maxFeed = Math.Min(resampler.MaxFeedFrames(wanted), _ring.CapacitySamples);
+        EnsurePullCapacity(maxFeed);
+        int feed = _ring.ReadUpTo(_pullLeft.AsSpan(0, maxFeed), _pullRight.AsSpan(0, maxFeed), maxFeed);
+        if (feed > 0)
         {
-            leftDest.Slice(copied).Clear();
-            rightDest.Slice(copied).Clear();
+            resampler.Append(_pullLeft, _pullRight, feed);
+        }
+
+        int produced = resampler.Process(leftDest, rightDest, wanted);
+        if (produced < wanted)
+        {
+            leftDest.Slice(produced).Clear();
+            rightDest.Slice(produced).Clear();
         }
     }
 
-    private void WritePlanarSample(float left, float right)
+    private void EnsurePullCapacity(int frames)
     {
-        _ringLeft[_writeIndex] = left;
-        _ringRight[_writeIndex] = right;
-        _writeIndex = (_writeIndex + 1) % RingCapacitySamples;
-
-        if (_availableSamples < RingCapacitySamples)
+        if (_pullLeft.Length < frames)
         {
-            _availableSamples++;
-        }
-        else
-        {
-            _readIndex = (_readIndex + 1) % RingCapacitySamples;
-        }
-
-        // Bound accumulated latency to ~120 ms so audio never drifts behind video over multi-hour sessions.
-        if (_availableSamples > MaxLatencySamples)
-        {
-            int drop = _availableSamples - (MaxLatencySamples / 2);
-            _readIndex = (_readIndex + drop) % RingCapacitySamples;
-            _availableSamples -= drop;
+            _pullLeft = new float[frames];
+            _pullRight = new float[frames];
         }
     }
 
@@ -295,11 +320,11 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
             WaveFormatEx desiredFormat = new()
             {
                 FormatTag = WaveFormatIeeeFloat,
-                Channels = WasapiHostAudioSource.TargetChannels,
-                SamplesPerSec = WasapiHostAudioSource.TargetSampleRate,
+                Channels = HostAudioFormat.TargetChannels,
+                SamplesPerSec = HostAudioFormat.TargetSampleRate,
                 BitsPerSample = 32,
-                BlockAlign = (ushort)(WasapiHostAudioSource.TargetChannels * sizeof(float)),
-                AvgBytesPerSec = WasapiHostAudioSource.TargetSampleRate * WasapiHostAudioSource.TargetChannels * sizeof(float),
+                BlockAlign = (ushort)(HostAudioFormat.TargetChannels * sizeof(float)),
+                AvgBytesPerSec = HostAudioFormat.TargetSampleRate * HostAudioFormat.TargetChannels * sizeof(float),
                 Size = 0
             };
 
@@ -309,8 +334,8 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
 
             int initHr = AudioClientInitialize(pAudioClient, AudclntShareModeShared, autoConvertFlags, BufferDuration100Ns, 0, &desiredFormat, IntPtr.Zero);
 
-            int deviceSampleRate = WasapiHostAudioSource.TargetSampleRate;
-            int deviceChannels = WasapiHostAudioSource.TargetChannels;
+            int deviceSampleRate = HostAudioFormat.TargetSampleRate;
+            int deviceChannels = HostAudioFormat.TargetChannels;
             int deviceBitsPerSample = 32;
             bool deviceIsFloat = true;
 
@@ -337,13 +362,17 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
             int startHr = AudioClientStart(pAudioClient);
             if (startHr < 0) return;
 
+            // ADR-0003 (Slice 2): publish the negotiated rate and the consumer-side resampler BEFORE the
+            // endpoint reports itself active, so the consumer can never observe active-with-no-converter.
+            // A null resampler means the device already runs at the stream rate (bit-exact passthrough).
+            Volatile.Write(ref _deviceSampleRate, deviceSampleRate);
+            _resampler = deviceSampleRate == HostAudioFormat.TargetSampleRate
+                ? null
+                : new FixedRatioStereoResampler(deviceSampleRate, HostAudioFormat.TargetSampleRate);
+
             clientStarted = true;
             _isActive = true;
-            AppLogger.LogInfo($"WASAPI {(_isLoopback ? "System Loopback" : "Microphone")} capture active ({deviceSampleRate} Hz, {deviceChannels}ch, {deviceBitsPerSample}-bit {(deviceIsFloat ? "float" : "PCM")}).");
-
-            // State for simple linear resampling when deviceSampleRate != 48000 Hz
-            double resamplePos = 0.0;
-            double resampleStep = (double)deviceSampleRate / WasapiHostAudioSource.TargetSampleRate;
+            AppLogger.LogInfo($"WASAPI {(_isLoopback ? "System Loopback" : "Microphone")} capture active ({deviceSampleRate} Hz, {deviceChannels}ch, {deviceBitsPerSample}-bit {(deviceIsFloat ? "float" : "PCM")}; conversion on the consumer thread).");
 
             while (_running && Volatile.Read(ref _disposed) == 0)
             {
@@ -373,7 +402,7 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
                         bool isSilent = (flags & AudclntBufferFlagsSilent) != 0 || pData == null;
                         if (numFrames > 0)
                         {
-                            IngestPacket(pData, (int)numFrames, isSilent, deviceSampleRate, deviceChannels, deviceBitsPerSample, deviceIsFloat, ref resamplePos, resampleStep);
+                            IngestPacket(pData, (int)numFrames, isSilent, deviceChannels, deviceBitsPerSample, deviceIsFloat);
                         }
                     }
                     finally
@@ -413,47 +442,25 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
         }
     }
 
+    /// <summary>
+    /// Real-time capture callback path. ADR-0003 (Slice 2): this does format conversion ONLY —
+    /// device frames are pushed into the ring at the DEVICE rate and no rate conversion happens here,
+    /// which is what removes the ~96 MACs/sample/channel sinc from the driver callback.
+    /// </summary>
     private void IngestPacket(
         byte* pData,
         int numFrames,
         bool isSilent,
-        int deviceSampleRate,
         int deviceChannels,
         int deviceBitsPerSample,
-        bool deviceIsFloat,
-        ref double resamplePos,
-        double resampleStep)
+        bool deviceIsFloat)
     {
-        lock (_ringLock)
+        lock (_ring.SyncRoot)
         {
-            if (deviceSampleRate == WasapiHostAudioSource.TargetSampleRate)
+            for (int frame = 0; frame < numFrames; frame++)
             {
-                for (int frame = 0; frame < numFrames; frame++)
-                {
-                    ReadFrameStereo(pData, frame, isSilent, deviceChannels, deviceBitsPerSample, deviceIsFloat, out float l, out float r);
-                    WritePlanarSample(l, r);
-                }
-            }
-            else
-            {
-                // Resample from deviceSampleRate (e.g. 44100 Hz) to 48000 Hz
-                while (resamplePos < numFrames)
-                {
-                    int idx0 = (int)resamplePos;
-                    int idx1 = Math.Min(idx0 + 1, numFrames - 1);
-                    float frac = (float)(resamplePos - idx0);
-
-                    ReadFrameStereo(pData, idx0, isSilent, deviceChannels, deviceBitsPerSample, deviceIsFloat, out float l0, out float r0);
-                    ReadFrameStereo(pData, idx1, isSilent, deviceChannels, deviceBitsPerSample, deviceIsFloat, out float l1, out float r1);
-
-                    float l = l0 + (l1 - l0) * frac;
-                    float r = r0 + (r1 - r0) * frac;
-                    WritePlanarSample(l, r);
-
-                    resamplePos += resampleStep;
-                }
-                resamplePos -= numFrames;
-                if (resamplePos < 0.0) resamplePos = 0.0;
+                ReadFrameStereo(pData, frame, isSilent, deviceChannels, deviceBitsPerSample, deviceIsFloat, out float l, out float r);
+                _ring.WriteSampleLocked(l, r);
             }
         }
     }

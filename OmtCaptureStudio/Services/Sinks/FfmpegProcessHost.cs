@@ -46,18 +46,39 @@ public class FfmpegProcessHost : IDisposable
     private int _dropRingFilled;
     private Thread? _watchdogThread;
 
+    private PipeWriterLoop<VideoFramePacket>? _videoLoop;
+    private PipeWriterLoop<AudioDataPacket>? _audioLoop;
+
+    // Hardware detection is injectable (NET-004 AC3): production uses the registry probe; tests pass a
+    // constant so the encoder×quality table can be asserted without a GPU or ffmpeg.
+    private readonly Func<VideoEncoderChoice> _detectHardware;
+
     private readonly BoundedMediaQueue<VideoFramePacket> _videoQueue;
     private readonly BoundedMediaQueue<AudioDataPacket>? _audioQueue;
     private string? _outputPath;
     
     public event Action<string>? SinkError;
 
+    /// <summary>The encoder actually used this session (AutoHardware resolved to a concrete choice).</summary>
+    public VideoEncoderChoice ResolvedEncoder { get; private set; } = VideoEncoderChoice.AutoHardware;
+
+    /// <summary>Friendly name of <see cref="ResolvedEncoder"/> for display/logging.</summary>
+    public string ResolvedEncoderName => RecordingHealth.EncoderDisplayName(ResolvedEncoder);
+
+    /// <summary>
+    /// Capped FFmpeg stderr tail (kept at ~4 KB by the ErrorDataReceived handler), for the in-app
+    /// diagnostics drawer. Distinct from the stall watchdog: this is the raw diagnostic stream.
+    /// </summary>
+    public string DiagnosticTail => GetLastFfmpegError();
+
     public FfmpegProcessHost(
         BoundedMediaQueue<VideoFramePacket> videoQueue,
-        BoundedMediaQueue<AudioDataPacket>? audioQueue)
+        BoundedMediaQueue<AudioDataPacket>? audioQueue,
+        Func<VideoEncoderChoice>? detectHardware = null)
     {
         _videoQueue = videoQueue;
         _audioQueue = audioQueue;
+        _detectHardware = detectHardware ?? DetectHardwareEncoderFromRegistry;
     }
 
     public bool Start(RecordingConfig config, StreamFormat format, string outputPath)
@@ -104,7 +125,11 @@ public class FfmpegProcessHost : IDisposable
 
         double fps = format.FrameRate > 0 ? format.FrameRate : 60.0;
         string fpsStr = fps.ToString("0.###", CultureInfo.InvariantCulture);
-        string vCodecArgs = GetVideoCodecArguments(config.EncoderChoice, config.Quality);
+
+        // Resolve AutoHardware first (via the injectable detector), then hand the CONCRETE encoder to the
+        // pure argv table. The table never consults the registry, so it is a testable matrix (NET-004 AC3).
+        ResolvedEncoder = FfmpegArguments.Resolve(config.EncoderChoice, _detectHardware);
+        string vCodecArgs = FfmpegArguments.VideoCodecArguments(ResolvedEncoder, config.Quality);
 
         string aInputArgs = "";
         string aCodecArgs = "-an ";
@@ -112,9 +137,7 @@ public class FfmpegProcessHost : IDisposable
         if (hasAudio)
         {
             aInputArgs = $"-thread_queue_size 512 -f f32le -ar {format.SampleRate} -ac {format.Channels} -i \\\\.\\pipe\\{audioPipeName} ";
-            aCodecArgs = config.ContainerFormat == OutputContainerFormat.MOV && config.EncoderChoice == VideoEncoderChoice.ProRes
-                ? "-c:a pcm_s24le "
-                : "-c:a aac -b:a 320k ";
+            aCodecArgs = FfmpegArguments.AudioCodecArguments(config.ContainerFormat, ResolvedEncoder);
         }
 
         // MP4/MOV are fragmented (-frag_keyframe+empty_moov) instead of a
@@ -197,7 +220,19 @@ public class FfmpegProcessHost : IDisposable
         _dropRingIndex = 0;
         _dropRingFilled = 0;
 
-        _videoWorkerThread = new Thread(VideoWriterLoop)
+        // One loop implementation, two instantiations. The error funnel is FailRecording — the same
+        // one function the watchdog uses — and the exactly-once return lives inside the loop.
+        _videoLoop = new PipeWriterLoop<VideoFramePacket>(
+            _videoQueue,
+            ConnectVideoPipe,
+            WriteVideoPacket,
+            isCancelled: () => _disposed,
+            reportError: FailRecording,
+            errorPrefix: "FFmpeg video",
+            onConnected: OnVideoPipeConnected,
+            onDequeued: () => Interlocked.Increment(ref _videoDequeued));
+
+        _videoWorkerThread = new Thread(() => _videoLoop?.Run())
         {
             Name = "Ffmpeg_VideoPipeWriter",
             IsBackground = true,
@@ -207,7 +242,15 @@ public class FfmpegProcessHost : IDisposable
 
         if (hasAudio)
         {
-            _audioWorkerThread = new Thread(AudioWriterLoop)
+            _audioLoop = new PipeWriterLoop<AudioDataPacket>(
+                _audioQueue!,
+                ConnectAudioPipe,
+                WriteAudioPacket,
+                isCancelled: () => _disposed,
+                reportError: FailRecording,
+                errorPrefix: "FFmpeg audio");
+
+            _audioWorkerThread = new Thread(() => _audioLoop?.Run())
             {
                 Name = "Ffmpeg_AudioPipeWriter",
                 IsBackground = true,
@@ -233,163 +276,72 @@ public class FfmpegProcessHost : IDisposable
         }
     }
 
-    private void VideoWriterLoop()
+    // ============================================================================================
+    // Writer loops: ONE implementation (PipeWriterLoop<T>). This host supplies only the
+    // transport-specific pieces — the pipe, the two video-only watchdog hooks, and the error funnel.
+    // ============================================================================================
+
+    /// <summary>
+    /// Performs the (up to 8 s) video pipe handshake. Returns null on success, else the error tail the
+    /// loop reports as "FFmpeg video {tail}".
+    /// </summary>
+    private string? ConnectVideoPipe()
     {
         try
         {
-            if (_videoPipeConnectTask != null)
-            {
-                _videoPipeConnectTask.Wait(8000);
-            }
+            _videoPipeConnectTask?.Wait(8000);
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[Video Pipe Handshake Error] {ex.Message}");
-            if (_isWritingActive)
-            {
-                _isWritingActive = false;
-                SinkError?.Invoke($"FFmpeg video pipe handshake error: {ex.Message}");
-            }
-            return;
+            return $"pipe handshake error: {ex.Message}";
         }
 
-        if (_videoPipe == null || !_videoPipe.IsConnected)
-        {
-            if (_isWritingActive)
-            {
-                _isWritingActive = false;
-                SinkError?.Invoke("FFmpeg video pipe failed to connect.");
-            }
-            return;
-        }
-
-        // Arm the watchdog only now so the (up to 8s) pipe-connect handshake can
-        // never count toward the stall threshold.
-        _videoConnected = true;
-        Interlocked.Exchange(ref _lastVideoWriteMs, Environment.TickCount64);
-
-        while (!_disposed)
-        {
-            if (_videoQueue.TryDequeue(out var packet))
-            {
-                Interlocked.Increment(ref _videoDequeued);
-                try
-                {
-                    if (_videoPipe != null && _videoPipe.IsConnected)
-                    {
-                        _videoPipe.Write(packet.Buffer, 0, packet.Length);
-                        Interlocked.Exchange(ref _lastVideoWriteMs, Environment.TickCount64);
-                    }
-                    else
-                    {
-                        if (_isWritingActive)
-                        {
-                            _isWritingActive = false;
-                            SinkError?.Invoke("FFmpeg video pipe disconnected unexpectedly.");
-                        }
-                        break; // leave iteration via finally, which returns the buffer exactly once
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"[Video Pipe Write Error] {ex.Message}");
-                    if (_isWritingActive)
-                    {
-                        _isWritingActive = false;
-                        SinkError?.Invoke($"FFmpeg video write error: {ex.Message}");
-                    }
-                    break; // leave iteration via finally, which returns the buffer exactly once
-                }
-                finally
-                {
-                    LargeArrayPool.Shared.Return(packet.Buffer);
-                }
-            }
-            else
-            {
-                if (_videoQueue.IsAddingCompleted && _videoQueue.Count == 0)
-                {
-                    break; // done
-                }
-                _videoQueue.Wait(20);
-            }
-        }
+        return _videoPipe == null || !_videoPipe.IsConnected ? "pipe failed to connect." : null;
     }
 
-    private void AudioWriterLoop()
+    private string? ConnectAudioPipe()
     {
         try
         {
-            if (_audioPipeConnectTask != null)
-            {
-                _audioPipeConnectTask.Wait(8000);
-            }
+            _audioPipeConnectTask?.Wait(8000);
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[Audio Pipe Handshake Error] {ex.Message}");
-            if (_isWritingActive)
-            {
-                _isWritingActive = false;
-                SinkError?.Invoke($"FFmpeg audio pipe handshake error: {ex.Message}");
-            }
-            return;
+            return $"pipe handshake error: {ex.Message}";
         }
 
-        if (_audioPipe == null || !_audioPipe.IsConnected)
-        {
-            if (_isWritingActive)
-            {
-                _isWritingActive = false;
-                SinkError?.Invoke("FFmpeg audio pipe failed to connect.");
-            }
-            return;
-        }
+        return _audioPipe == null || !_audioPipe.IsConnected ? "pipe failed to connect." : null;
+    }
 
-        while (!_disposed && _audioQueue != null)
-        {
-            if (_audioQueue.TryDequeue(out var packet))
-            {
-                try
-                {
-                    if (_audioPipe != null && _audioPipe.IsConnected)
-                    {
-                        _audioPipe.Write(packet.Buffer, 0, packet.Length);
-                    }
-                    else
-                    {
-                        if (_isWritingActive)
-                        {
-                            _isWritingActive = false;
-                            SinkError?.Invoke("FFmpeg audio pipe disconnected unexpectedly.");
-                        }
-                        break; // leave iteration via finally, which returns the buffer exactly once
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"[Audio Pipe Write Error] {ex.Message}");
-                    if (_isWritingActive)
-                    {
-                        _isWritingActive = false;
-                        SinkError?.Invoke($"FFmpeg audio write error: {ex.Message}");
-                    }
-                    break; // leave iteration via finally, which returns the buffer exactly once
-                }
-                finally
-                {
-                    ArrayPool<byte>.Shared.Return(packet.Buffer);
-                }
-            }
-            else
-            {
-                if (_audioQueue.IsAddingCompleted && _audioQueue.Count == 0)
-                {
-                    break;
-                }
-                _audioQueue.Wait(20);
-            }
-        }
+    private PipeWriteResult WriteVideoPacket(byte[] buffer, int length)
+    {
+        NamedPipeServerStream? pipe = _videoPipe;
+        if (pipe == null || !pipe.IsConnected) return PipeWriteResult.Disconnected;
+
+        pipe.Write(buffer, 0, length);
+        Interlocked.Exchange(ref _lastVideoWriteMs, Environment.TickCount64);
+        return PipeWriteResult.Written;
+    }
+
+    private PipeWriteResult WriteAudioPacket(byte[] buffer, int length)
+    {
+        NamedPipeServerStream? pipe = _audioPipe;
+        if (pipe == null || !pipe.IsConnected) return PipeWriteResult.Disconnected;
+
+        pipe.Write(buffer, 0, length);
+        return PipeWriteResult.Written;
+    }
+
+    /// <summary>
+    /// Arms the stall watchdog. Runs only once the video pipe has actually connected, so the handshake
+    /// can never be counted toward the stall threshold.
+    /// </summary>
+    private void OnVideoPipeConnected()
+    {
+        _videoConnected = true;
+        Interlocked.Exchange(ref _lastVideoWriteMs, Environment.TickCount64);
     }
 
     private void WatchdogLoop()
@@ -552,7 +504,13 @@ public class FfmpegProcessHost : IDisposable
 
     private static VideoEncoderChoice _detectedHardware = VideoEncoderChoice.AutoHardware;
 
-    private static VideoEncoderChoice DetectHardwareEncoder()
+    /// <summary>
+    /// Default hardware detector: probes the display-class registry for a known GPU vendor and caches
+    /// the verdict process-wide. Kept here (not in <see cref="FfmpegArguments"/>) because it is the one
+    /// part of the argv decision that touches the machine; <see cref="FfmpegArguments"/> stays pure and
+    /// takes this as an injected delegate so tests can bypass the registry.
+    /// </summary>
+    private static VideoEncoderChoice DetectHardwareEncoderFromRegistry()
     {
         if (_detectedHardware != VideoEncoderChoice.AutoHardware)
         {
@@ -597,33 +555,6 @@ public class FfmpegProcessHost : IDisposable
         }
 
         return _detectedHardware = VideoEncoderChoice.CpuX264;
-    }
-
-    private static string GetVideoCodecArguments(VideoEncoderChoice encoder, QualityPreset quality)
-    {
-        int crf = quality switch
-        {
-            QualityPreset.Ultra => 16,
-            QualityPreset.High => 20,
-            QualityPreset.Medium => 24,
-            QualityPreset.Low => 28,
-            _ => 20
-        };
-
-        if (encoder == VideoEncoderChoice.AutoHardware)
-        {
-            encoder = DetectHardwareEncoder();
-        }
-
-        return encoder switch
-        {
-            VideoEncoderChoice.NvidiaNvenc => $"-c:v h264_nvenc -preset p4 -cq {crf} -pix_fmt yuv420p",
-            VideoEncoderChoice.IntelQuickSync => $"-c:v h264_qsv -global_quality {crf} -pix_fmt yuv420p",
-            VideoEncoderChoice.AmdAmf => $"-c:v h264_amf -quality quality -pix_fmt yuv420p",
-            VideoEncoderChoice.ProRes => "-c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le",
-            VideoEncoderChoice.CpuX264 => $"-c:v libx264 -preset ultrafast -tune zerolatency -crf {crf} -pix_fmt yuv420p",
-            _ => $"-c:v libx264 -preset ultrafast -tune zerolatency -crf {crf} -pix_fmt yuv420p"
-        };
     }
 
     public void Dispose()
@@ -671,7 +602,9 @@ public class FfmpegProcessHost : IDisposable
         _audioPipeConnectTask = null;
         _videoWorkerThread = null;
         _audioWorkerThread = null;
-        
+        _videoLoop = null;
+        _audioLoop = null;
+
         GC.SuppressFinalize(this);
     }
 }
