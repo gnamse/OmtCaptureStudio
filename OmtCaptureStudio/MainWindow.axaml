@@ -144,7 +144,11 @@
                             <ColumnDefinition Width="Auto"/> <!-- 5: Network Label -->
                             <ColumnDefinition Width="1*" MinWidth="130" MaxWidth="280"/> <!-- 6: Network Adapter ComboBox -->
                             <ColumnDefinition Width="Auto"/> <!-- 7: Refresh Targets/Devices/Networks Button -->
-                            <ColumnDefinition Width="Auto"/> <!-- 8: Broadcast Toggle Button -->
+                            <!-- NET-014: the freed toggle column is now the selection hint. ELASTIC with
+                                 MinWidth 0 so it shrinks and trims before it can push the row's action
+                                 button out of the window (the P1-01 lesson). MaxWidth caps it at wide sizes. -->
+                            <ColumnDefinition Width="*" MinWidth="0" MaxWidth="260"/> <!-- 8: select hint -->
+                            <ColumnDefinition Width="Auto"/> <!-- 9: Start/Stop Broadcasting -->
                         </Grid.ColumnDefinitions>
 
                         <Border Grid.Column="0" Background="{DynamicResource StudioSurfaceElevated}" BorderBrush="{DynamicResource StudioBorderSubtle}" BorderThickness="1" CornerRadius="{DynamicResource RadiusSm}" Padding="6,3" Margin="0,0,10,0" VerticalAlignment="Center">
@@ -232,9 +236,28 @@
                             <Path Data="{DynamicResource IconRefresh}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center"/>
                         </Button>
 
-                        <!-- The Broadcast Toggle moved to header row 0 as the revelation entry point
-                             (NET-012). Column 8 is kept so every other Grid.Column assignment in this
-                             row is preserved (DESIGN 5.2). -->
+                        <!-- NET-014: shown only in the SELECTING state, so the operator knows the row is
+                             waiting on them and nothing is live yet. Polite - it is guidance, not an alarm. -->
+                        <TextBlock x:Name="TxtBroadcastSelectHint" Grid.Column="8"
+                                   Text="Choose target, audio and network, then Start Broadcasting"
+                                   IsVisible="{CompiledBinding IsBroadcastSelecting}"
+                                   Foreground="{DynamicResource StudioTextSecondary}" FontSize="11"
+                                   VerticalAlignment="Center" Margin="0,0,10,0"
+                                   TextTrimming="CharacterEllipsis"
+                                   AutomationProperties.Name="Broadcast selection hint"
+                                   AutomationProperties.LiveSetting="Polite"
+                                   ToolTip.Tip="Pick what to broadcast, then press Start Broadcasting to go live"/>
+
+                        <!-- NET-014: the in-row action. Reveal shows it as Start Broadcasting; once live it
+                             reads Stop Broadcasting. MinHeight 30 like every other toolbar control. -->
+                        <Button x:Name="BtnStartStopBroadcast" Grid.Column="9" MinHeight="30"
+                                Content="{CompiledBinding BroadcastActionText}"
+                                Background="{CompiledBinding BroadcastActionBackground}"
+                                Foreground="{CompiledBinding BroadcastActionForeground}"
+                                Padding="12,5" VerticalAlignment="Center" FontWeight="Bold"
+                                AutomationProperties.Name="{CompiledBinding BroadcastActionAutomationName}"
+                                ToolTip.Tip="Start broadcasting the selected target and audio, or stop a live broadcast"
+                                Command="{CompiledBinding StartStopBroadcastCommand}"/>
                     </Grid>
                 </Border>
             </Grid>

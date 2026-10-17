@@ -225,6 +225,45 @@ Gaps between adjacent toolbar controls are **not** implicit: `BtnAdvancedRecordi
 `Margin="8,0,0,0"` and `BtnTestSignal` carries `Margin="0,0,10,0"`, because two controls that abut
 at 0px read as one control (NET-013 P2-02).
 
+### 5.5 The broadcast row is three states (NET-014)
+
+The broadcast row is not a toggle, it is a **reveal → select → start** sequence. The user's report:
+*"when I click Broadcast, it disabled the controls. What I want is: when I click Broadcast, it should
+show the controls and after my selection, there should be an extra button that says Start
+Broadcasting."* Revealing used to start the send, so the pickers the operator still had to touch
+appeared already locked.
+
+| State | Row | Pickers | Row-0 button | In-row action |
+|---|---|---|---|---|
+| **1 Hidden** (default) | invisible | — | reveal | — |
+| **2 Selecting** | visible | **enabled** | hide | `Start Broadcasting` |
+| **3 Live** | visible | **locked** | stop + hide | `Stop Broadcasting` |
+
+The live-lock key is the **live state**, not the reveal: pickers lock when a send is running, because
+that is when a mid-flight change drops receivers. `BroadcastSessionState.IsCaptureSelectorEnabled`
+(`!IsBroadcasting`) is already correct for this and did not change.
+
+**A live broadcast is never orphaned.** Row visibility is
+`IsBroadcastRevealed || IsDesktopCaptureActive` — OR'd with the live state deliberately, so clearing
+the reveal flag cannot hide a running send. The row-0 button's role depends on the state for the same
+reason: while OFF it reveals/hides, and while LIVE it **stops the send and returns to Hidden**
+(stopped, never merely hidden). The in-row action stops but **keeps the panel revealed**, so the
+operator can adjust and restart without the controls vanishing under the cursor.
+
+The start still routes through `SetDesktopCaptureActiveAsync` and therefore through
+`OmtDesktopCaptureGenerator` — the new button is a **UI-state change only**; the send lifecycle and
+its single gate are untouched (the ADR-0005 analog).
+
+The in-row action is `MinHeight="30"` (no second control height), named with the action it will
+perform (`BroadcastActionAutomationName`), tooltipped, and keyboard reachable. It is **always
+enabled** — binding `IsCaptureSelectorEnabled` here would disable *Stop* exactly when it is needed.
+The selecting-state hint carries `AutomationProperties.LiveSetting="Polite"`: it is guidance, not an
+alarm. The hint sits in the freed column 8 as an elastic `*` column (`MinWidth="0"`,
+`TextTrimming="CharacterEllipsis"`, `MaxWidth="260"`), so it shrinks before it can push the action
+button out of the window — the P1-01 lesson applied to row 1. At 950px the three pickers hold their
+`MinWidth`s (130 + 140 + 130 = 400), the action needs ~150, labels and refresh ~216 of the 922
+available, leaving ~156 for the hint, which trims.
+
 ### 5.3 The VU meter is a fixed column
 
 `Grid.Column="1" Width="130"` beside the viewport. It must not stretch with the
@@ -245,7 +284,7 @@ window; its scale is calibrated.
 
 - **Status bar** is the primary channel for what just happened and why.
 - **Live regions are mandatory.** `AutomationProperties.LiveSetting="Assertive"` on status / LIVE / record-stats text; `"Polite"` on high-frequency telemetry (bitrate, dropped frames, audio). Screen readers announce nothing without this.
-- **Lock what cannot change mid-flight.** Target, Audio and Network selectors are disabled while a broadcast is live; Source is disabled while connected. All of them require restarting the sender, so allowing edits mid-stream would silently drop receivers. Reuse the existing enabled-flag pattern rather than inventing a new one.
+- **Lock what cannot change mid-flight — and not a moment before.** Target, Audio and Network selectors are disabled while a broadcast is **live**; revealing the row for selection leaves them **enabled** (NET-014 §5.5). Locking on reveal made the pickers unusable exactly when the operator needed them. Source is disabled while connected. All of them require restarting the sender, so allowing edits mid-stream would silently drop receivers. Reuse the existing enabled-flag pattern rather than inventing a new one.
 - **VU meter** uses `StudioVuMeterGradient` (`#10B981` → `#22C55E` → `#84CC16` → `#EAB308` → `#F59E0B` → `#EF4444` → `#DC2626`), calibrated −60 dBFS to 0 dBFS. Do not restyle it freely; it communicates level by colour.
 - **Modals must trap focus.** The recording-close overlay cycles Tab/Shift+Tab between its two buttons so focus cannot reach the controls behind it.
 

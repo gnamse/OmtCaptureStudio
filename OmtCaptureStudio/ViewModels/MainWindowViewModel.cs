@@ -355,13 +355,37 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         => IsAdvancedRecordingOptionsExpanded = !IsAdvancedRecordingOptionsExpanded;
 
     /// <summary>
-    /// NET-012: the broadcast configuration row is revealed by the BROADCAST state only.
-    ///
-    /// <para>Deliberately keyed to broadcast state and NOT to recording state: collapsing this row must
-    /// never disturb a take. A broadcast switched off mid-recording collapses the row while the
-    /// recording keeps running - the two axes are independent.</para>
+    /// NET-014: the broadcast row is REVEALED for selection before anything is sent. Revealing shows the
+    /// pickers ENABLED; the send only starts when the operator presses Start Broadcasting.
     /// </summary>
-    public bool IsBroadcastRowVisible => IsDesktopCaptureActive;
+    [ObservableProperty]
+    private bool _isBroadcastRevealed;
+
+    /// <summary>
+    /// NET-012/NET-014: the broadcast configuration row's visibility.
+    ///
+    /// <para>Driven by the REVEAL (so the pickers can be worked on before anything is live) and OR'd with
+    /// the live state, so a running broadcast can never be orphaned behind a hidden row.</para>
+    ///
+    /// <para>Deliberately keyed to broadcast state and NOT to recording state: hiding this row must never
+    /// disturb a take.</para>
+    /// </summary>
+    public bool IsBroadcastRowVisible => IsBroadcastRevealed || IsDesktopCaptureActive;
+
+    /// <summary>True in the middle state: the row is open for selection and nothing is being sent yet.</summary>
+    public bool IsBroadcastSelecting => IsBroadcastRowVisible && !IsDesktopCaptureActive;
+
+    /// <summary>The in-row action: arm the live state, or stop it (NET-014).</summary>
+    public string BroadcastActionText => IsDesktopCaptureActive ? "Stop Broadcasting" : "Start Broadcasting";
+
+    /// <summary>States the action, not the state - screen readers announce what the press will do.</summary>
+    public string BroadcastActionAutomationName => BroadcastActionText;
+
+    /// <summary>Stop reads like the app's other stop affordances; Start is the accent call to action.</summary>
+    public IBrush BroadcastActionBackground =>
+        IsDesktopCaptureActive ? RecordStopBrush : TestSignalActiveBrush;
+
+    public IBrush BroadcastActionForeground => StudioPalette.ButtonWhiteForeground;
 
     /// <summary>
     /// The compact broadcast summary substitutes for the row exactly when the row is hidden - the point
@@ -754,6 +778,18 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     {
         // The row's visibility and the collapsed-state summary both ride the broadcast state.
         OnPropertyChanged(nameof(IsBroadcastRowVisible));
+        OnPropertyChanged(nameof(IsBroadcastSelecting));
+        OnPropertyChanged(nameof(IsLiveSettingSummaryVisible));
+        OnPropertyChanged(nameof(LiveSettingSummary));
+        OnPropertyChanged(nameof(BroadcastActionText));
+        OnPropertyChanged(nameof(BroadcastActionAutomationName));
+        OnPropertyChanged(nameof(BroadcastActionBackground));
+    }
+
+    partial void OnIsBroadcastRevealedChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsBroadcastRowVisible));
+        OnPropertyChanged(nameof(IsBroadcastSelecting));
         OnPropertyChanged(nameof(IsLiveSettingSummaryVisible));
         OnPropertyChanged(nameof(LiveSettingSummary));
     }
@@ -935,7 +971,39 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private async Task ToggleDesktopCaptureAsync()
     {
         if (IsRecordingCloseOverlayVisible) return;
-        await SetDesktopCaptureActiveAsync(!IsDesktopCaptureActive);
+
+        // NET-014: while LIVE this button is the DISMISS - it stops the send and hides the panel. A live
+        // broadcast is never orphaned behind a hidden row: it is stopped, not hidden.
+        if (IsBroadcasting)
+        {
+            await SetDesktopCaptureActiveAsync(false);
+            IsBroadcastRevealed = false;
+            return;
+        }
+
+        // While OFF it is the reveal/hide entry only - revealing NEVER starts a send (that was the bug:
+        // the pickers the operator needed to touch appeared already locked).
+        IsBroadcastRevealed = !IsBroadcastRevealed;
+        if (IsBroadcastRevealed && CaptureTargets.Count == 0)
+        {
+            PopulateCaptureTargets();
+        }
+    }
+
+    /// <summary>
+    /// The in-row action (NET-014). Start arms the live state through the SAME single gate as before -
+    /// <see cref="SetDesktopCaptureActiveAsync"/> still owns the OmtDesktopCaptureGenerator lifecycle, so
+    /// the send path is unchanged and this is a UI-state change only.
+    ///
+    /// <para>Stop leaves the panel REVEALED so the operator can adjust and restart without the controls
+    /// vanishing under the cursor.</para>
+    /// </summary>
+    [RelayCommand(AllowConcurrentExecutions = false)]
+    private async Task StartStopBroadcastAsync()
+    {
+        if (IsRecordingCloseOverlayVisible) return;
+
+        await SetDesktopCaptureActiveAsync(!IsBroadcasting);
     }
 
     public async Task SetDesktopCaptureActiveAsync(bool active)
