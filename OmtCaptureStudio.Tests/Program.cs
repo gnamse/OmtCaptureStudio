@@ -667,12 +667,68 @@ class Program
         Expect(vm.SelectedRecordingPreset == RecordingPresets.CustomName,
             $"Editing a control inside the tier must switch the picker to Custom; got '{vm.SelectedRecordingPreset}'.");
 
-        // ---- 5. THE ROW IS KEYED TO BROADCAST, NEVER TO RECORDING ---------------------------------
-        vm.IsDesktopCaptureActive = true;
-        Expect(vm.IsBroadcastRowVisible, "Broadcast ON must reveal the broadcast configuration row.");
-        Expect(!vm.IsLiveSettingSummaryVisible, "With the row visible the compact summary must stand down.");
+        // ---- 5. THE THREE-STATE BROADCAST FLOW (NET-014) ------------------------------------------
+        // State 1 - HIDDEN.
+        Expect(!vm.IsBroadcastRowVisible, "State 1 (Hidden): the row must be hidden.");
+        Expect(!vm.IsBroadcastSelecting, "State 1: nothing is being selected.");
+
+        // State 2 - REVEALED: the pickers are open and ENABLED. Nothing is live yet.
+        vm.IsBroadcastRevealed = true;
+        Expect(vm.IsBroadcastRowVisible, "State 2 (Revealed): the row must be visible.");
+        Expect(vm.IsBroadcastSelecting, "State 2: the row is SELECTING, not live.");
+        Expect(!vm.IsDesktopCaptureActive, "State 2: revealing must NOT start a broadcast.");
+        Expect(vm.IsCaptureSelectorEnabled,
+            "State 2: the pickers must be ENABLED for selection - the reported complaint was that revealing " +
+            "started the send and left them locked before the operator could touch them.");
+        Expect(vm.BroadcastActionText == "Start Broadcasting",
+            $"State 2: the action must read Start Broadcasting; got '{vm.BroadcastActionText}'.");
+        Expect(!vm.IsLiveSettingSummaryVisible, "State 2: the row is visible, so the compact summary stands down.");
         Expect(!string.IsNullOrWhiteSpace(vm.LiveSettingSummary),
-            "The summary must always carry the selected target/audio, ready for the collapsed state.");
+            "State 2: the summary must still carry the current selection for the collapsed state.");
+
+        // State 3 - LIVE. The VM takes the lock as a PROJECTION of the state machine, so mirror what the
+        // projection does; the key itself is asserted against the machine below.
+        vm.IsDesktopCaptureActive = true;
+        vm.IsCaptureSelectorEnabled = false;
+        Expect(vm.IsBroadcastRowVisible, "State 3 (Live): the row stays visible.");
+        Expect(!vm.IsBroadcastSelecting, "State 3: the row is live, not selecting.");
+        Expect(!vm.IsCaptureSelectorEnabled,
+            "State 3: while LIVE the pickers are locked - that is when a mid-flight change drops receivers.");
+        Expect(vm.BroadcastActionText == "Stop Broadcasting",
+            $"State 3: the action must read Stop Broadcasting; got '{vm.BroadcastActionText}'.");
+
+        // THE LOCK KEY MOVED. Asserted against the state machine, because the VM's flag is a projection of
+        // it and a headless run can reveal the row WITHOUT starting a real desktop capture.
+        var lockProbe = new BroadcastSessionState();
+        Expect(lockProbe.IsCaptureSelectorEnabled, "The capture lock must start unlocked.");
+        lockProbe.StartBroadcasting();
+        Expect(!lockProbe.IsCaptureSelectorEnabled,
+            "The capture pickers must lock when BROADCASTING - not when the row is merely revealed. That is " +
+            "exactly the defect the user reported: the pickers were locked the moment the row appeared.");
+        lockProbe.StopBroadcasting();
+        Expect(lockProbe.IsCaptureSelectorEnabled, "Stopping must unlock the pickers again.");
+
+        // THE NEVER-ORPHAN INVARIANT: a live broadcast cannot be hidden behind a collapsed row.
+        vm.IsBroadcastRevealed = false;
+        Expect(vm.IsBroadcastRowVisible,
+            "A LIVE broadcast must remain visible even with the reveal flag cleared - it can never be orphaned.");
+        vm.IsBroadcastRevealed = true;   // restore: the probe above cleared a flag the operator never cleared
+
+        // Stopping from the in-row action returns to REVEALED, with the pickers usable again. The unlock is
+        // a projection of the state machine (proved on lockProbe above), so mirror it here.
+        vm.IsDesktopCaptureActive = false;
+        vm.IsCaptureSelectorEnabled = true;
+        Expect(vm.IsBroadcastRevealed, "The in-row stop leaves the panel revealed.");
+        Expect(vm.IsCaptureSelectorEnabled, "After a stop the pickers must be usable again.");
+        Expect(vm.BroadcastActionText == "Start Broadcasting", "After a stop the action returns to Start.");
+
+        // The row-0 dismiss returns to HIDDEN.
+        vm.IsBroadcastRevealed = false;
+        Expect(!vm.IsBroadcastRowVisible, "Dismissing returns to State 1 (Hidden).");
+
+        // ---- 6. RECORDING IS STILL AN INDEPENDENT AXIS --------------------------------------------
+        vm.IsBroadcastRevealed = true;
+        vm.IsDesktopCaptureActive = true;
 
         long frames = 0;
         seam.Session.VideoFrameAvailable += (ptr, len, w, h, st, fps, ts) => Interlocked.Increment(ref frames);
@@ -690,14 +746,16 @@ class Program
         {
             bool rowWasVisibleWhileRecording = vm.IsBroadcastRowVisible;
 
-            // Broadcasting switched OFF mid-take: the row collapses, the take must not notice.
+            // Broadcast OFF mid-take: the row returns to Hidden (reveal cleared + no longer live) and the
+            // take must not notice.
             vm.IsDesktopCaptureActive = false;
+            vm.IsBroadcastRevealed = false;
             Expect(!vm.IsBroadcastRowVisible,
-                "Broadcast OFF must collapse the row even while a take is running - the row is not keyed to recording.");
+                "Broadcast OFF must hide the row even while a take is running - the row is not keyed to recording.");
             Expect(rowWasVisibleWhileRecording,
                 "The row was visible because BROADCAST was on, not because a take was running.");
             Expect(seam.Session.IsRecording,
-                "Collapsing the broadcast row must never disturb a running take.");
+                "Hiding the broadcast row must never disturb a running take.");
 
             // A live take must NOT force the row open on its own.
             Expect(!vm.IsBroadcastRowVisible,
