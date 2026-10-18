@@ -5,6 +5,7 @@ using System.Threading;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services.Audio;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.Services;
 
 /// <summary>

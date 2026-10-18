@@ -29,7 +29,9 @@ until the app closes, at which point the operator is back to hand-configuring.
 ## Decision
 
 **1. One JSON file, in the non-portable home.** `%LOCALAPPDATA%\OmtCaptureStudio\settings.json` —
-the same directory the ADR-0009 rider put the crash-forensics fallback in. The application directory
+the same directory the NET-010 rider put the crash-forensics fallback in, and which NET-017's
+`LogLocation` now also uses for log lines and crash artifacts when the application directory is not
+writable. The application directory
 is deliberately *not* used: under the installer it is not writable, and a portable ZIP handed between
 machines should not carry the previous operator's folder paths into someone else's session.
 

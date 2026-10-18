@@ -2,6 +2,7 @@ using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services.Sinks;
 using OmtCaptureStudio.Services.Sources;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.Services;
 
 /// <summary>

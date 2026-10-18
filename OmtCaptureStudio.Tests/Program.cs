@@ -8,6 +8,7 @@ using OmtCaptureStudio.Services.Sinks;
 using OmtCaptureStudio.Services.Sources;
 using OmtCaptureStudio.ViewModels;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.Tests;
 
 class Program
@@ -88,6 +89,7 @@ class Program
         TestProgressiveDisclosure();
         TestOperatorSettings();
         TestScheduledStopAndRemainingTime();
+        TestLogLocationAndReadOnlyInstall();
 
         TestMainWindowViewModel();
 
@@ -444,6 +446,7 @@ class Program
             case "0.691": TestProgressiveDisclosure(); break;
             case "0.692": TestOperatorSettings(); break;
             case "0.693": TestScheduledStopAndRemainingTime(); break;
+            case "0.694": TestLogLocationAndReadOnlyInstall(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");
@@ -630,6 +633,108 @@ class Program
     // ================================================================================================
     // NET-016: scheduled stop + the remaining-time readout.
     // ================================================================================================
+    // ================================================================================================
+    // NET-017: one location ladder for logs and forensics + the read-only-install crash link.
+    // ================================================================================================
+    static void TestLogLocationAndReadOnlyInstall()
+    {
+        Console.WriteLine("\n[Step 0.694] Verifying LogLocation (one ladder) + the read-only-install crash link...");
+
+        string root = Path.Combine(Path.GetTempPath(), "omt-logloc-" + Guid.NewGuid().ToString("N"));
+        string primary = Path.Combine(root, "app");
+        string fallback = Path.Combine(root, "localappdata");
+        Directory.CreateDirectory(primary);
+        Directory.CreateDirectory(fallback);
+
+        try
+        {
+            string primaryLogs = Path.Combine(primary, "logs");
+            string primaryDumps = Path.Combine(primary, "crashdumps");
+
+            // ---- 1. THE LADDER AS PURE POLICY (injected probe) ----------------------------------
+            LogLocationResult writable = LogLocation.Resolve(primaryLogs, primaryDumps, fallback, _ => true);
+            Expect(!writable.UsingFallback,
+                "A writable primary must be used as-is - the portable ZIP keeps its own logs and forensics.");
+            Expect(writable.LogDirectory == primaryLogs && writable.DumpDirectory == primaryDumps,
+                "A writable primary must place logs AND dumps in the application directory.");
+
+            LogLocationResult readOnly = LogLocation.Resolve(primaryLogs, primaryDumps, fallback, _ => false);
+            Expect(readOnly.UsingFallback, "A read-only primary must redirect.");
+            Expect(readOnly.LogDirectory == Path.Combine(fallback, "logs"),
+                "LOG LINES must follow the same ladder as the dumps - ONE policy, not two. This is the finding.");
+            Expect(readOnly.DumpDirectory == Path.Combine(fallback, "crashdumps"),
+                "and the dumps follow the same ladder.");
+            Expect(readOnly.PrimaryLogDirectory == primaryLogs && readOnly.PrimaryDumpDirectory == primaryDumps,
+                "The result must still report where the primary WOULD have been, so the redirect can be explained.");
+
+            // ---- 2. END TO END: a read-only install must not lose the lines that led to the crash --
+            CrashForensics.ConfigureLocations(primaryLogs, primaryDumps, fallback, writableProbe: _ => false);
+
+            Expect(CrashForensics.IsUsingFallbackLocation,
+                "A read-only primary must put forensics in the fallback.");
+            Expect(AppLogger.LogDir == Path.Combine(fallback, "logs"),
+                "AppLogger MUST follow the same resolution. Before NET-017 it stayed pinned at the app " +
+                "directory, so on a read-only install every log line was written somewhere it could not be.");
+
+            AppLogger.LogInfo("NET-017 probe: the line BEFORE the fault");
+            AppLogger.Flush();
+
+            string? reportPath = CrashForensics.HandleException(
+                "NET-017 probe", new InvalidOperationException("NET-017 simulated fault"), fatal: false);
+
+            Expect(reportPath != null && File.Exists(reportPath), "The crash report must be written.");
+            Expect(Path.GetDirectoryName(reportPath) == Path.Combine(fallback, "logs"),
+                "The crash report must land in the FALLBACK when the primary is read-only.");
+
+            AppLogger.LogInfo("NET-017 probe: the line AFTER the fault");
+            AppLogger.Flush();
+
+            // THE ASSERTION THAT CLOSES THE FINDING: the report is SURROUNDED by its log lines.
+            string[] daily = Directory.GetFiles(Path.Combine(fallback, "logs"), "????-??-??.log");
+            Expect(daily.Length == 1,
+                $"Exactly one daily log must exist in the fallback; found {daily.Length}.");
+
+            string logText = File.ReadAllText(daily[0]);
+            Expect(logText.Contains("the line BEFORE the fault"),
+                "The log lines written BEFORE the fault must be in the fallback - losing exactly these is " +
+                "what the read-only-install defect did.");
+            Expect(logText.Contains("the line AFTER the fault"),
+                "Log lines must keep flowing to the fallback after the fault as well.");
+            Expect(Path.GetDirectoryName(daily[0]) == Path.GetDirectoryName(reportPath),
+                "The crash report must sit in the SAME directory as the lines that led to it - the " +
+                "report-to-surrounding-lines link that the defect broke.");
+
+            // THE DEFECT, ASSERTED ABSENT: nothing was written where it could not be written.
+            bool primaryHoldsLogs = Directory.Exists(primaryLogs) && Directory.GetFiles(primaryLogs).Length > 0;
+            Expect(!primaryHoldsLogs,
+                "The read-only primary must hold NO log lines at all - not a directory of silent losses.");
+
+            // ---- 3. THE SAME SEAM MOVES THE LOGGING SIDE (one seam, two consumers) ---------------
+            string appLogs = Path.Combine(primary, "logsApp");
+            AppLogger.ConfigureLocation(appLogs);
+            Expect(AppLogger.LogDir == appLogs,
+                "The AppLogger location must be settable through the shared policy, not pinned at type init.");
+            AppLogger.LogInfo("NET-017 probe: writable primary line");
+            AppLogger.Flush();
+            Expect(Directory.GetFiles(appLogs, "????-??-??.log").Length == 1,
+                "With a writable location, log lines must land there instead.");
+        }
+        finally
+        {
+            // Restore production resolution so later steps and the app are unaffected by this probe.
+            CrashForensics.ConfigureLocations(
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs"),
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crashdumps"),
+                LogLocation.FallbackRoot);
+
+            try { Directory.Delete(root, recursive: true); } catch { /* best effort */ }
+        }
+
+        Console.WriteLine(" -> ONE ladder: a read-only install redirects log lines AND crash artifacts together, so " +
+                          "the crash report is surrounded by the lines that led to it - the original defect " +
+                          "asserted absent (the primary holds no log lines at all)!");
+    }
+
     static void TestScheduledStopAndRemainingTime()
     {
         Console.WriteLine("\n[Step 0.693] Verifying STOP AFTER resolution + the remaining-time readout...");

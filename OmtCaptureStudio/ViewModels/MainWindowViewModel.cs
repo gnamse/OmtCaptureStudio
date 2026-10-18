@@ -12,6 +12,7 @@ using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
 using OmtCaptureStudio.Services.Sources;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.ViewModels;
 
 public delegate void VideoFrameReceivedHandler(IntPtr pData, int dataLength, int width, int height, int stride);

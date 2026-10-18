@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
 
-namespace OmtCaptureStudio;
+namespace OmtCaptureStudio.Services.Forensics;
 
 /// <summary>
 /// What the app was doing when it died - the part a stack trace cannot tell you (NET-009).
@@ -68,8 +68,10 @@ public static class CrashForensics
     private const uint MiniDumpNormal = 0x00000000;
     private const uint MiniDumpWithThreadInfo = 0x00001000;
 
-    private static string _primaryLogDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
-    private static string _primaryDumpDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crashdumps");
+    // NET-017: initialized from LogLocation so the directory NAMES exist in exactly one file. These are
+    // only the pre-resolution defaults; ResolveLocations replaces them.
+    private static string _primaryLogDir = LogLocation.PrimaryLogDirectory;
+    private static string _primaryDumpDir = LogLocation.PrimaryDumpDirectory;
     private static string _fallbackRoot = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OmtCaptureStudio");
 
@@ -77,7 +79,7 @@ public static class CrashForensics
     private static string _dumpDir = _primaryDumpDir;
     private static bool _usingFallback;
     private static int _locationsResolved;
-    private static Func<string, bool> _writableProbe = IsDirectoryWritable;
+    private static Func<string, bool> _writableProbe = LogLocation.IsDirectoryWritable;
 
     private static Func<CrashState>? _stateProvider;
     private static int _handling;
@@ -311,24 +313,28 @@ public static class CrashForensics
 
         Volatile.Write(ref _locationsResolved, 1);
 
-        if (_writableProbe(_primaryLogDir) && _writableProbe(_primaryDumpDir))
+        // NET-017: ONE ladder, two consumers. LogLocation decides; the crash artifacts AND AppLogger's
+        // log directory both follow the same answer. Resolving independently is exactly how a read-only
+        // install ended up with a report in the fallback and its surrounding log lines lost.
+        LogLocationResult location = LogLocation.Resolve(
+            _primaryLogDir, _primaryDumpDir, _fallbackRoot, _writableProbe);
+
+        _logDir = location.LogDirectory;
+        _dumpDir = location.DumpDirectory;
+        _usingFallback = location.UsingFallback;
+
+        LogLocation.TryCreateDirectory(_logDir);
+        LogLocation.TryCreateDirectory(_dumpDir);
+
+        // The logging side follows the SAME resolution - this is the line the finding was about.
+        AppLogger.ConfigureLocation(location.LogDirectory);
+
+        if (location.UsingFallback)
         {
-            _logDir = _primaryLogDir;
-            _dumpDir = _primaryDumpDir;
-            _usingFallback = false;
-            return;
+            AppLogger.LogError(
+                $"Log and crash locations redirected - primary not writable ({_primaryDumpDir}). " +
+                $"Log lines, reports and dumps all now go to {location.LogDirectory}.");
         }
-
-        _logDir = Path.Combine(_fallbackRoot, "logs");
-        _dumpDir = Path.Combine(_fallbackRoot, "crashdumps");
-        _usingFallback = true;
-
-        TryCreateDirectory(_logDir);
-        TryCreateDirectory(_dumpDir);
-
-        AppLogger.LogError(
-            $"Crash forensics redirected - primary location not writable ({_primaryDumpDir}). " +
-            $"Reports and dumps now go to {_dumpDir}.");
     }
 
     /// <summary>
@@ -342,30 +348,9 @@ public static class CrashForensics
         _primaryLogDir = primaryLogDir;
         _primaryDumpDir = primaryDumpDir;
         _fallbackRoot = fallbackRoot;
-        _writableProbe = writableProbe ?? IsDirectoryWritable;
+        _writableProbe = writableProbe ?? LogLocation.IsDirectoryWritable;
         Volatile.Write(ref _locationsResolved, 0);
         ResolveLocations();
-    }
-
-    private static bool IsDirectoryWritable(string dir)
-    {
-        try
-        {
-            Directory.CreateDirectory(dir);
-            string probe = Path.Combine(dir, $".write-probe-{Environment.ProcessId}");
-            File.WriteAllText(probe, string.Empty);
-            File.Delete(probe);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static void TryCreateDirectory(string dir)
-    {
-        try { Directory.CreateDirectory(dir); } catch { }
     }
 
     /// <summary>Number of minidumps currently on disk, across every location a run may have used.</summary>

@@ -4,6 +4,7 @@ using Vortice.Direct3D11;
 using Vortice.DXGI;
 using OmtCaptureStudio.Models;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.Services;
 
 /// <summary>Enumerates the host's DXGI monitor outputs as selectable capture targets.</summary>

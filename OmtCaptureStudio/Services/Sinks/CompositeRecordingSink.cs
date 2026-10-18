@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading;
 using OmtCaptureStudio.Models;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.Services.Sinks;
 
 /// <summary>

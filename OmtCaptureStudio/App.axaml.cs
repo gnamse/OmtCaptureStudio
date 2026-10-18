@@ -4,6 +4,7 @@ using Avalonia.Markup.Xaml;
 using OmtCaptureStudio.Services;
 using OmtCaptureStudio.ViewModels;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio;
 
 public partial class App : Application
