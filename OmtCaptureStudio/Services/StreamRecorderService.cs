@@ -22,6 +22,11 @@ public class StreamRecorderService : ITakeRecorder, IDisposable
 {
     private readonly RecordingArm _arm;
 
+    // The arm owns the sink (construction and disposal); this is a read-only second reference to the
+    // SAME instance, held only so a diagnostics read does not have to reach through the arm (NET-020).
+    // Nothing here may act on it - see the class note about putting no decisions in this file.
+    private readonly IRecordingSink _sink;
+
     /// <summary>
     /// Default constructor for the production FFmpeg named pipe sink. The concrete sink is chosen when a
     /// take STARTS rather than here (NET-011): the arm holds its sink from construction, but whether the
@@ -37,7 +42,8 @@ public class StreamRecorderService : ITakeRecorder, IDisposable
     /// <summary>Constructor supporting dependency injection of custom or test recording sinks.</summary>
     public StreamRecorderService(IRecordingSink sink, bool ownsSink = false)
     {
-        _arm = new RecordingArm(sink, ownsSink);
+        _sink = sink ?? throw new ArgumentNullException(nameof(sink));
+        _arm = new RecordingArm(_sink, ownsSink);
 
         _arm.RecordingStarted += path => RecordingStarted?.Invoke(path);
         _arm.RecordingStopped += summary => RecordingStopped?.Invoke(summary);
@@ -45,6 +51,12 @@ public class StreamRecorderService : ITakeRecorder, IDisposable
     }
 
     public bool IsRecording => _arm.IsRecording;
+
+    /// <summary>
+    /// Destinations the sink detached, in detach order (NET-020). Zero logic: the arm owns the sink,
+    /// this only reads it for the diagnostics bundle.
+    /// </summary>
+    public IReadOnlyList<string> DetachedDestinationNames => _sink.DetachedDestinationNames;
     public string? CurrentRecordingPath => _arm.CurrentRecordingPath;
     public int CurrentSegmentIndex => _arm.CurrentSegmentIndex;
     public string? CurrentTakeBasePath => _arm.CurrentTakeBasePath;

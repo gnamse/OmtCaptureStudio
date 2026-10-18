@@ -57,6 +57,12 @@ public class CaptureSession : IDisposable
     /// <summary>1-based segment index of the active take (ADR-0002 segment-per-outage).</summary>
     public int RecordingSegmentIndex => _recorder.CurrentSegmentIndex;
 
+    /// <summary>
+    /// Destinations the composite sink detached, in detach order (NET-020). Empty for a
+    /// single-destination take. Surfaced for the diagnostics bundle.
+    /// </summary>
+    public IReadOnlyList<string> DetachedDestinationNames => _recorder.DetachedDestinationNames;
+
     /// <summary>True while the input-health watchdog is armed (a take is active over a watched source).</summary>
     public bool IsInputHealthWatched => _inputWatchdog.IsArmed;
 

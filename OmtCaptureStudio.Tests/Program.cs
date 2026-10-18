@@ -3435,10 +3435,127 @@ class Program
             CrashForensics.ConfigureLocations(logDirsBefore[0], dumpDirsBefore[0], fallbackBefore);
         }
 
+        // ---- 8. THE DETACH CHAIN: sink -> service -> session -> the generated readout ---------------
+        // Brief item 1 wants the composite's detach history in diagnostics.txt. This drives a REAL
+        // composite until a child detaches and then walks the whole chain the bundle reads through.
+        {
+            const string ChainPrimary = "C:/take/chain.mp4";
+            const string ChainBackup = "D:/take/chain.mp4";
+            var chainConfig = new RecordingConfig { OutputDirectory = Path.GetTempPath(), FilenamePrefix = "DiagChain" };
+            var chainFormat = new StreamFormat { Width = 320, Height = 240, FrameRate = 10.0, SampleRate = 48000, Channels = 2 };
+            IntPtr chainFrame = System.Runtime.InteropServices.Marshal.AllocHGlobal(64);
+
+            try
+            {
+                var keepsWriting = new ScriptedRecordingSink("primary");
+                var goesAway = new ScriptedRecordingSink("backup")
+                {
+                    ThrowOnVideo = new IOException("the backup folder went away")
+                };
+
+                using var composite = new CompositeRecordingSink(
+                    new CompositeChild("primary", keepsWriting, ChainPrimary),
+                    new CompositeChild("backup", goesAway, ChainBackup));
+
+                var chained = new StreamRecorderService(composite);
+                using var chainedSession = new CaptureSession(new AudioEngine(), chained);
+
+                // The honest default: nothing detached, and every layer says so rather than guessing.
+                Expect(composite.DetachedDestinationNames.Count == 0,
+                    "A fresh composite must report no detached destination.");
+                Expect(chained.DetachedDestinationNames.Count == 0,
+                    "The service must forward the empty list, not invent one.");
+                Expect(chainedSession.DetachedDestinationNames.Count == 0,
+                    "The session must forward the empty list too - a single/healthy take has detached nothing.");
+
+                composite.Initialize(chainConfig, chainFormat, ChainPrimary);
+                composite.WriteVideo(chainFrame, 64);   // the backup child throws -> it detaches
+
+                Expect(composite.DetachedChildNames.Count == 1 && composite.DetachedChildNames[0] == "backup",
+                    $"The failing child must be reported as detached; got [{string.Join(",", composite.DetachedChildNames)}].");
+
+                var viaService = chained.DetachedDestinationNames;
+                Expect(viaService.Count == 1 && viaService[0] == "backup",
+                    $"StreamRecorderService must forward the composite's detach list unchanged; got [{string.Join(",", viaService)}].");
+
+                var viaSession = chainedSession.DetachedDestinationNames;
+                Expect(viaSession.Count == 1 && viaSession[0] == "backup",
+                    $"CaptureSession must surface the composite's detach list - the bundle reaches it no other way; got [{string.Join(",", viaSession)}].");
+
+                // ...and it survives all the way into the generated readout.
+                string fanOutText = DiagnosticsBundle.BuildDiagnosticsText(live with { DetachedChildNames = viaSession });
+                Expect(fanOutText.Contains("detached: backup"),
+                    "A destination detached by the REAL composite must appear in the generated diagnostics.txt.");
+                Expect(!fanOutText.Contains("no destination was detached"),
+                    "The readout must not claim nothing detached while naming a detached destination.");
+
+                // The DIM default is the OTHER half: a sink that cannot detach anything reports nothing.
+                // Declared as the INTERFACE on purpose - a default interface member is only reachable
+                // through the interface, never on the implementing class. Same for HasSurvivingDestination.
+                IRecordingSink plainSink = new ScriptedRecordingSink("only-destination");
+                using (plainSink)
+                {
+                    Expect(plainSink.DetachedDestinationNames.Count == 0,
+                        "A single-destination sink must report no detached destination (the honest DIM default).");
+                }
+
+                // ...and the VIEW MODEL must CONSUME the chain rather than the empty stub it carried
+                // before this pass. Build a view model over the chained session and read the archive it
+                // actually writes - that is the only assertion that discriminates the wiring.
+                string[] chainLogsBefore = CrashForensics.LogDirectories();
+                string[] chainDumpsBefore = CrashForensics.DumpDirectories();
+                string chainFallbackBefore = CrashForensics.FallbackRoot;
+
+                string chainRoot = Path.Combine(root, "vm-chain");
+                string chainLogs = Path.Combine(chainRoot, "logs");
+                string chainDumps = Path.Combine(chainRoot, "crashdumps");
+                Directory.CreateDirectory(chainLogs);
+                Directory.CreateDirectory(chainDumps);
+
+                try
+                {
+                    CrashForensics.ConfigureLocations(chainLogs, chainDumps, Path.Combine(chainRoot, "fallback"));
+
+                    using var chainDiscovery = new OmtDiscoveryService();
+                    using var chainVm = new MainWindowViewModel(chainedSession, chainDiscovery);
+                    chainVm.CreateDiagnosticsBundleCommand.Execute(null);
+
+                    string chainDir = Path.Combine(chainRoot, DiagnosticsBundle.BundleFolder);
+                    string[] chainWritten = Directory.Exists(chainDir)
+                        ? Directory.GetFiles(chainDir, "*.zip")
+                        : Array.Empty<string>();
+                    Expect(chainWritten.Length == 1,
+                        $"The view model must write exactly one archive over the chained session; found {chainWritten.Length}.");
+
+                    string chainReadout;
+                    using (var zip = ZipFile.OpenRead(chainWritten[0]))
+                    using (var reader = new StreamReader(zip.GetEntry(DiagnosticsBundle.DiagnosticsEntryName)!.Open()))
+                    {
+                        chainReadout = reader.ReadToEnd();
+                    }
+
+                    Expect(chainReadout.Contains("detached: backup"),
+                        "The VIEW MODEL's bundle must carry the composite's detach history, not the empty stub " +
+                        $"it returned before the completion pass. Readout tail: {chainReadout.Substring(Math.Max(0, chainReadout.Length - 220))}");
+                    Expect(!chainReadout.Contains("no destination was detached"),
+                        "The view model must not claim nothing detached while naming a detached destination.");
+                }
+                finally
+                {
+                    CrashForensics.ConfigureLocations(chainLogsBefore[0], chainDumpsBefore[0], chainFallbackBefore);
+                }
+            }
+            finally
+            {
+                System.Runtime.InteropServices.Marshal.FreeHGlobal(chainFrame);
+            }
+        }
+
         try { Directory.Delete(root, recursive: true); } catch { }
 
         Console.WriteLine(" -> Readout, dual-location collection, global keep-last-N, the empty edge, a " +
-                          "non-throwing write failure, and a real export through the view model all verified!");
+                          "non-throwing write failure, a real export through the view model, and the full " +
+                          "detach chain into diagnostics.txt all verified!");
     }
 
     /// <summary>Writes a file with an explicit timestamp, so keep-last-N is deterministic.</summary>

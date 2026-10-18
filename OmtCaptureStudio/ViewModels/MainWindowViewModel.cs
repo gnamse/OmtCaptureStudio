@@ -2490,12 +2490,14 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
-    /// Destinations the composite sink detached. Always empty today: the composite sink is reached
-    /// through <c>CaptureSession</c> -> <c>StreamRecorderService</c>, neither of which exposes it, and
-    /// wiring that is a fence crossing (flagged in the NET-020 report). The detach events themselves are
-    /// still in the bundled log lines, where NET-011 reports each one exactly once.
+    /// Destinations the composite sink detached, for the bundle's fan-out section. Read through the
+    /// session's public surface; guarded because a diagnostics read must never be what breaks a run.
     /// </summary>
-    private static IReadOnlyList<string> DetachedDestinationNames() => Array.Empty<string>();
+    private IReadOnlyList<string> DetachedDestinationNames()
+    {
+        try { return _session.DetachedDestinationNames; }
+        catch { return Array.Empty<string>(); }
+    }
 
     private static string[] SafeDirectories(Func<string[]> read)
     {

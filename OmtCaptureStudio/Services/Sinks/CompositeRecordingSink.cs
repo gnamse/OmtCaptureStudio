@@ -111,6 +111,12 @@ public sealed class CompositeRecordingSink : IRecordingSink
         }
     }
 
+    /// <summary>
+    /// Destinations this composite has detached, in detach order (NET-020). The sink's public face of
+    /// <see cref="DetachedChildNames"/>, so the diagnostics bundle never has to know the concrete type.
+    /// </summary>
+    public IReadOnlyList<string> DetachedDestinationNames => DetachedChildNames;
+
     /// <summary>Frames the composite actually fanned out.</summary>
     public long VideoFramesWritten => Interlocked.Read(ref _videoFramesWritten);
 
