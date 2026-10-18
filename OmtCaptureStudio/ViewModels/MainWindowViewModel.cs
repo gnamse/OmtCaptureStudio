@@ -499,6 +499,108 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// <summary>True while a preset is being applied, so the per-axis hooks don't flip the picker back.</summary>
     private bool _applyingRecordingPreset;
 
+    // ============================================================================================
+    // ADR-0006: operator settings persistence.
+    //
+    // The composition root attaches the store BEFORE this ViewModel is bound to the window, so the
+    // restored values are already in place for the first render (no visible flicker from default to
+    // restored). Persisting rides the existing change hooks below: one immediate full-file write per
+    // committed change - the file is a few hundred bytes, so a debounce would buy nothing and would
+    // introduce a window in which a crash loses the last change.
+    // ============================================================================================
+
+    private SettingsStore? _settingsStore;
+
+    /// <summary>While true, changes are APPLIED but not written back - restoring must be silent.</summary>
+    private bool _isRestoringSettings;
+
+    /// <summary>
+    /// ADR-0006: the persisted values the recording UI does not expose - the ADR-0002 watchdog
+    /// thresholds, the filename prefix and the scheduled instants (NET-016 gives the last one a control).
+    /// A new take is seeded from these, so a restored value is HONOURED rather than merely stored.
+    /// </summary>
+    private RecordingConfig _operatorDefaults = new();
+
+    /// <summary>
+    /// Applies restored settings and attaches the store. Called once, by the composition root, before
+    /// the window binds. Nothing is written here - nothing has changed yet.
+    /// </summary>
+    public void AttachSettings(SettingsStore store, OperatorSettings restored)
+    {
+        // BOTH guards, for two different reasons: _isRestoringSettings stops any of these assignments
+        // writing a file (nothing has changed yet), and _applyingRecordingPreset stops the preset-name
+        // assignment below from APPLYING the preset and overwriting a restored axis with the preset's
+        // idea of it - the file's per-axis values are the authority.
+        _isRestoringSettings = true;
+        _applyingRecordingPreset = true;
+        try
+        {
+            _operatorDefaults = SettingsStore.ToConfig(restored, _operatorDefaults);
+
+            SelectedContainerFormat = _operatorDefaults.ContainerFormat;
+            SelectedEncoderChoice = _operatorDefaults.EncoderChoice;
+            SelectedQualityPreset = _operatorDefaults.Quality;
+            OutputDirectory = _operatorDefaults.OutputDirectory;
+            BackupOutputDirectory = _operatorDefaults.BackupOutputDirectory ?? string.Empty;
+
+            SelectedRolloverMinutes = OptionFor(RolloverMinuteOptions, _operatorDefaults.SegmentRolloverMinutes);
+            SelectedRolloverGigabytes = OptionFor(RolloverGigabyteOptions, _operatorDefaults.SegmentRolloverGigabytes);
+            SelectedMaxDuration = OptionFor(MaxDurationOptions, _operatorDefaults.MaxDurationMinutes);
+            SelectedScheduleDelay = OptionFor(ScheduleDelayOptions, _operatorDefaults.ScheduledStartDelayMinutes);
+
+            // Restored by name, never by index - and only if it is a name this build still knows.
+            if (!string.IsNullOrWhiteSpace(restored.SelectedPreset)
+                && RecordingPresetNames.Contains(restored.SelectedPreset))
+            {
+                SelectedRecordingPreset = restored.SelectedPreset!;
+            }
+        }
+        finally
+        {
+            _applyingRecordingPreset = false;
+            _isRestoringSettings = false;
+        }
+
+        // Attach last, so none of the assignments above could have written a file.
+        _settingsStore = store;
+    }
+
+    /// <summary>
+    /// ADR-0006: the config for a new take - the operator's persisted (non-UI) fields as the BASE, with
+    /// the live UI selections layered on top. Seeding from <see cref="RecordingConfig"/>'s own defaults
+    /// is what used to happen; now a restored watchdog threshold or filename prefix is actually used.
+    /// </summary>
+    private RecordingConfig BuildRecordingConfigFromUi()
+    {
+        var config = _operatorDefaults.Clone();
+
+        config.ContainerFormat = SelectedContainerFormat;
+        config.EncoderChoice = SelectedEncoderChoice;
+        config.Quality = SelectedQualityPreset;
+        config.OutputDirectory = OutputDirectory?.Trim() ?? string.Empty;
+        config.BackupOutputDirectory = string.IsNullOrWhiteSpace(BackupOutputDirectory)
+            ? null
+            : BackupOutputDirectory.Trim();
+        config.SegmentRolloverMinutes = SelectedRolloverMinutes?.Value ?? 0;
+        config.SegmentRolloverGigabytes = SelectedRolloverGigabytes?.Value ?? 0;
+        config.MaxDurationMinutes = SelectedMaxDuration?.Value ?? 0;
+        config.ScheduledStartDelayMinutes = SelectedScheduleDelay?.Value ?? 0;
+
+        return config;
+    }
+
+    /// <summary>
+    /// ADR-0006: one immediate full-file write per committed change. Never throws and never surfaces a
+    /// failure to the operator - a settings write must not be able to interrupt a take.
+    /// </summary>
+    private void PersistSettings()
+    {
+        if (_settingsStore is null || _isRestoringSettings) return;
+
+        _operatorDefaults = BuildRecordingConfigFromUi();
+        _settingsStore.Save(SettingsStore.FromConfig(_operatorDefaults, SelectedRecordingPreset));
+    }
+
     // 8. Status & Telemetry
     [ObservableProperty]
     private string _statusText = "Ready. Discovering OMT sources on network...";
@@ -734,6 +836,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
         // NET-008: a manual container change means the config no longer matches a named preset.
         MarkRecordingPresetCustom();
+
+        PersistSettings();   // ADR-0006
     }
 
     partial void OnSelectedSourceChanged(OmtSourceInfo? value)
@@ -1727,25 +1831,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
             DateTime nowUtc = DateTime.UtcNow;
 
-            var config = new RecordingConfig
-            {
-                ContainerFormat = SelectedContainerFormat,
-                EncoderChoice = SelectedEncoderChoice,
-                Quality = SelectedQualityPreset,
-                OutputDirectory = outDir,
-
-                // NET-011: a blank backup folder means a single destination, exactly as before.
-                BackupOutputDirectory = string.IsNullOrWhiteSpace(BackupOutputDirectory)
-                    ? null
-                    : BackupOutputDirectory.Trim(),
-
-                // NET-008: segmented / scheduled capture, read from the bound option selections so the
-                // config can never carry a value the operator cannot see in the UI.
-                SegmentRolloverMinutes = SelectedRolloverMinutes?.Value ?? 0,
-                SegmentRolloverGigabytes = SelectedRolloverGigabytes?.Value ?? 0,
-                MaxDurationMinutes = SelectedMaxDuration?.Value ?? 0,
-                ScheduledStartDelayMinutes = SelectedScheduleDelay?.Value ?? 0
-            };
+            // ADR-0006: built from the persisted operator defaults + the live UI selections. The
+            // segmented/scheduled values are read from the bound option selections, so the config can
+            // never carry a value the operator cannot see in the UI.
+            var config = BuildRecordingConfigFromUi();
 
             // A start delay is resolved to an absolute instant HERE, once, so what the arm evaluates is
             // a plain timestamp compare rather than a moving target.
@@ -1831,10 +1920,20 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// </summary>
     partial void OnSelectedRecordingPresetChanged(string value)
     {
-        if (_applyingRecordingPreset) return;
+        if (_applyingRecordingPreset)
+        {
+            // ADR-0006: still persist - the preset name itself is a persisted field, and the axis hooks
+            // that fired during application were suppressed by the guard.
+            PersistSettings();
+            return;
+        }
 
         RecordingPreset? preset = RecordingPresets.FindByName(value);
-        if (preset == null) return; // "Custom" - nothing to apply
+        if (preset == null)
+        {
+            PersistSettings(); // "Custom" - nothing to apply, but the name is still the operator's choice
+            return;
+        }
 
         _applyingRecordingPreset = true;
         try
@@ -1857,6 +1956,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             _applyingRecordingPreset = false;
         }
+
+        // ADR-0006: the preset choice and every axis it set are persisted together, after the guard is
+        // released, so the file records the post-apply state rather than an intermediate one.
+        PersistSettings();
     }
 
     /// <summary>
@@ -1878,11 +1981,42 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
-    partial void OnSelectedEncoderChoiceChanged(VideoEncoderChoice value) => MarkRecordingPresetCustom();
-    partial void OnSelectedQualityPresetChanged(QualityPreset value) => MarkRecordingPresetCustom();
-    partial void OnSelectedRolloverMinutesChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
-    partial void OnSelectedRolloverGigabytesChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
-    partial void OnSelectedMaxDurationChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
+    partial void OnSelectedEncoderChoiceChanged(VideoEncoderChoice value)
+    {
+        MarkRecordingPresetCustom();
+        PersistSettings();   // ADR-0006
+    }
+
+    partial void OnSelectedQualityPresetChanged(QualityPreset value)
+    {
+        MarkRecordingPresetCustom();
+        PersistSettings();   // ADR-0006
+    }
+
+    partial void OnSelectedRolloverMinutesChanged(RecordingChoiceOption value)
+    {
+        MarkRecordingPresetCustom();
+        PersistSettings();   // ADR-0006
+    }
+
+    partial void OnSelectedRolloverGigabytesChanged(RecordingChoiceOption value)
+    {
+        MarkRecordingPresetCustom();
+        PersistSettings();   // ADR-0006
+    }
+
+    partial void OnSelectedMaxDurationChanged(RecordingChoiceOption value)
+    {
+        MarkRecordingPresetCustom();
+        PersistSettings();   // ADR-0006
+    }
+
+    // ADR-0006: the destination fields and the start delay had no hook before - persistence needs one.
+    partial void OnOutputDirectoryChanged(string value) => PersistSettings();
+
+    partial void OnBackupOutputDirectoryChanged(string value) => PersistSettings();
+
+    partial void OnSelectedScheduleDelayChanged(RecordingChoiceOption value) => PersistSettings();
 
     /// <summary>
     /// Picks the optional second destination (NET-011). Reuses the same folder-picker hook as the

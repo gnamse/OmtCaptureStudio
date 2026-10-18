@@ -86,6 +86,7 @@ class Program
         TestCompositeRecordingSink();
         TestCompositeRecordingWiring();
         TestProgressiveDisclosure();
+        TestOperatorSettings();
 
         TestMainWindowViewModel();
 
@@ -440,6 +441,7 @@ class Program
             case "0.689": TestCompositeRecordingSink(); break;
             case "0.690": TestCompositeRecordingWiring(); break;
             case "0.691": TestProgressiveDisclosure(); break;
+            case "0.692": TestOperatorSettings(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");
@@ -620,6 +622,219 @@ class Program
     /// row's collapse keyed to BROADCAST state only (never recording), the locking composition, and the
     /// preset-Custom flow working from inside the tier.
     /// </summary>
+// ================================================================================================
+    // ADR-0006: operator settings persistence.
+    // ================================================================================================
+    static void TestOperatorSettings()
+    {
+        Console.WriteLine("\n[Step 0.692] Verifying operator settings persistence (load/save/validate/fallback)...");
+
+        string root = Path.Combine(Path.GetTempPath(), "omt-settings-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string settingsPath = Path.Combine(root, "settings.json");
+
+        try
+        {
+            // ---- 1. MISSING FILE: a first run is all-defaults, and nothing is quarantined. ----------
+            var store = new SettingsStore(settingsPath);
+            OperatorSettings first = store.Load();
+            Expect(store.LastOutcome == SettingsLoadOutcome.Missing,
+                "A missing settings file must report Missing.");
+            Expect(first.OutputDirectory is null && first.SelectedPreset is null,
+                "A missing file must leave every field unset, so defaults are in force.");
+            Expect(!File.Exists(settingsPath + ".corrupt"),
+                "A missing file must NOT be quarantined - there is nothing to quarantine.");
+
+            // ---- 2. ROUND TRIP: config -> JSON -> load -> identical values. --------------------------
+            string destination = Path.Combine(root, "takes");
+            string backupDir = Path.Combine(root, "backup");
+            Directory.CreateDirectory(destination);
+            Directory.CreateDirectory(backupDir);
+
+            var original = new RecordingConfig
+            {
+                ContainerFormat = OutputContainerFormat.MKV,
+                EncoderChoice = VideoEncoderChoice.NvidiaNvenc,
+                Quality = QualityPreset.Ultra,
+                OutputDirectory = destination,
+                BackupOutputDirectory = backupDir,
+                FilenamePrefix = "MORNING_SHOW",
+                InputLossThresholdSeconds = 7.5,
+                InputRecoveryGraceSeconds = 45,
+                SegmentRolloverMinutes = 15,
+                SegmentRolloverGigabytes = 2,
+                MaxDurationMinutes = 120,
+                ScheduledStartDelayMinutes = 5,
+                ScheduledStopUtc = new DateTime(2026, 10, 17, 3, 30, 0, DateTimeKind.Utc)
+            };
+
+            Expect(store.Save(SettingsStore.FromConfig(original, "Long event - MKV")),
+                "Saving settings to a writable directory must succeed.");
+            Expect(File.Exists(settingsPath), "Save must create the settings file.");
+
+            var reloadStore = new SettingsStore(settingsPath);
+            OperatorSettings reloaded = reloadStore.Load();
+            Expect(reloadStore.LastOutcome == SettingsLoadOutcome.Loaded,
+                "A well-formed file must load as Loaded.");
+
+            RecordingConfig rt = SettingsStore.ToConfig(reloaded);
+            Expect(rt.ContainerFormat == original.ContainerFormat, "Round trip: container format.");
+            Expect(rt.EncoderChoice == original.EncoderChoice, "Round trip: encoder choice.");
+            Expect(rt.Quality == original.Quality, "Round trip: quality.");
+            Expect(rt.OutputDirectory == original.OutputDirectory, "Round trip: destination.");
+            Expect(rt.BackupOutputDirectory == original.BackupOutputDirectory, "Round trip: backup destination.");
+            Expect(rt.FilenamePrefix == original.FilenamePrefix, "Round trip: filename prefix.");
+            Expect(rt.InputLossThresholdSeconds == original.InputLossThresholdSeconds,
+                "Round trip: ADR-0002 input-loss threshold (a field the UI does not expose).");
+            Expect(rt.InputRecoveryGraceSeconds == original.InputRecoveryGraceSeconds,
+                "Round trip: ADR-0002 reconnect grace period.");
+            Expect(rt.SegmentRolloverMinutes == original.SegmentRolloverMinutes, "Round trip: rollover minutes.");
+            Expect(rt.SegmentRolloverGigabytes == original.SegmentRolloverGigabytes, "Round trip: rollover GB.");
+            Expect(rt.MaxDurationMinutes == original.MaxDurationMinutes, "Round trip: max duration.");
+            Expect(rt.ScheduledStartDelayMinutes == original.ScheduledStartDelayMinutes, "Round trip: start delay.");
+            Expect(rt.ScheduledStopUtc == original.ScheduledStopUtc, "Round trip: scheduled stop instant.");
+            Expect(reloaded.SelectedPreset == "Long event - MKV",
+                "Round trip: the selected preset name.");
+            Expect(rt.HasBackupDestination,
+                "Round trip: the backup destination is still recognised as a real fan-out.");
+
+            // ENUMS ARE NAMES, not ordinals - reordering an enum in code must not reinterpret the file.
+            string json = File.ReadAllText(settingsPath);
+            Expect(json.Contains("\"MKV\"") && json.Contains("\"NvidiaNvenc\"") && json.Contains("\"Ultra\""),
+                "Enums must persist as NAMES, so reordering an enum in code cannot silently " +
+                "reinterpret an operator's saved choice.");
+
+            // ---- 3. VANISHED DRIVE: that FIELD falls back; the rest of the file is honoured. --------
+            var vanishedStore = new SettingsStore(
+                Path.Combine(root, "vanished.json"),
+                directoryExists: existing => existing == destination,
+                logInfo: _ => { });
+
+            Expect(vanishedStore.Save(new OperatorSettings
+                {
+                    ContainerFormat = "MOV",
+                    Quality = "Low",
+                    OutputDirectory = @"Z:\gone\takes",
+                    BackupOutputDirectory = @"Z:\gone\backup",
+                    SelectedPreset = "Low disk - x264 MP4"
+                }),
+                "Saving must succeed even when a path inside it is invalid.");
+
+            OperatorSettings recovered = vanishedStore.Load();
+            Expect(recovered.OutputDirectory is null,
+                "A destination on a vanished drive must fall back to that field's default.");
+            Expect(recovered.BackupOutputDirectory is null,
+                "A backup destination on a vanished drive must fall back to that field's default.");
+            Expect(recovered.Quality == "Low" && recovered.ContainerFormat == "MOV",
+                "A vanished path must cost that field ONLY - the rest of the file must be honoured.");
+            Expect(recovered.SelectedPreset == "Low disk - x264 MP4",
+                "A vanished path must not cost the operator the preset either.");
+            Expect(SettingsStore.ToConfig(recovered).OutputDirectory == new RecordingConfig().OutputDirectory,
+                "The fallen-back destination must be the config's own default, not an empty string.");
+
+            // The usability rule itself: existing folder OK, not-yet-created folder OK while its DRIVE
+            // exists, vanished drive NOT OK.
+            Expect(SettingsStore.IsUsablePath(destination, existing => existing == destination),
+                "An existing folder is usable.");
+            string notYetCreated = Path.Combine(root, "not-yet-created");
+            string? notYetRoot = Path.GetPathRoot(notYetCreated);
+            Expect(SettingsStore.IsUsablePath(notYetCreated, existing => existing == notYetRoot),
+                "A folder that does not exist YET is usable while its DRIVE does - the recorder creates it. " +
+                "Falling back just because the operator has not made the subfolder yet would be obnoxious.");
+            Expect(!SettingsStore.IsUsablePath(@"Z:\gone", _ => false),
+                "A vanished drive is NOT usable - that is the 3 a.m. case this module exists for.");
+            Expect(!SettingsStore.IsUsablePath("", _ => true) && !SettingsStore.IsUsablePath(null, _ => true),
+                "A blank path is never usable.");
+
+            // ---- 4. CORRUPT FILE: all defaults, and the evidence is KEPT. ---------------------------
+            File.WriteAllText(settingsPath, "{ this is not json");
+            var corruptStore = new SettingsStore(settingsPath);
+            OperatorSettings afterCorrupt = corruptStore.Load();
+            Expect(corruptStore.LastOutcome == SettingsLoadOutcome.Corrupt,
+                "An unparseable file must report Corrupt.");
+            Expect(afterCorrupt.OutputDirectory is null && afterCorrupt.SelectedPreset is null,
+                "A corrupt file must fall back to ALL defaults rather than a partial restore.");
+            Expect(File.Exists(settingsPath + ".corrupt"),
+                "The corrupt file must be KEPT (renamed .corrupt) for forensics, never deleted.");
+            Expect(File.ReadAllText(settingsPath + ".corrupt").Contains("this is not json"),
+                "The quarantined file must still hold the original bytes.");
+            Expect(!File.Exists(settingsPath),
+                "The corrupt file is MOVED, so startup is unblocked on the next run.");
+
+            // A SECOND corruption must not destroy the first file's evidence.
+            File.WriteAllText(settingsPath, "{{ also broken");
+            new SettingsStore(settingsPath).Load();
+            Expect(File.Exists(settingsPath + ".corrupt.1"),
+                "A second corruption must quarantine to .corrupt.1 rather than overwrite the first evidence.");
+
+            // A literal null document is valid JSON but useless settings - corruption, not a crash.
+            File.WriteAllText(settingsPath, "null");
+            var nullStore = new SettingsStore(settingsPath);
+            Expect(nullStore.Load().OutputDirectory is null
+                   && nullStore.LastOutcome == SettingsLoadOutcome.Corrupt,
+                "A literal null document must be treated as corrupt rather than throwing.");
+
+            // ---- 5. WRITE FAILURE: reported, logged, never thrown. ----------------------------------
+            var logged = new List<string>();
+            var unwritable = new SettingsStore(
+                Path.Combine(root, "family", "\0invalid", "settings.json"),
+                logError: logged.Add);
+
+            Expect(!unwritable.Save(reloaded),
+                "A write that cannot land must REPORT failure rather than throwing - a settings write " +
+                "must never be able to interrupt the operator.");
+            Expect(logged.Count > 0,
+                "A failed write must be LOGGED, so the field problem is diagnosable.");
+
+            // ---- 6. THE VIEWMODEL APPLIES RESTORED VALUES, AND WRITES ONLY ON CHANGE. ---------------
+            using (var seam = BuildHeadlessSession())
+            {
+                var vm = seam.ViewModel!;
+                string vmPath = Path.Combine(root, "vm.json");
+                vm.AttachSettings(new SettingsStore(vmPath, logError: _ => { }), reloaded);
+
+                Expect(vm.SelectedContainerFormat == original.ContainerFormat,
+                    "The VM must apply the restored container format.");
+                Expect(vm.SelectedEncoderChoice == original.EncoderChoice,
+                    "The VM must apply the restored encoder choice.");
+                Expect(vm.SelectedQualityPreset == original.Quality, "The VM must apply the restored quality.");
+                Expect(vm.OutputDirectory == original.OutputDirectory,
+                    "The VM must apply the restored destination.");
+                Expect(vm.BackupOutputDirectory == original.BackupOutputDirectory,
+                    "The VM must apply the restored backup destination.");
+                Expect(vm.SelectedRecordingPreset == "Long event - MKV",
+                    "The VM must restore the preset NAME, not re-apply the preset over the restored axes.");
+                Expect(vm.SelectedRolloverMinutes?.Value == 15,
+                    "The VM must map the restored rollover onto a real picker option.");
+                Expect(vm.SelectedMaxDuration?.Value == 120,
+                    "The VM must map the restored max duration onto a real picker option.");
+                Expect(!File.Exists(vmPath),
+                    "RESTORING must not write a file - nothing has changed yet.");
+
+                // A committed change now writes immediately.
+                vm.SelectedQualityPreset = QualityPreset.Low;
+                Expect(File.Exists(vmPath), "A committed change must write the settings file immediately.");
+                string written = File.ReadAllText(vmPath);
+                Expect(written.Contains("\"Low\""), "The written file must carry the new value.");
+                Expect(written.Contains("takes"),
+                    "The written file must still carry the destination the operator had set.");
+
+                // Changing the destination writes too (a field that had no change hook before NET-015).
+                vm.OutputDirectory = Path.Combine(root, "other-takes");
+                Expect(File.ReadAllText(vmPath).Contains("other-takes"),
+                    "A destination change must persist - the folder is the field the operator most needs back.");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* best effort */ }
+        }
+
+        Console.WriteLine(" -> Settings persist across a relaunch: round trip exact, a corrupt file is quarantined " +
+                          "with its evidence kept, a vanished drive costs only that field, a failed write is " +
+                          "logged not thrown, and restoring is silent while a real change writes immediately!");
+    }
+
     static void TestProgressiveDisclosure()
     {
         Console.WriteLine("\n[Step 0.691] Verifying progressive disclosure (advanced tier, collapsed broadcast row)...");
