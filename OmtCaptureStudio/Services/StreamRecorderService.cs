@@ -18,7 +18,7 @@ namespace OmtCaptureStudio.Services;
 /// <para>Deliberately NOT a place to add recording logic: if you are tempted to put a decision in
 /// this file, it belongs in the arm.</para>
 /// </summary>
-public class StreamRecorderService : IDisposable
+public class StreamRecorderService : ITakeRecorder, IDisposable
 {
     private readonly RecordingArm _arm;
 
