@@ -496,6 +496,21 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private RecordingChoiceOption _selectedScheduleDelay = ScheduleDelayOptions[0];
 
+    /// <summary>
+    /// NET-016: "stop after N minutes". Deliberately the SAME shape as START IN (a delay measured from
+    /// the moment the take is armed) rather than a time-of-day picker: the start precedent is
+    /// delay-based, and a delay means the same thing whether the operator armed at 2 p.m. or 3 a.m.
+    /// The horizon is longer than START IN's because a take is usually longer than a wait.
+    /// </summary>
+    public static IReadOnlyList<RecordingChoiceOption> StopAfterOptions { get; } = new RecordingChoiceOption[]
+    {
+        new("Off", 0), new("15 min", 15), new("30 min", 30), new("1 h", 60),
+        new("2 h", 120), new("4 h", 240), new("8 h", 480)
+    };
+
+    [ObservableProperty]
+    private RecordingChoiceOption _selectedStopAfter = StopAfterOptions[0];
+
     /// <summary>True while a preset is being applied, so the per-axis hooks don't flip the picker back.</summary>
     private bool _applyingRecordingPreset;
 
@@ -513,6 +528,33 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     /// <summary>While true, changes are APPLIED but not written back - restoring must be silent.</summary>
     private bool _isRestoringSettings;
+
+    // ------------------------------------------------------------------------------------------
+    // NET-016: the remaining-time readout.
+    //
+    // The countdown is projected on the EXISTING UI health tick from the existing pure
+    // RecordingBoundaries arithmetic - no new timer. The active take's clock is held here because the
+    // ViewModel is what armed the take; nothing on the transport path is touched.
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>The config the ACTIVE take was armed with - the boundary arithmetic reads this, not the UI.</summary>
+    private RecordingConfig? _activeTakeConfig;
+
+    private long _activeTakeStartUtcTicks;
+
+    /// <summary>Survives the take clock: a rollover restarts the segment, not the take.</summary>
+    private long _activeSegmentStartUtcTicks;
+
+    /// <summary>Last rendered countdown, so an unchanged second does not rebuild the string.</summary>
+    private int _lastRemainingSeconds = -1;
+
+    private RecordingBoundary _lastRemainingBoundary = RecordingBoundary.None;
+
+    [ObservableProperty]
+    private string _remainingTimeText = string.Empty;
+
+    [ObservableProperty]
+    private bool _isRemainingTimeVisible;
 
     /// <summary>
     /// ADR-0006: the persisted values the recording UI does not expose - the ADR-0002 watchdog
@@ -547,6 +589,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             SelectedRolloverGigabytes = OptionFor(RolloverGigabyteOptions, _operatorDefaults.SegmentRolloverGigabytes);
             SelectedMaxDuration = OptionFor(MaxDurationOptions, _operatorDefaults.MaxDurationMinutes);
             SelectedScheduleDelay = OptionFor(ScheduleDelayOptions, _operatorDefaults.ScheduledStartDelayMinutes);
+            SelectedStopAfter = OptionFor(StopAfterOptions, _operatorDefaults.ScheduledStopAfterMinutes);
 
             // Restored by name, never by index - and only if it is a name this build still knows.
             if (!string.IsNullOrWhiteSpace(restored.SelectedPreset)
@@ -585,6 +628,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         config.SegmentRolloverGigabytes = SelectedRolloverGigabytes?.Value ?? 0;
         config.MaxDurationMinutes = SelectedMaxDuration?.Value ?? 0;
         config.ScheduledStartDelayMinutes = SelectedScheduleDelay?.Value ?? 0;
+        config.ScheduledStopAfterMinutes = SelectedStopAfter?.Value ?? 0;
 
         return config;
     }
@@ -1844,6 +1888,21 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 config.ScheduledStartDelayMinutes = 0;
             }
 
+            // NET-016: the stop-after delay is resolved to an absolute instant HERE, once, exactly as the
+            // start is above - so the arm evaluates a plain timestamp compare rather than a moving target.
+            if (RecordingSchedule.ResolveStopUtc(config, nowUtc) is { } stopUtc)
+            {
+                config.ScheduledStopUtc = stopUtc;
+            }
+
+            // The take clock for the remaining-time readout. Both start now; a rollover restarts only
+            // the segment clock.
+            _activeTakeConfig = config;
+            _activeTakeStartUtcTicks = nowUtc.Ticks;
+            _activeSegmentStartUtcTicks = nowUtc.Ticks;
+            _lastRemainingSeconds = -1;
+            _lastRemainingBoundary = RecordingBoundary.None;
+
             // A new take clears any rollover notice left over from the previous one.
             SegmentContinuationText = string.Empty;
 
@@ -2017,6 +2076,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     partial void OnBackupOutputDirectoryChanged(string value) => PersistSettings();
 
     partial void OnSelectedScheduleDelayChanged(RecordingChoiceOption value) => PersistSettings();
+
+    partial void OnSelectedStopAfterChanged(RecordingChoiceOption value) => PersistSettings();
 
     /// <summary>
     /// Picks the optional second destination (NET-011). Reuses the same folder-picker hook as the
@@ -2274,6 +2335,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         // config re-unlock, no stop verdict, no "saved" copy. It gets its own quiet continuation line.
         if (RecordingHealth.IsSegmentBoundary(summary.Reason))
         {
+            // NET-016: the SEGMENT clock restarts; the TAKE clock does not (the same split ADR-0008's
+            // boundary arithmetic makes). Without this the next-segment countdown would be wrong.
+            _activeSegmentStartUtcTicks = DateTime.UtcNow.Ticks;
+            _lastRemainingSeconds = -1;
+
             string note = RecordingHealth.BuildSegmentContinuationText(summary);
             AppLogger.LogInfo(
                 $"Segment boundary (roller): {summary.Path} (media duration: {summary.MediaDuration}, " +
@@ -2312,6 +2378,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
             double mb = summary.FileSizeBytes / (1024.0 * 1024.0);
             RecordDurationText = "00:00:00";
+
+            // NET-016: the take is over, so the countdown goes with it.
+            _activeTakeConfig = null;
+            ClearRemainingTime();
 
             // A genuine stop supersedes any rollover notice from earlier in the take.
             SegmentContinuationText = string.Empty;
@@ -2389,7 +2459,75 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         // The panel stays up after a stop so the verdict remains readable, and hides once the verdict
         // is cleared by the next take.
         IsRecordingHealthVisible = snapshot.IsRecording || !string.IsNullOrEmpty(StopSummaryText);
+
+        UpdateRemainingTime();
     }
+
+    /// <summary>
+    /// NET-016: the remaining-time readout, projected on the EXISTING health tick - no new timer. The
+    /// arithmetic is the pure <see cref="RecordingBoundaries.NearestTimeBoundary"/>; nothing here reads a
+    /// file, touches the transport, or allocates on the hot path.
+    ///
+    /// <para>The string is rebuilt only when the rendered SECOND or the boundary itself changes, so a tick
+    /// that changes nothing allocates nothing.</para>
+    /// </summary>
+    private void UpdateRemainingTime()
+    {
+        RecordingConfig? config = _activeTakeConfig;
+
+        if (!_session.IsRecording || config is null)
+        {
+            ClearRemainingTime();
+            return;
+        }
+
+        RecordingBoundaryEta? eta = RecordingBoundaries.NearestTimeBoundary(
+            config, _activeTakeStartUtcTicks, _activeSegmentStartUtcTicks, DateTime.UtcNow.Ticks);
+
+        if (eta is not { } nearest)
+        {
+            // Nothing is bounded: no countdown, rather than a countdown to nothing.
+            ClearRemainingTime();
+            return;
+        }
+
+        int seconds = (int)nearest.Remaining.TotalSeconds;
+        if (seconds == _lastRemainingSeconds && nearest.Boundary == _lastRemainingBoundary)
+        {
+            IsRemainingTimeVisible = true;
+            return;
+        }
+
+        _lastRemainingSeconds = seconds;
+        _lastRemainingBoundary = nearest.Boundary;
+
+        // The COUNTDOWN LEADS, so a narrow column trims the label and never the number.
+        RemainingTimeText =
+            $"ends in {FormatRemaining(nearest.Remaining)} · {RemainingBoundaryLabel(nearest.Boundary)}";
+        IsRemainingTimeVisible = true;
+    }
+
+    private void ClearRemainingTime()
+    {
+        _lastRemainingSeconds = -1;
+        _lastRemainingBoundary = RecordingBoundary.None;
+        IsRemainingTimeVisible = false;
+        RemainingTimeText = string.Empty;
+    }
+
+    private static string FormatRemaining(TimeSpan remaining)
+        => remaining.TotalHours >= 1
+            ? $"{(int)remaining.TotalHours:00}:{remaining.Minutes:00}:{remaining.Seconds:00}"
+            : $"{remaining.Minutes:00}:{remaining.Seconds:00}";
+
+    /// <summary>Names WHAT is about to happen, not merely that something is.</summary>
+    private static string RemainingBoundaryLabel(RecordingBoundary boundary) => boundary switch
+    {
+        RecordingBoundary.MaxDuration => "max length",
+        RecordingBoundary.ScheduledStop => "scheduled stop",
+        RecordingBoundary.SegmentRollover => "rollover",
+        _ => string.Empty
+    };
 
     partial void OnStopSummaryTextChanged(string value)
     {

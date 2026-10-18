@@ -247,6 +247,11 @@ public sealed class SettingsStore
             config.ScheduledStopUtc = stopUtc;
         }
 
+        if (settings.ScheduledStopAfterMinutes is { } stopAfter and >= 0)
+        {
+            config.ScheduledStopAfterMinutes = stopAfter;
+        }
+
         return config;
     }
 
@@ -270,7 +275,8 @@ public sealed class SettingsStore
             MaxDurationMinutes = config.MaxDurationMinutes,
             ScheduledStartDelayMinutes = config.ScheduledStartDelayMinutes,
             ScheduledStartUtc = config.ScheduledStartUtc,
-            ScheduledStopUtc = config.ScheduledStopUtc
+            ScheduledStopUtc = config.ScheduledStopUtc,
+            ScheduledStopAfterMinutes = config.ScheduledStopAfterMinutes
         };
     }
 

@@ -87,6 +87,7 @@ class Program
         TestCompositeRecordingWiring();
         TestProgressiveDisclosure();
         TestOperatorSettings();
+        TestScheduledStopAndRemainingTime();
 
         TestMainWindowViewModel();
 
@@ -442,6 +443,7 @@ class Program
             case "0.690": TestCompositeRecordingWiring(); break;
             case "0.691": TestProgressiveDisclosure(); break;
             case "0.692": TestOperatorSettings(); break;
+            case "0.693": TestScheduledStopAndRemainingTime(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");
@@ -625,6 +627,154 @@ class Program
 // ================================================================================================
     // ADR-0006: operator settings persistence.
     // ================================================================================================
+    // ================================================================================================
+    // NET-016: scheduled stop + the remaining-time readout.
+    // ================================================================================================
+    static void TestScheduledStopAndRemainingTime()
+    {
+        Console.WriteLine("\n[Step 0.693] Verifying STOP AFTER resolution + the remaining-time readout...");
+
+        var now = new DateTime(2026, 10, 18, 3, 0, 0, DateTimeKind.Utc);
+        long nowTicks = now.Ticks;
+        long takeStart = nowTicks;
+        long segmentStart = nowTicks;
+        TimeSpan M(double m) => TimeSpan.FromMinutes(m);
+
+        // ---- 1. STOP-AFTER RESOLUTION MIRRORS THE START DELAY ------------------------------------
+        Expect(RecordingSchedule.ResolveStopUtc(new RecordingConfig { ScheduledStopAfterMinutes = 90 }, now)
+                   == now.AddMinutes(90),
+            "A stop-after delay must resolve to an absolute instant measured from the arm, exactly " +
+            "like the start delay resolves ScheduledStartUtc.");
+
+        Expect(RecordingSchedule.ResolveStopUtc(new RecordingConfig(), now) is null,
+            "No stop-after and no absolute instant must resolve to null - an unbounded take.");
+
+        Expect(RecordingSchedule.ResolveStopUtc(
+                   new RecordingConfig { ScheduledStopUtc = now.AddMinutes(20) }, now) == now.AddMinutes(20),
+            "With no delay set, an absolute stop instant must be honoured as-is.");
+
+        Expect(RecordingSchedule.ResolveStopUtc(
+                   new RecordingConfig { ScheduledStopAfterMinutes = 90, ScheduledStopUtc = now.AddMinutes(5) },
+                   now) == now.AddMinutes(90),
+            "A stop-after delay must WIN over an absolute instant, mirroring the start rule - the delay " +
+            "is the more specific instruction.");
+
+        // ---- 2. THE NEAREST TIME BOUNDARY --------------------------------------------------------
+        // max length only
+        RecordingBoundaryEta? eta = RecordingBoundaries.NearestTimeBoundary(
+            new RecordingConfig { MaxDurationMinutes = 120 }, takeStart, segmentStart,
+            nowTicks + M(39).Ticks);
+        Expect(eta is { Boundary: RecordingBoundary.MaxDuration },
+            "With only a max length set, the nearest boundary must be MaxDuration.");
+        Expect(eta!.Value.Remaining == M(81),
+            $"Remaining must be max-minus-elapsed (120-39=81); got {eta.Value.Remaining}.");
+
+        // scheduled stop NEARER than max length
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            new RecordingConfig { MaxDurationMinutes = 120, ScheduledStopUtc = now.AddMinutes(20) },
+            takeStart, segmentStart, nowTicks + M(1).Ticks);
+        Expect(eta is { Boundary: RecordingBoundary.ScheduledStop },
+            "A scheduled stop nearer than the max length must win the readout - the operator needs the " +
+            "boundary that actually happens first.");
+        Expect(eta!.Value.Remaining == M(19), $"Remaining must be to the stop instant; got {eta.Value.Remaining}.");
+
+        // max length NEARER than the scheduled stop (the comparison must go both ways).
+        // 19 min elapsed, max 30 -> 11 min left; the stop is 120 min out, so MaxDuration is nearest.
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            new RecordingConfig { MaxDurationMinutes = 30, ScheduledStopUtc = now.AddMinutes(120) },
+            takeStart, segmentStart, nowTicks + M(19).Ticks);
+        Expect(eta is { Boundary: RecordingBoundary.MaxDuration },
+            "With the max length nearer, MaxDuration must win instead - the switch must be symmetric.");
+        Expect(eta!.Value.Remaining == M(11),
+            $"Remaining must be 30-19=11 min; got {eta.Value.Remaining}.");
+
+        // rollover nearest (segment clock, not take clock)
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            new RecordingConfig { MaxDurationMinutes = 120, SegmentRolloverMinutes = 15 },
+            takeStart, segmentStart, nowTicks + M(12).Ticks);
+        Expect(eta is { Boundary: RecordingBoundary.SegmentRollover },
+            "A rollover due sooner than the max length must win the readout.");
+        Expect(eta!.Value.Remaining == M(3), $"Remaining must be 15-12=3 min; got {eta.Value.Remaining}.");
+
+        // THE TWO CLOCKS ARE INDEPENDENT. Same config, two different elapsed measurements - this is the
+        // split NET-008's boundary arithmetic makes (the take clock survives a rollover; the segment
+        // clock does not), and getting it wrong is how a countdown silently lies.
+        var dualClock = new RecordingConfig { MaxDurationMinutes = 60, SegmentRolloverMinutes = 30 };
+
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            dualClock, takeStart - M(40).Ticks, segmentStart, nowTicks);
+        Expect(eta is { Boundary: RecordingBoundary.MaxDuration } && eta!.Value.Remaining == M(20),
+            "The TAKE clock must be measured from the take start: 40 min into a 60 min max leaves 20 min, " +
+            "even though the segment was just restarted.");
+
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            dualClock, takeStart - M(40).Ticks, segmentStart - M(25).Ticks, nowTicks);
+        Expect(eta is { Boundary: RecordingBoundary.SegmentRollover } && eta!.Value.Remaining == M(5),
+            "The SEGMENT clock must be measured from the segment start: 25 min into a 30 min segment " +
+            "leaves 5 min, and that now beats the take's 20 min.");
+
+        // ---- 3. NOTHING BOUNDED -> NO READOUT ----------------------------------------------------
+        Expect(RecordingBoundaries.NearestTimeBoundary(new RecordingConfig(), takeStart, segmentStart, nowTicks) is null,
+            "An unbounded take must produce NO readout, rather than a countdown to nothing.");
+
+        Expect(RecordingBoundaries.NearestTimeBoundary(
+                   new RecordingConfig { SegmentRolloverGigabytes = 2 }, takeStart, segmentStart, nowTicks) is null,
+            "A SIZE-ONLY rollover must have no countdown: it depends on the achieved bitrate, so any " +
+            "time we printed would be a guess dressed up as a measurement.");
+
+        // ---- 4. OVERDUE CLAMPS TO ZERO, NEVER NEGATIVE -------------------------------------------
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            new RecordingConfig { MaxDurationMinutes = 10 }, takeStart, segmentStart, nowTicks + M(25).Ticks);
+        Expect(eta!.Value.Remaining == TimeSpan.Zero,
+            $"An overdue boundary must clamp to zero, never report negative time; got {eta.Value.Remaining}.");
+
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            new RecordingConfig { ScheduledStopUtc = now.AddMinutes(-5) }, takeStart, segmentStart, nowTicks);
+        Expect(eta!.Value.Remaining == TimeSpan.Zero,
+            "A scheduled stop already in the past must clamp to zero too.");
+
+        // ---- 5. THE STOP-AFTER CHOICE SURVIVES A RELAUNCH -----------------------------------------
+        string root = Path.Combine(Path.GetTempPath(), "omt-stopafter-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            string settingsPath = Path.Combine(root, "settings.json");
+            var store = new SettingsStore(settingsPath);
+            Expect(store.Save(SettingsStore.FromConfig(new RecordingConfig { ScheduledStopAfterMinutes = 60 }, null)),
+                "Saving a stop-after choice must succeed.");
+
+            var reloadStore = new SettingsStore(settingsPath);
+            OperatorSettings reloaded = reloadStore.Load();
+            Expect(reloaded.ScheduledStopAfterMinutes == 60,
+                "The stop-after CHOICE must persist - the operator must not re-pick it every launch.");
+            Expect(SettingsStore.ToConfig(reloaded).ScheduledStopAfterMinutes == 60,
+                "The persisted stop-after choice must map back onto the config.");
+
+            using (var seam = BuildHeadlessSession())
+            {
+                var vm = seam.ViewModel!;
+                vm.AttachSettings(new SettingsStore(Path.Combine(root, "vm.json"), logError: _ => { }), reloaded);
+                Expect(vm.SelectedStopAfter?.Value == 60,
+                    "The VM must map the restored stop-after onto a real picker option (1 h).");
+
+                vm.SelectedStopAfter = MainWindowViewModel.StopAfterOptions.First(o => o.Value == 480);
+                Expect(File.Exists(Path.Combine(root, "vm.json")),
+                    "Changing STOP AFTER must persist immediately.");
+                Expect(File.ReadAllText(Path.Combine(root, "vm.json")).Contains("480"),
+                    "The written file must carry the new stop-after choice.");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* best effort */ }
+        }
+
+        Console.WriteLine(" -> STOP AFTER resolves like START IN (delay wins over absolute, null = unbounded); the " +
+                          "readout picks the nearest clock-driven boundary, stays silent when nothing is bounded, " +
+                          "refuses to guess a size-based rollover, clamps instead of going negative, and the " +
+                          "choice survives a relaunch!");
+    }
+
     static void TestOperatorSettings()
     {
         Console.WriteLine("\n[Step 0.692] Verifying operator settings persistence (load/save/validate/fallback)...");

@@ -58,6 +58,12 @@ public sealed class OperatorSettings
 
     public DateTime? ScheduledStartUtc { get; set; }
     public DateTime? ScheduledStopUtc { get; set; }
+
+    /// <summary>
+    /// NET-016 "stop after N minutes" - the operator's choice, which is what the picker restores. The
+    /// absolute instant it resolves to is per-take and deliberately is NOT what the control reads back.
+    /// </summary>
+    public double? ScheduledStopAfterMinutes { get; set; }
 }
 
 /// <summary>
