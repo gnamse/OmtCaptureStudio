@@ -312,12 +312,26 @@
                                         AutomationProperties.Name="Close FFmpeg diagnostics drawer"
                                         ToolTip.Tip="Hide the diagnostics drawer"
                                         Command="{CompiledBinding ToggleDiagnosticsDrawerCommand}"/>
+                                <Button x:Name="BtnSaveDiagnosticsBundle" Content="Save Bundle" FontSize="10" MinHeight="22" Padding="8,0" Margin="6,0,0,0" VerticalAlignment="Center"
+                                        AutomationProperties.Name="Save diagnostics bundle"
+                                        ToolTip.Tip="Zip the recent logs, crash reports and minidumps, plus a generated readout, to attach to a bug report"
+                                        Command="{CompiledBinding CreateDiagnosticsBundleCommand}"/>
                             </StackPanel>
 
                             <!-- Stop-summary verdict: media-duration parity, recording drops, finalize time. -->
                             <TextBlock DockPanel.Dock="Top" Text="{CompiledBinding StopSummaryText}" IsVisible="{CompiledBinding IsStopSummaryVisible}"
                                        Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,6"
                                        AutomationProperties.LiveSetting="Assertive"/>
+
+                            <!-- NET-020: the next-launch offer (only when dumps are really waiting) and
+                                 the export outcome. LiveSetting is deliberate: both appear without focus. -->
+                            <TextBlock DockPanel.Dock="Top" Text="{CompiledBinding DiagnosticsBundleOfferText}" IsVisible="{CompiledBinding IsDiagnosticsBundleOffered}"
+                                       Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,6"
+                                       AutomationProperties.LiveSetting="Polite"/>
+
+                            <TextBlock DockPanel.Dock="Top" Text="{CompiledBinding DiagnosticsBundleStatusText}" IsVisible="{CompiledBinding IsDiagnosticsBundleStatusVisible}"
+                                       Foreground="{DynamicResource StudioTextPrimary}" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,6"
+                                       AutomationProperties.LiveSetting="Polite"/>
 
                             <ScrollViewer MaxHeight="160" HorizontalScrollBarVisibility="Disabled">
                                 <TextBlock x:Name="TxtDiagnosticTail" Text="{CompiledBinding DiagnosticTailText}" FontFamily="Consolas, monospace" FontSize="10"

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Avalonia.Media;
 using Avalonia.Threading;
@@ -428,6 +429,23 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _isDiagnosticsDrawerOpen;
 
+    // NET-020: diagnostics bundle export. The offer rides the existing next-launch notice - it is
+    // DERIVED from the same fact (dumps present) rather than duplicating the notice, so the operator is
+    // not told twice.
+    [ObservableProperty]
+    private string _diagnosticsBundleStatusText = string.Empty;
+
+    [ObservableProperty]
+    private bool _isDiagnosticsBundleStatusVisible;
+
+    [ObservableProperty]
+    private bool _isDiagnosticsBundleOffered;
+
+    [ObservableProperty]
+    private string _diagnosticsBundleOfferText = string.Empty;
+
+    private int _pendingCrashDumpCount;
+
     // 7. Recording Configuration Choices
     public IReadOnlyList<OutputContainerFormat> ContainerFormats { get; } = Enum.GetValues<OutputContainerFormat>();
 
@@ -753,6 +771,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             });
 
         _asioSelector.ProjectionChanged += ApplyAsioProjection;
+
+        // NET-020: seed the next-launch offer. Cheap and fully guarded (two directory probes behind a
+        // try/catch inside CrashForensics), never a hardware probe, so it is safe to run here.
+        RefreshDiagnosticsOffer();
 
         // Load version info
         string version = "Unknown";
@@ -2384,6 +2406,113 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private void ToggleDiagnosticsDrawer()
     {
         IsDiagnosticsDrawerOpen = !IsDiagnosticsDrawerOpen;
+
+        // Re-count on open: the operator may have created a bundle since launch, and a stale "N dumps
+        // are waiting" would keep asking for something already sent.
+        if (IsDiagnosticsDrawerOpen) RefreshDiagnosticsOffer();
+    }
+
+    /// <summary>
+    /// NET-020: writes one support archive - the recent logs, any crash reports and minidumps from BOTH
+    /// forensics locations, plus the generated readout. Never throws; the outcome is reported in the
+    /// drawer and the status line either way.
+    /// </summary>
+    [RelayCommand]
+    private void CreateDiagnosticsBundle()
+    {
+        DiagnosticsSnapshot snapshot = BuildDiagnosticsSnapshot();
+        string directory = DiagnosticsBundle.DefaultBundleDirectory(snapshot);
+        string path = Path.Combine(directory, DiagnosticsBundle.DefaultFileName(snapshot.GeneratedUtc));
+
+        DiagnosticsBundleResult result = DiagnosticsBundle.Create(snapshot, path);
+
+        DiagnosticsBundleStatusText = result.Summary;
+        IsDiagnosticsBundleStatusVisible = true;
+
+        // Only claim the status line on success - a failure has its own line in the drawer, and
+        // clobbering the operator's current status with an export error would hide the real problem.
+        if (result.Success) StatusText = result.Summary;
+
+        RefreshDiagnosticsOffer();
+    }
+
+    /// <summary>Re-counts dumps and republishes the offer. Cheap; called at launch and on drawer open.</summary>
+    private void RefreshDiagnosticsOffer()
+    {
+        int count = 0;
+        try
+        {
+            count = CrashForensics.CountDumps();
+        }
+        catch
+        {
+            count = 0;
+        }
+
+        _pendingCrashDumpCount = count;
+        IsDiagnosticsBundleOffered = count > 0;
+        DiagnosticsBundleOfferText = count > 0
+            ? $"{count} crash dump(s) from a previous run are waiting - create a diagnostics bundle to attach to a bug report"
+            : string.Empty;
+    }
+
+    /// <summary>
+    /// Gathers the live facts the bundle reports. Read through the existing public surfaces only: the
+    /// version and preflight results the view model already holds, and the session's health snapshot.
+    /// </summary>
+    private DiagnosticsSnapshot BuildDiagnosticsSnapshot()
+    {
+        string[] logDirs = SafeDirectories(() => CrashForensics.LogDirectories());
+        string[] dumpDirs = SafeDirectories(() => CrashForensics.DumpDirectories());
+
+        return new DiagnosticsSnapshot
+        {
+            AppVersion = VersionText,
+            FfmpegVersion = FfmpegVersion,
+            IsRecordingUnavailable = IsRecordingUnavailable,
+            RecordingUnavailableText = RecordingUnavailableText,
+
+            // Stamped the same way ProjectRecordingHealth does it: the session knows nothing about the
+            // preflight, so the app-level fact is attached here (NET-010's pattern).
+            Health = _session.GetRecordingHealthSnapshot() with { FfmpegVersion = FfmpegVersion },
+
+            DetachedChildNames = DetachedDestinationNames(),
+
+            LogDirectory = logDirs[0],
+            PrimaryLogDirectory = logDirs[^1],
+            DumpDirectory = dumpDirs[0],
+            PrimaryDumpDirectory = dumpDirs[^1],
+
+            CrashReportPath = SafeNewestDumpPath(),
+            GeneratedUtc = DateTimeOffset.UtcNow,
+            OsDescription = RuntimeInformation.OSDescription
+        };
+    }
+
+    /// <summary>
+    /// Destinations the composite sink detached. Always empty today: the composite sink is reached
+    /// through <c>CaptureSession</c> -> <c>StreamRecorderService</c>, neither of which exposes it, and
+    /// wiring that is a fence crossing (flagged in the NET-020 report). The detach events themselves are
+    /// still in the bundled log lines, where NET-011 reports each one exactly once.
+    /// </summary>
+    private static IReadOnlyList<string> DetachedDestinationNames() => Array.Empty<string>();
+
+    private static string[] SafeDirectories(Func<string[]> read)
+    {
+        try
+        {
+            string[] dirs = read();
+            if (dirs is { Length: > 0 }) return dirs;
+        }
+        catch { }
+
+        return new[] { string.Empty };
+    }
+
+    private static string? SafeNewestDumpPath()
+    {
+        try { return CrashForensics.NewestDumpPath(); }
+        catch { return null; }
     }
 
     #endregion

@@ -113,6 +113,18 @@ public static class CrashForensics
             : new[] { _primaryDumpDir, _dumpDir };
     }
 
+    /// <summary>
+    /// Both LOG directories the diagnostics bundle must inspect, for exactly the reason
+    /// <see cref="DumpDirectories"/> exists for dumps: a previous run may have fallen back while this
+    /// one does not, and the log lines that led up to a crash are the ones a bundle most needs.
+    /// </summary>
+    public static string[] LogDirectories()
+    {
+        return string.Equals(_primaryLogDir, _logDir, StringComparison.OrdinalIgnoreCase)
+            ? new[] { _logDir }
+            : new[] { _primaryLogDir, _logDir };
+    }
+
     /// <summary>True once <see cref="Install"/> has wired the handlers.</summary>
     public static bool IsInstalled => Volatile.Read(ref _installed) != 0;
 
@@ -417,7 +429,11 @@ public static class CrashForensics
         }
     }
 
-    private static string? NewestDumpPath()
+    /// <summary>
+    /// The newest minidump across every location a run may have used, or null when there is none.
+    /// Public since NET-020 so the diagnostics bundle can name it instead of re-deriving it.
+    /// </summary>
+    public static string? NewestDumpPath()
     {
         string? newest = null;
         DateTime newestTime = DateTime.MinValue;
