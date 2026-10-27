@@ -15,11 +15,28 @@ public static class Program
     [STAThread]
     public static void Main(string[] args)
     {
-        // Ensure all native C++ runtimes and codecs are ready (extracts from single-exe if needed)
-        NativePayloadBootstrapper.Initialize();
+        // NET-009: arm crash forensics FIRST, before anything that can fault. The app's riskiest code is
+        // direct COM vtable interop (ASIO/WASAPI/XAudio2/D3D11/DXGI) and under Native AOT a fault is a
+        // hard native crash with no .NET crash dialog - a handler installed later is a handler that
+        // misses the crash it exists for.
+        CrashForensics.Install();
 
-        BuildAvaloniaApp()
-            .StartWithClassicDesktopLifetime(args);
+        try
+        {
+            // Ensure all native C++ runtimes and codecs are ready (extracts from single-exe if needed)
+            NativePayloadBootstrapper.Initialize();
+
+            BuildAvaloniaApp()
+                .StartWithClassicDesktopLifetime(args);
+        }
+        catch (Exception ex)
+        {
+            // A fault escaping the desktop lifetime - window construction, the first frame, teardown -
+            // would otherwise just make the process disappear. Record it, then let it propagate so the
+            // exit code stays non-zero for scripts and the installer.
+            CrashForensics.HandleException("Program.Main", ex);
+            throw;
+        }
     }
 
     // Avalonia configuration, don't remove; also used by visual designer.

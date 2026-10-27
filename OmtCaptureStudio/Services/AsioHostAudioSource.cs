@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using OmtCaptureStudio.Models;
+using OmtCaptureStudio.Services.Audio;
 
 namespace OmtCaptureStudio.Services;
 
@@ -50,11 +51,9 @@ namespace OmtCaptureStudio.Services;
 /// </summary>
 public sealed unsafe class AsioHostAudioSource : IHostAudioSource
 {
-    private const int TargetSampleRate = WasapiHostAudioSource.TargetSampleRate; // 48000 Hz
-    private const int TargetChannels = WasapiHostAudioSource.TargetChannels;     // 2 (stereo)
-
-    private const int RingCapacitySamples = WasapiHostAudioSource.TargetSampleRate;          // 1.0s of history
-    private const int MaxLatencySamples = WasapiHostAudioSource.TargetSampleRate * 120 / 1000; // 120 ms cap, as WASAPI
+    // Shared audio-layer vocabulary (ADR-0003): the ring policy itself now lives in StereoCaptureRing.
+    private const int TargetSampleRate = HostAudioFormat.TargetSampleRate; // 48000 Hz
+    private const int TargetChannels = HostAudioFormat.TargetChannels;     // 2 (stereo)
 
     private const int CoInitApartmentThreaded = 0x2;
     private const uint ClsCtxInprocServer = 0x1;
@@ -117,13 +116,8 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
     /// </summary>
     public long CallbacksInvoked => Volatile.Read(ref _callbackCount);
 
-    // ---- capture ring (mirrors WasapiEndpointCapture) ------------------------------------------
-    private readonly object _ringLock = new();
-    private readonly float[] _ringLeft = new float[RingCapacitySamples];
-    private readonly float[] _ringRight = new float[RingCapacitySamples];
-    private int _ringReadIndex;
-    private int _ringWriteIndex;
-    private int _ringAvailableSamples;
+    // ---- capture ring: ONE shared implementation (ADR-0003) -------------------------------------
+    private readonly StereoCaptureRing _ring = new();
 
     private float[] _scratchLeft = Array.Empty<float>();   // per-callback conversion target
     private float[] _scratchRight = Array.Empty<float>();
@@ -179,6 +173,11 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
     /// <summary>Driver-reported input latency in frames (informational).</summary>
     public int InputLatencySamples => _inputLatencySamples;
 
+    // ---- IHostAudioSource (ADR-0003 interface widening; kills the caller downcast) --------------
+    public int DeviceSampleRate => _driverActualSampleRate > 0 ? _driverActualSampleRate : TargetSampleRate;
+    public int InputLatencyFrames => _inputLatencySamples;
+    public string? RateNegotiationNote => _negotiationNote;
+
     /// <summary>Driver-reported output latency in frames (informational).</summary>
     public int OutputLatencySamples => _outputLatencySamples;
 
@@ -231,10 +230,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
         }
         else
         {
-            lock (_ringLock)
-            {
-                ReadRingLocked(left, right, samplesPerChannel);
-            }
+            _ring.Read(left, right, samplesPerChannel);
         }
     }
 
@@ -610,12 +606,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
             try { AsioDisposeBuffers(pAsio); } catch { }
         }
 
-        lock (_ringLock)
-        {
-            _ringReadIndex = 0;
-            _ringWriteIndex = 0;
-            _ringAvailableSamples = 0;
-        }
+        _ring.Reset();
 
         if (pAsio != IntPtr.Zero)
         {
@@ -781,10 +772,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
                 Array.Clear(_scratchRight, 0, frames);
             }
 
-            lock (_ringLock)
-            {
-                WriteRingLocked(_scratchLeft, _scratchRight, frames);
-            }
+            _ring.Write(_scratchLeft, _scratchRight, frames);
         }
         finally
         {
@@ -815,58 +803,6 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
             if (b == IntPtr.Zero) continue;
             int bytesPerFrame = SampleTypeSizeBytes(TypeOf(_outputSampleTypes, c));
             new Span<byte>((void*)b, frames * bytesPerFrame).Clear();
-        }
-    }
-
-    // ============================================================================================
-    // Ring buffer (mirrors WasapiEndpointCapture)
-    // ============================================================================================
-
-    private void WriteRingLocked(float[] srcLeft, float[] srcRight, int count)
-    {
-        for (int i = 0; i < count; i++)
-        {
-            _ringLeft[_ringWriteIndex] = srcLeft[i];
-            _ringRight[_ringWriteIndex] = srcRight[i];
-            _ringWriteIndex = (_ringWriteIndex + 1) % RingCapacitySamples;
-
-            if (_ringAvailableSamples < RingCapacitySamples)
-            {
-                _ringAvailableSamples++;
-            }
-            else
-            {
-                _ringReadIndex = (_ringReadIndex + 1) % RingCapacitySamples;
-            }
-        }
-
-        // Bound accumulated latency to ~120 ms so audio never drifts behind video over long sessions.
-        if (_ringAvailableSamples > MaxLatencySamples)
-        {
-            int drop = _ringAvailableSamples - (MaxLatencySamples / 2);
-            _ringReadIndex = (_ringReadIndex + drop) % RingCapacitySamples;
-            _ringAvailableSamples -= drop;
-        }
-    }
-
-    private void ReadRingLocked(Span<float> leftDest, Span<float> rightDest, int wanted)
-    {
-        int copied = 0;
-        int toCopy = Math.Min(wanted, _ringAvailableSamples);
-        while (copied < toCopy)
-        {
-            int contiguous = Math.Min(toCopy - copied, RingCapacitySamples - _ringReadIndex);
-            _ringLeft.AsSpan(_ringReadIndex, contiguous).CopyTo(leftDest.Slice(copied, contiguous));
-            _ringRight.AsSpan(_ringReadIndex, contiguous).CopyTo(rightDest.Slice(copied, contiguous));
-            _ringReadIndex = (_ringReadIndex + contiguous) % RingCapacitySamples;
-            copied += contiguous;
-        }
-        _ringAvailableSamples -= toCopy;
-
-        if (copied < wanted)
-        {
-            leftDest.Slice(copied).Clear();
-            rightDest.Slice(copied).Clear();
         }
     }
 
@@ -1013,16 +949,10 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
         }
 
         // Feed the resampler whatever the ring currently holds (capped) so its latency stays bounded.
-        int feed;
-        lock (_ringLock)
-        {
-            feed = Math.Min(_ringAvailableSamples, resampler.MaxFeedFrames(wanted));
-            if (feed > 0)
-            {
-                EnsurePullCapacity(feed);
-                ReadRingLocked(_pullLeft.AsSpan(0, feed), _pullRight.AsSpan(0, feed), feed);
-            }
-        }
+        // ReadUpTo reports the count in one atomic step, so the pull never has to be sized racily.
+        int maxFeed = Math.Min(resampler.MaxFeedFrames(wanted), _ring.CapacitySamples);
+        EnsurePullCapacity(maxFeed);
+        int feed = _ring.ReadUpTo(_pullLeft.AsSpan(0, maxFeed), _pullRight.AsSpan(0, maxFeed), maxFeed);
         if (feed > 0)
         {
             resampler.Append(_pullLeft, _pullRight, feed);
@@ -1045,162 +975,9 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
         }
     }
 
-    /// <summary>
-    /// Stereo fixed-ratio polyphase windowed-sinc (Blackman-Harris, 96 taps / 64 phases) resampler,
-    /// used only when an ASIO driver refuses to run at 48 kHz. Same kernel ideals as
-    /// <see cref="AudioClockResampler"/> (~92 dB stopband, DC-normalised phases, unit impulse at
-    /// phase 0) but driven by a plain constant input/output rate pair rather than a video-coupled PLL.
-    /// Confined to whichever thread calls it (the <see cref="FillPlanarAudio"/> consumer).
-    /// </summary>
-    private sealed class FixedRatioStereoResampler
-    {
-        private const int HalfWidth = 48;
-        private const int TapCount = HalfWidth * 2; // 96 taps
-        private const int PhaseCount = 64;
-        private const int MaxFifoFrames = 65536;
-
-        private static readonly float[] s_filter = BuildFilter();
-
-        private readonly double _step;       // input frames consumed per output frame
-        private float[] _fifoLeft;
-        private float[] _fifoRight;
-        private int _fifoCount;
-        private double _readPos;
-
-        public FixedRatioStereoResampler(double sourceRate, double targetRate)
-        {
-            if (sourceRate <= 0) sourceRate = TargetSampleRate;
-            if (targetRate <= 0) targetRate = TargetSampleRate;
-            _step = sourceRate / targetRate;
-
-            // Prime with HalfWidth frames of silence so the FIR has left-edge history for sample 0.
-            _fifoLeft = new float[HalfWidth * 2 + 4096];
-            _fifoRight = new float[HalfWidth * 2 + 4096];
-            _fifoCount = HalfWidth;
-            _readPos = HalfWidth;
-        }
-
-        public int MaxFeedFrames(int wanted) => (int)(wanted * 8) + 4096;
-
-        public void Append(float[] left, float[] right, int frames)
-        {
-            if (frames <= 0) return;
-
-            EnsureCapacity(_fifoCount + frames);
-            Array.Copy(left, 0, _fifoLeft, _fifoCount, frames);
-            Array.Copy(right, 0, _fifoRight, _fifoCount, frames);
-            _fifoCount += frames;
-
-            // Safety valve: if no output is ever requested, never grow without bound.
-            if (_fifoCount > HalfWidth + MaxFifoFrames) Compact();
-        }
-
-        /// <summary>Produces up to <paramref name="wanted"/> frames per channel; returns how many were produced.</summary>
-        public int Process(Span<float> leftDest, Span<float> rightDest, int wanted)
-        {
-            if (wanted <= 0) return 0;
-            int limit = Math.Min(wanted, Math.Min(leftDest.Length, rightDest.Length));
-            float[] filter = s_filter;
-            int produced = 0;
-
-            while (produced < limit)
-            {
-                int i = (int)_readPos;
-                // Need HalfWidth-1 frames of history before i and HalfWidth frames of lookahead after.
-                if (i - HalfWidth + 1 < 0 || i + HalfWidth > _fifoCount) break;
-
-                int phase = (int)((_readPos - i) * PhaseCount + 0.5);
-                if (phase >= PhaseCount) phase = PhaseCount - 1;
-                int p = phase * TapCount;
-                int baseIdx = i - HalfWidth + 1;
-
-                double accL = 0.0;
-                double accR = 0.0;
-                for (int t = 0; t < TapCount; t++)
-                {
-                    float k = filter[p + t];
-                    accL += k * _fifoLeft[baseIdx + t];
-                    accR += k * _fifoRight[baseIdx + t];
-                }
-                leftDest[produced] = (float)accL;
-                rightDest[produced] = (float)accR;
-                produced++;
-                _readPos += _step;
-            }
-
-            Compact();
-            return produced;
-        }
-
-        private void Compact()
-        {
-            int dropCount = (int)_readPos - (HalfWidth - 1);
-            int maxDrop = _fifoCount - (HalfWidth + 1); // always retain HalfWidth+1 frames
-            if (dropCount < 0) dropCount = 0;
-            if (dropCount > maxDrop) dropCount = maxDrop;
-            if (dropCount > 0)
-            {
-                int remain = _fifoCount - dropCount;
-                Array.Copy(_fifoLeft, dropCount, _fifoLeft, 0, remain);
-                Array.Copy(_fifoRight, dropCount, _fifoRight, 0, remain);
-                _fifoCount = remain;
-                _readPos -= dropCount;
-            }
-        }
-
-        private void EnsureCapacity(int frames)
-        {
-            if (_fifoLeft.Length < frames)
-            {
-                int size = frames + 4096;
-                Array.Resize(ref _fifoLeft, size);
-                Array.Resize(ref _fifoRight, size);
-            }
-        }
-
-        private static float[] BuildFilter()
-        {
-            var table = new float[PhaseCount * TapCount];
-            for (int q = 0; q < PhaseCount; q++)
-            {
-                double frac = (double)q / PhaseCount;
-                double sum = 0.0;
-                for (int j = 0; j < TapCount; j++)
-                {
-                    double m = j - HalfWidth + 1;   // tap offset from the read index
-                    double t = m - frac;            // signed distance from the ideal sample position
-                    double v = Sinc(t) * BlackmanHarris(t);
-                    table[q * TapCount + j] = (float)v;
-                    sum += v;
-                }
-                if (sum > 1e-9)
-                {
-                    for (int j = 0; j < TapCount; j++)
-                    {
-                        table[q * TapCount + j] = (float)(table[q * TapCount + j] / sum);
-                    }
-                }
-            }
-            return table;
-        }
-
-        private static double Sinc(double t)
-        {
-            if (Math.Abs(t) < 1e-12) return 1.0;
-            double x = Math.PI * t;
-            return Math.Sin(x) / x;
-        }
-
-        /// <summary>Symmetrical 4-term Blackman-Harris window, normalised so w(0) == 1.</summary>
-        private static double BlackmanHarris(double t)
-        {
-            double arg = Math.PI * t / HalfWidth;
-            return 0.35875
-                 + 0.48829 * Math.Cos(arg)
-                 + 0.14128 * Math.Cos(2.0 * arg)
-                 + 0.01168 * Math.Cos(3.0 * arg);
-        }
-    }
+    // ADR-0003 (Slice 2): the resampler itself moved OUT of this class into
+    // Services/Audio/FixedRatioStereoResampler.cs, where it is now the single rate-conversion
+    // policy shared with the WASAPI adapter. It used to be a private nested class here.
 
     // ============================================================================================
     // IASIO vtable call sites (slot numbers include IUnknown's three)

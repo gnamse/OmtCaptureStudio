@@ -51,8 +51,10 @@ Name: "firewalltask"; Description: "Add Windows Defender Firewall rule for OMT n
 [Files]
 ; Publish folder contents (Single-file exe or complete binaries)
 Source: "..\Publish_AOT\*"; DestDir: "{app}"; Excludes: "*.pdb"; Flags: ignoreversion recursesubdirs createallsubdirs
-; Optional: If FFmpeg was placed in tools/, bundle it directly into app folder
-Source: "..\tools\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; FFmpeg is REQUIRED: tools\ffmpeg.exe must be staged before compiling. There is deliberately no
+; skipifsourcedoesntexist here, so a missing tools\ffmpeg.exe fails this compile (build-release.ps1
+; throws even earlier, before iscc is invoked).
+Source: "..\tools\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

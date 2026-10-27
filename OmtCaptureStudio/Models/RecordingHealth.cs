@@ -42,6 +42,52 @@ public readonly record struct RecordingHealthSnapshot
 
     /// <summary>Capped tail of the FFmpeg stderr stream, for the in-app diagnostics drawer.</summary>
     public string DiagnosticTail { get; init; }
+
+    /// <summary>
+    /// The ffmpeg build this session records through, resolved once at startup (NET-010). Lets a field
+    /// report be correlated with an encoder build without having to ask the operator which one they have.
+    /// Empty when the preflight could not read a version.
+    /// </summary>
+    public string FfmpegVersion { get; init; }
+}
+
+/// <summary>
+/// Why a recording stopped (ADR-0005).
+///
+/// <para>Every stop trigger routes through one finalize path, so the only thing that distinguishes
+/// them is the reason — reported on <see cref="RecordingStopSummary"/> and surfaced in the stop
+/// verdict. Before ADR-0005 the low-disk and sink-error paths stopped silently, with no summary at
+/// all.</para>
+/// </summary>
+public enum RecordingStopReason
+{
+    /// <summary>The operator asked to stop (or disconnected / closed the session).</summary>
+    Manual,
+
+    /// <summary>Free space crossed the hard low-water mark; stopped to keep the file playable.</summary>
+    LowDisk,
+
+    /// <summary>The input-health watchdog hit an outage boundary while recording (ADR-0002).</summary>
+    InputLoss,
+
+    /// <summary>The recording transport failed; finalization is best-effort from whatever reached disk.</summary>
+    SinkError,
+
+    /// <summary>The session was disposed while recording.</summary>
+    Dispose,
+
+    /// <summary>
+    /// A segment rollover boundary (NET-008): the segment finalized and the TAKE CONTINUED in the next
+    /// …_partNN. The only reason that is a BOUNDARY rather than a stop - see
+    /// <see cref="RecordingHealth.IsSegmentBoundary"/>.
+    /// </summary>
+    SegmentRollover,
+
+    /// <summary>The take reached its configured maximum duration and stopped (NET-008).</summary>
+    MaxDuration,
+
+    /// <summary>The take reached its scheduled wall-clock stop time and stopped (NET-008).</summary>
+    ScheduledStop
 }
 
 /// <summary>
@@ -61,7 +107,8 @@ public sealed record RecordingStopSummary(
     long AudioChunksDropped,
     int SegmentIndex,
     string EncoderName,
-    string DiagnosticTail)
+    string DiagnosticTail,
+    RecordingStopReason Reason = RecordingStopReason.Manual)
 {
     public RecordingHealthSnapshot ToHealthSnapshot() => new()
     {
@@ -121,6 +168,10 @@ public static class RecordingHealth
     public static string BitrateText(RecordingHealthSnapshot s) =>
         s.IsRecording ? $"{s.AchievedBitrateMbps:F1} Mbps" : "—";
 
+    /// <summary>The resolved ffmpeg build, for the health strip. Never throws on an empty snapshot.</summary>
+    public static string FfmpegText(RecordingHealthSnapshot s) =>
+        string.IsNullOrWhiteSpace(s.FfmpegVersion) ? "—" : s.FfmpegVersion;
+
     public static string DropsText(RecordingHealthSnapshot s) =>
         $"{s.VideoFramesDropped:N0}v / {s.AudioChunksDropped:N0}a";
 
@@ -148,11 +199,42 @@ public static class RecordingHealth
         double delta = Math.Abs(s.MediaDuration.TotalSeconds - s.AudioDuration.TotalSeconds);
         string parity = IsAvParityOk(s) ? "parity OK" : "PARITY MISMATCH";
 
-        return $"Stop verdict: video {s.MediaDuration.TotalSeconds:F2}s vs audio {s.AudioDuration.TotalSeconds:F2}s " +
+        return $"Stop verdict ({ReasonText(summary.Reason)}): video {s.MediaDuration.TotalSeconds:F2}s vs audio {s.AudioDuration.TotalSeconds:F2}s " +
                $"(delta {delta:F2}s, {parity}) | drops {VideoDropsText(s)} | finalize {summary.FinalizeDuration.TotalMilliseconds:F0} ms | " +
                $"segment {summary.SegmentIndex} | {EncoderText(s)} @ {s.AchievedBitrateMbps:F1} Mbps | " +
                $"file {summary.FileSizeBytes / (1024.0 * 1024.0):F1} MB";
     }
+
+    /// <summary>
+    /// True when this reason is a segment BOUNDARY rather than a take stop: the segment finalized and
+    /// the take CONTINUED in the next …_partNN. Only a rollover qualifies (NET-008). Callers use this
+    /// to give a boundary its own quiet rendering instead of the stop verdict.
+    /// </summary>
+    public static bool IsSegmentBoundary(RecordingStopReason reason)
+        => reason == RecordingStopReason.SegmentRollover;
+
+    /// <summary>
+    /// The quiet one-line notice for a rollover boundary (NET-008). An unattended take rolling over
+    /// every 15 minutes must NOT flash an alarming stop verdict each time - the take did not stop - so
+    /// a boundary renders as this continuation line instead of <see cref="BuildStopVerdict"/>. Pure,
+    /// so the UI and the tests agree by construction.
+    /// </summary>
+    public static string BuildSegmentContinuationText(RecordingStopSummary summary)
+        => $"Segment {summary.SegmentIndex} complete \u2014 continuing " +
+           $"({summary.FileSizeBytes / (1024.0 * 1024.0):F1} MB)";
+
+    /// <summary>Operator-facing name for why a recording stopped.</summary>
+    public static string ReasonText(RecordingStopReason reason) => reason switch
+    {
+        RecordingStopReason.SegmentRollover => "segment complete: continuing",
+        RecordingStopReason.LowDisk => "stopped: low disk",
+        RecordingStopReason.InputLoss => "stopped: input lost",
+        RecordingStopReason.SinkError => "stopped: transport failure",
+        RecordingStopReason.MaxDuration => "stopped: max duration",
+        RecordingStopReason.ScheduledStop => "stopped: scheduled stop",
+        RecordingStopReason.Dispose => "stopped: session closed",
+        _ => "stopped by operator"
+    };
 
     /// <summary>Wall-clock span for the log line — the ONLY figure that includes outage dead air.</summary>
     public static string WallClockNote(RecordingStopSummary summary) =>

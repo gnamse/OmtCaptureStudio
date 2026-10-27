@@ -17,7 +17,8 @@ public class CaptureSession : IDisposable
     private readonly bool _ownsDependencies;
     private readonly object _stateLock = new();
     private readonly FrameRateMeter _fpsMeter = new();
-    private readonly AudioClockResampler _audioResampler = new();
+    // The A/V recording clock now lives inside RecordingArm (ADR-0005): the arm must reset it before
+    // flipping the recording gate, so owning it here would put that ordering back out of the arm's reach.
     private bool _disposed;
 
     // ---- ADR-0002 input-loss resilience ----------------------------------------------------------
@@ -81,8 +82,8 @@ public class CaptureSession : IDisposable
         MediaDuration = _recorder.MediaDuration,
         AudioDuration = _recorder.AudioDuration,
         WallClockDuration = _recorder.IsRecording ? _recorder.ElapsedTime : TimeSpan.Zero,
-        AvDriftRatio = _audioResampler.Ratio,
-        AvDriftClamped = _audioResampler.IsRatioClamped,
+        AvDriftRatio = _recorder.AvDriftRatio,
+        AvDriftClamped = _recorder.AvDriftClamped,
         DiagnosticTail = _recorder.DiagnosticTail
     };
 
@@ -127,6 +128,12 @@ public class CaptureSession : IDisposable
     public event Action? InputRecovered;        // frames returned within grace; next segment resumed
     public event Action? InputRecoveryFailed;   // bounded grace expired; take stopped, alarm persists
 
+    // Scheduled / segmented capture events (NET-008). Raised on the same UI health tick as the ADR-0002
+    // events above, so subscribers may touch presentation state directly.
+    public event Action<int>? SegmentRolledOver;  // rollover: the take CONTINUES in segment N
+    public event Action? MaxDurationReached;      // max-duration auto-stop: the take ended
+    public event Action? ScheduledStopReached;    // wall-clock scheduled stop: the take ended
+
     /// <summary>
     /// Default constructor initializing the production engine stack.
     /// </summary>
@@ -155,14 +162,9 @@ public class CaptureSession : IDisposable
         _onLevelsCalculated = levels => AudioLevelsUpdated?.Invoke(levels);
         _onAudioInterleavedAvailable = (buffer, count) =>
         {
-            if (_recorder.IsRecording)
-            {
-                byte[] outBuf = _audioResampler.Process(buffer, count, out int outCount);
-                if (outCount > 0)
-                {
-                    _recorder.WriteAudioData(outBuf, 0, outCount);
-                }
-            }
+            // The arm applies the A/V clock and writes the converted bytes under its own gate, so the
+            // clock and the transport can never disagree about whether a take is live (ADR-0005).
+            _recorder.ProcessAndWriteAudio(buffer, count);
         };
         _onRecordingStarted = path => RecordingStarted?.Invoke(path);
         _onRecordingStopped = summary => RecordingStopped?.Invoke(summary);
@@ -262,7 +264,7 @@ public class CaptureSession : IDisposable
         // 2. Forward to recorder if active
         if (_recorder.IsRecording)
         {
-            _audioResampler.OnVideoFrame();
+            _recorder.OnRecordingVideoFrame();
             _recorder.WriteVideoFrame(pData, length);
         }
     }
@@ -371,12 +373,9 @@ public class CaptureSession : IDisposable
             $"Recording A/V clock: reported {fmt.FrameRate:F2} fps, measured {_fpsMeter.Fps:F2} fps, " +
             $"stamping video at {effectiveFps:F2} fps.");
 
-        // Arm the audio resampler BEFORE recording flips active. The media thread only
-        // touches the resampler while IsRecording is true (guarded in the video/audio
-        // callbacks), so this reset on the UI thread is race-free and published to the
-        // media thread by the volatile IsRecording write inside StartRecording.
-        _audioResampler.Reset(fmt.SampleRate, effectiveFps, fmt.Channels);
-
+        // The arm order — reset the A/V clock, then initialize the sink, then flip the gate — is now
+        // enforced inside RecordingArm.Arm (ADR-0005) rather than being an ordering convention that
+        // lived here as a comment. The clock reset happens before the gate can flip, by construction.
         var effectiveFormat = fmt with { FrameRate = effectiveFps };
         bool started = _recorder.StartRecording(config, effectiveFormat);
         if (started)
@@ -425,6 +424,9 @@ public class CaptureSession : IDisposable
     {
         if (_disposed) return;
 
+        // NET-008: scheduled/segmented-capture boundaries ride the same tick (no timer of their own).
+        EvaluateRecordingBoundaries();
+
         UpdateWatchdogArming();
 
         switch (_inputWatchdog.Poll())
@@ -455,6 +457,53 @@ public class CaptureSession : IDisposable
                 "auto-reconnect and stopping the take. The finalized segment remains playable.");
             EndTake();
             InputRecoveryFailed?.Invoke();
+        }
+    }
+
+    /// <summary>
+    /// NET-008: the scheduled / segmented-capture boundary, evaluated on the UI health tick beside the
+    /// input-loss poll. Pure comparisons - no timer, no allocation, no I/O beyond the size probe a
+    /// configured GB rollover asks for.
+    ///
+    /// <para>A rollover is a Disarm+Arm cycle through the arm's single finalize path and leaves the take
+    /// OPEN, exactly like the ADR-0002 outage boundary. Max-duration and scheduled-stop END the take:
+    /// they run the same <see cref="EndTake"/> plus stop sequence as an operator stop, so the watchdog
+    /// and the take bookkeeping converge on one path.</para>
+    /// </summary>
+    private void EvaluateRecordingBoundaries()
+    {
+        if (!_recorder.IsRecording) return;
+        if (_activeRecordingConfig is not { } config || _activeRecordingFormat is not { } format) return;
+
+        RecordingBoundary boundary = _recorder.EvaluateBoundary(config);
+        if (boundary == RecordingBoundary.None) return;
+
+        switch (boundary)
+        {
+            case RecordingBoundary.SegmentRollover:
+                if (_recorder.RollSegment(config, format, RecordingStopReason.SegmentRollover))
+                {
+                    AppLogger.LogInfo(
+                        $"Segment rollover: recording continues in segment {_recorder.CurrentSegmentIndex}: " +
+                        $"{_recorder.CurrentRecordingPath}");
+                    SegmentRolledOver?.Invoke(_recorder.CurrentSegmentIndex);
+                }
+                break;
+
+            case RecordingBoundary.MaxDuration:
+                AppLogger.LogInfo(
+                    $"Max take duration ({config.MaxDurationMinutes:0.#} min) reached; stopping the take.");
+                EndTake();
+                _recorder.StopRecording(RecordingStopReason.MaxDuration);
+                MaxDurationReached?.Invoke();
+                break;
+
+            case RecordingBoundary.ScheduledStop:
+                AppLogger.LogInfo("Scheduled stop time reached; stopping the take.");
+                EndTake();
+                _recorder.StopRecording(RecordingStopReason.ScheduledStop);
+                ScheduledStopReached?.Invoke();
+                break;
         }
     }
 
@@ -524,7 +573,7 @@ public class CaptureSession : IDisposable
         // return within the grace period.
         if (_recorder.IsRecording)
         {
-            _recorder.StopRecording();
+            _recorder.StopRecording(RecordingStopReason.InputLoss);
         }
 
         InputLost?.Invoke();

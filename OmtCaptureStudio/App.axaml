@@ -55,6 +55,10 @@
         <SolidColorBrush x:Key="StudioHudScrim" Color="#CC18181B"/>
         <SolidColorBrush x:Key="StudioModalScrim" Color="#CC09090B"/>
 
+        <!-- Modal elevation. BoxShadows is a value type, so this token IS the value
+             (declared once, not the Color + SolidColorBrush pair - see DESIGN.md §2). -->
+        <BoxShadows x:Key="StudioShadowModal">0 12 32 0 #CC09090B</BoxShadows>
+
         <!-- Calibrated Broadcast VU Meter Gradient (-60 dBFS to 0 dBFS) -->
         <LinearGradientBrush x:Key="StudioVuMeterGradient" StartPoint="0%,100%" EndPoint="0%,0%">
             <GradientStop Color="#10B981" Offset="0.0"/>
@@ -70,6 +74,9 @@
         <StreamGeometry x:Key="IconRefresh">M4.35 6.4A8 8 0 1 1 4 14 M4 3v4h4</StreamGeometry>
         <StreamGeometry x:Key="IconFolder">M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z</StreamGeometry>
         <StreamGeometry x:Key="IconWarning">M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z M12 9v4 M12 17h.01</StreamGeometry>
+        <!-- NET-012: drawn disclosure chevrons (DESIGN §6 - StreamGeometry only, no glyphs/emoji). -->
+        <StreamGeometry x:Key="IconChevronDown">M5 8 L12 15 L19 8</StreamGeometry>
+        <StreamGeometry x:Key="IconChevronUp">M5 15 L12 8 L19 15</StreamGeometry>
     </Application.Resources>
 
     <Application.Styles>

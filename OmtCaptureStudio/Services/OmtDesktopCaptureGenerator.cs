@@ -7,6 +7,8 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using libomtnet;
 
+using OmtCaptureStudio.Services.Audio;
+
 namespace OmtCaptureStudio.Services;
 
 /// <summary>
@@ -257,8 +259,8 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
 
     private void SendLoop(IFrameSource capturer, OMTSend sender)
     {
-        const int sampleRate = WasapiHostAudioSource.TargetSampleRate;
-        const int channels = WasapiHostAudioSource.TargetChannels;
+        const int sampleRate = HostAudioFormat.TargetSampleRate;
+        const int channels = HostAudioFormat.TargetChannels;
         int samplesPerFrame = sampleRate / _fps;
         int audioSamplesTotal = channels * samplesPerFrame;
 
