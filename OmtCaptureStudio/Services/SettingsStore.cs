@@ -255,12 +255,22 @@ public sealed class SettingsStore
         return config;
     }
 
-    /// <summary>The inverse of <see cref="ToConfig"/>, plus the selected preset name.</summary>
-    public static OperatorSettings FromConfig(RecordingConfig config, string? presetName)
+    /// <summary>
+    /// The inverse of <see cref="ToConfig"/>, plus the selected preset name.
+    /// <para>
+    /// ADR-0011: <paramref name="lastAppMode"/> is the mode the operator last CHOSE — the value that
+    /// pre-highlights a card on the picker. It is deliberately NOT "the mode the window is in": the
+    /// picker always opens first (ADR-0011 decision 1), so returning to it must not erase the
+    /// memory of which mode they used. A null therefore means "never chosen one yet" and the picker
+    /// highlights nothing.
+    /// </para>
+    /// </summary>
+    public static OperatorSettings FromConfig(RecordingConfig config, string? presetName, AppMode? lastAppMode = null)
     {
         return new OperatorSettings
         {
             Version = OperatorSettings.CurrentVersion,
+            LastAppMode = lastAppMode,
             SelectedPreset = presetName,
             ContainerFormat = config.ContainerFormat.ToString(),
             EncoderChoice = config.EncoderChoice.ToString(),

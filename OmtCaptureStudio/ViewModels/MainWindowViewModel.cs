@@ -46,6 +46,18 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private readonly BroadcastSessionState _broadcastState = new();
     private readonly IBroadcastSessionEffects _broadcastEffects;
 
+    // ADR-0011: the SHELL state — which of the three modes the window is showing. Headless and owned
+    // here; the views only project it. Defaults to ModeSelection so the picker is always what opens.
+    private readonly AppModeState _appModeState;
+
+    /// <summary>
+    /// ADR-0011: the mode the operator last CHOSE (the value that pre-highlights a picker card).
+    /// Null means "never chosen one yet" — the picker then highlights nothing. Deliberately NOT the
+    /// live <see cref="CurrentAppMode"/>: returning to the picker must not erase the memory of which
+    /// mode they used (ADR-0011 decision 1, "no auto-skip" + "last mode pre-highlighted").
+    /// </summary>
+    private AppMode? _lastUsedAppMode;
+
     private OmtDesktopCaptureGenerator? _desktopCapture;
 
     // The target currently being broadcast, so live tracking can stop the broadcast if the
@@ -596,6 +608,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             _operatorDefaults = SettingsStore.ToConfig(restored, _operatorDefaults);
 
+            // ADR-0011: remember which card to pre-highlight. Deliberately does NOT enter that mode —
+            // the picker is always what opens (decision 1), and silently skipping it would hide the
+            // choice the ADR says the operator must make.
+            _lastUsedAppMode = restored.LastAppMode;
+
             SelectedContainerFormat = _operatorDefaults.ContainerFormat;
             SelectedEncoderChoice = _operatorDefaults.EncoderChoice;
             SelectedQualityPreset = _operatorDefaults.Quality;
@@ -659,7 +676,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         if (_settingsStore is null || _isRestoringSettings) return;
 
         _operatorDefaults = BuildRecordingConfigFromUi();
-        _settingsStore.Save(SettingsStore.FromConfig(_operatorDefaults, SelectedRecordingPreset));
+        _settingsStore.Save(SettingsStore.FromConfig(_operatorDefaults, SelectedRecordingPreset, _lastUsedAppMode));
     }
 
     // 8. Status & Telemetry
@@ -707,6 +724,42 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     public bool IsRecording => _session.IsRecording;
     public bool IsConnected => _session.IsConnected;
 
+    // ---- ADR-0011: the shell projection -------------------------------------------------------
+
+    /// <summary>The live shell mode. Presentation binds to the visibility flags below, never to this directly.</summary>
+    public AppMode CurrentAppMode => _appModeState.CurrentMode;
+
+    /// <summary>True while the picker is the active shell content.</summary>
+    public bool IsPickerVisible => _appModeState.IsModeSelection;
+
+    /// <summary>True while the capture stack is the active shell content.</summary>
+    public bool IsCaptureModeVisible => _appModeState.CurrentMode == AppMode.CaptureMode;
+
+    /// <summary>True while the broadcast controls are the active shell content.</summary>
+    public bool IsBroadcastModeVisible => _appModeState.CurrentMode == AppMode.BroadcastMode;
+
+    /// <summary>
+    /// ADR-0011 decision 4: "Change Mode" is disabled while a take or a host broadcast is live. A mode
+    /// switch must never silently tear down a running session, so this is the single gate the views read.
+    /// </summary>
+    public bool IsModeChangeAllowed => !IsRecording && !_broadcastState.IsBroadcasting;
+
+    /// <summary>The mode the operator last CHOSE — pre-highlights a picker card. Null = nothing highlighted.</summary>
+    public AppMode? LastUsedAppMode => _lastUsedAppMode;
+
+    /// <summary>True when the Capture card should be pre-highlighted on the picker.</summary>
+    public bool IsCaptureCardHighlighted => _lastUsedAppMode == AppMode.CaptureMode;
+
+    /// <summary>True when the Broadcast card should be pre-highlighted on the picker.</summary>
+    public bool IsBroadcastCardHighlighted => _lastUsedAppMode == AppMode.BroadcastMode;
+
+    /// <summary>The hint shown beside a disabled "Change Mode" affordance — empty when the switch is allowed.</summary>
+    public string ModeChangeBlockedHint => IsRecording
+        ? "Stop the recording before changing modes."
+        : _broadcastState.IsBroadcasting
+            ? "Stop the host broadcast before changing modes."
+            : string.Empty;
+
     /// <summary>The named broadcast-mode state (ADR-0001); all presentation is a projection of it.</summary>
     public BroadcastState BroadcastState => _broadcastState.State;
 
@@ -730,17 +783,21 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     #endregion
 
     public MainWindowViewModel()
-        : this(new CaptureSession(), new OmtDiscoveryService(), ownsDependencies: true)
+        : this(new CaptureSession(), new OmtDiscoveryService(), new AppModeState(), ownsDependencies: true)
     {
     }
 
     public MainWindowViewModel(
         CaptureSession session,
         OmtDiscoveryService discoveryService,
+        AppModeState? appModeState = null,
         bool ownsDependencies = false)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _discoveryService = discoveryService ?? throw new ArgumentNullException(nameof(discoveryService));
+        // Optional so existing construction sites (tests, the parameterless ctor) keep compiling. A
+        // standalone instance starts in ModeSelection, which is the ADR-0011 open state anyway.
+        _appModeState = appModeState ?? new AppModeState();
         _ownsDependencies = ownsDependencies;
         _broadcastEffects = new SessionEffects(_session);
         _updateVideoHudDelegate = UpdateVideoHudOnUIThread;
@@ -818,6 +875,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
         HookEvents();
         ApplyBroadcastStateProjection();
+        ApplyAppModeProjection();
         _discoveryService.Start();
 
         // Seed the capture-target picker, audio device picker, and broadcast network picker
@@ -881,6 +939,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private void HookEvents()
     {
         _broadcastState.StateChanged += OnBroadcastStateChanged;
+        _appModeState.ModeChanged += OnAppModeChanged;
         _discoveryService.SourcesUpdated += OnSourcesUpdated;
 
         _session.VideoFrameAvailable += OnVideoFrameAvailable;
@@ -2188,6 +2247,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             StopSummaryText = string.Empty;
             _recordUiTimer?.Start();
             ProjectRecordingHealth(_session.GetRecordingHealthSnapshot());
+
+            // ADR-0011: "Change Mode" must disable the moment a take goes live. Re-derived here
+            // rather than in the command so every path into "recording" is covered.
+            NotifyModeGateChanged();
         });
     }
 
@@ -2256,6 +2319,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             ProjectRecordingHealth(summary.ToHealthSnapshot());
 
             StatusText = $"Recording completed and saved to {summary.Path}";
+
+            // ADR-0011: the take is over, so "Change Mode" is allowed again.
+            NotifyModeGateChanged();
         });
     }
 
@@ -2274,6 +2340,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             RecordDurationText = "00:00:00";
             RecordStatsText = "Ready";
             StatusText = $"Recording Error: {error}";
+
+            // ADR-0011: the failed take released the session, so the mode gate must reopen.
+            NotifyModeGateChanged();
         });
     }
 
@@ -2400,6 +2469,43 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     partial void OnSegmentContinuationTextChanged(string value)
     {
         IsSegmentContinuationVisible = !string.IsNullOrEmpty(value);
+    }
+
+    // ---- ADR-0011: shell commands ------------------------------------------------------------
+
+    /// <summary>
+    /// ADR-0011: the picker's card action. Enters the chosen operating mode and remembers it as
+    /// <see cref="LastUsedAppMode"/> so the next open pre-highlights the same card. Persists immediately
+    /// — a mode choice is a committed operator intent, not a transient UI state.
+    /// </summary>
+    [RelayCommand]
+    private void SelectMode(AppMode mode)
+    {
+        if (mode == AppMode.ModeSelection)
+        {
+            return; // The picker is the destination of ChangeMode, not a card on it.
+        }
+
+        _lastUsedAppMode = mode;
+        _appModeState.SetMode(mode);
+        PersistSettings();
+        ApplyAppModeProjection();
+    }
+
+    /// <summary>
+    /// ADR-0011 decision 4: "Change Mode" returns to the picker. Refused while a take or a host
+    /// broadcast is live — the guard lives here as well as in the view, so a stale binding can never
+    /// tear a session down.
+    /// </summary>
+    [RelayCommand]
+    private void ChangeMode()
+    {
+        if (!IsModeChangeAllowed)
+        {
+            return;
+        }
+
+        _appModeState.SetMode(AppMode.ModeSelection);
     }
 
     [RelayCommand]
@@ -2564,6 +2670,44 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         // NET-012: the collapsed broadcast row's summary is derived from the same projection, so it is
         // current the moment the row hides.
         OnPropertyChanged(nameof(LiveSettingSummary));
+
+        // ADR-0011: the "Change Mode" gate is a projection of "is anything live", so it re-derives
+        // whenever the broadcast axis moves — no separate bookkeeping in the commands.
+        NotifyModeGateChanged();
+    }
+
+    /// <summary>
+    /// ADR-0011: one projection for the shell. Called on construction and on every mode transition,
+    /// mirroring <see cref="ApplyBroadcastStateProjection"/> — the views read derived flags, never the
+    /// enum, so a new presentation concern is added here once rather than at each call site.
+    /// </summary>
+    private void ApplyAppModeProjection()
+    {
+        OnPropertyChanged(nameof(CurrentAppMode));
+        OnPropertyChanged(nameof(IsPickerVisible));
+        OnPropertyChanged(nameof(IsCaptureModeVisible));
+        OnPropertyChanged(nameof(IsBroadcastModeVisible));
+        OnPropertyChanged(nameof(LastUsedAppMode));
+        OnPropertyChanged(nameof(IsCaptureCardHighlighted));
+        OnPropertyChanged(nameof(IsBroadcastCardHighlighted));
+        NotifyModeGateChanged();
+    }
+
+    /// <summary>
+    /// ADR-0011: "Change Mode" is disabled while a take or a host broadcast is live. Both the gate and
+    /// its explanatory hint are published together so a view can never show an enabled-looking button
+    /// with a stale hint, or a disabled one with no reason.
+    /// </summary>
+    private void NotifyModeGateChanged()
+    {
+        OnPropertyChanged(nameof(IsModeChangeAllowed));
+        OnPropertyChanged(nameof(ModeChangeBlockedHint));
+    }
+
+    /// <summary>One module transition: re-project the shell, and refresh the mode gate.</summary>
+    private void OnAppModeChanged(object? sender, AppModeChangedEventArgs e)
+    {
+        ApplyAppModeProjection();
     }
 
     /// <summary>

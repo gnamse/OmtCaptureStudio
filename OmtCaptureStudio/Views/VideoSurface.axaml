@@ -1,0 +1,108 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:controls="clr-namespace:OmtCaptureStudio.Controls"
+             xmlns:models="clr-namespace:OmtCaptureStudio.Models"
+             xmlns:vm="clr-namespace:OmtCaptureStudio.ViewModels"
+             mc:Ignorable="d"
+             x:Class="OmtCaptureStudio.Views.VideoSurface"
+             x:DataType="vm:MainWindowViewModel">
+        <!-- 2. CENTER AREA: Viewport + Audio VU Meter -->
+        <Grid Background="{DynamicResource StudioBg}"
+              IsEnabled="{CompiledBinding IsMainContentEnabled}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>   <!-- Video Viewport -->
+                <ColumnDefinition Width="130"/> <!-- VU Meter Column -->
+            </Grid.ColumnDefinitions>
+
+            <!-- Video Viewport Container -->
+            <Border Grid.Column="0" Background="{DynamicResource StudioBg}" BorderBrush="{DynamicResource StudioBorder}" BorderThickness="0,0,1,0" ClipToBounds="True">
+                <Grid>
+                    <!-- Actual Video Rendering Surface -->
+                    <controls:VideoViewportControl x:Name="VideoViewport" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+
+                    <!-- No Signal / Placeholder Overlay -->
+                    <Border x:Name="NoSignalOverlay" Background="{DynamicResource StudioBg}" Opacity="0.95" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                            IsVisible="{CompiledBinding IsNoSignalOverlayVisible}">
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <TextBlock Text="NO SIGNAL" Foreground="{DynamicResource StudioTextMuted}" FontSize="28" FontWeight="Black" HorizontalAlignment="Center" Margin="0,0,0,8"/>
+                            <TextBlock Text="Select an OMT source from the toolbar and click Connect, or start the Test Signal" 
+                                       Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" HorizontalAlignment="Center"
+                                       TextWrapping="Wrap" TextAlignment="Center" Margin="24,0"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Input-loss alarm banner (ADR-0002). Visibility and text are projections of the
+                         BroadcastState outage states (Reconnecting / InputLost), not set ad hoc. -->
+                    <Border x:Name="InputLossBanner" VerticalAlignment="Top" HorizontalAlignment="Stretch" Margin="8,44,8,0"
+                            Background="{DynamicResource StudioAccentDanger}" CornerRadius="{DynamicResource RadiusSm}" Padding="10,6"
+                            IsVisible="{CompiledBinding IsInputLossBannerVisible}">
+                        <TextBlock Text="{CompiledBinding InputLossBannerText}" Foreground="{DynamicResource StudioTextOnAccent}"
+                                   FontSize="12" FontWeight="Bold" TextWrapping="Wrap" TextAlignment="Center"
+                                   AutomationProperties.LiveSetting="Assertive"/>
+                    </Border>
+
+                    <!-- Diagnostics drawer (FEAT-07): the capped FFmpeg stderr tail plus the stop verdict. -->
+                    <Border x:Name="DiagnosticsDrawer" VerticalAlignment="Bottom" HorizontalAlignment="Stretch" Margin="8"
+                            Background="{DynamicResource StudioHudScrim}" BorderBrush="{DynamicResource StudioBorderSubtle}" BorderThickness="1"
+                            CornerRadius="{DynamicResource RadiusSm}" Padding="10,8" MaxHeight="240"
+                            IsVisible="{CompiledBinding IsDiagnosticsDrawerOpen}"
+                            AutomationProperties.Name="FFmpeg diagnostics drawer">
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,6">
+                                <TextBlock Text="FFMPEG DIAGNOSTICS" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource StudioTextMuted}" VerticalAlignment="Center"/>
+                                <TextBlock Text="{CompiledBinding RecordingHealthEncoderText}" FontSize="10" Foreground="{DynamicResource StudioTextSecondary}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                <Button x:Name="BtnCloseDiagnostics" Content="Close" FontSize="10" MinHeight="22" Padding="8,0" Margin="10,0,0,0" VerticalAlignment="Center"
+                                        AutomationProperties.Name="Close FFmpeg diagnostics drawer"
+                                        ToolTip.Tip="Hide the diagnostics drawer"
+                                        Command="{CompiledBinding ToggleDiagnosticsDrawerCommand}"/>
+                                <Button x:Name="BtnSaveDiagnosticsBundle" Content="Save Bundle" FontSize="10" MinHeight="22" Padding="8,0" Margin="6,0,0,0" VerticalAlignment="Center"
+                                        AutomationProperties.Name="Save diagnostics bundle"
+                                        ToolTip.Tip="Zip the recent logs, crash reports and minidumps, plus a generated readout, to attach to a bug report"
+                                        Command="{CompiledBinding CreateDiagnosticsBundleCommand}"/>
+                            </StackPanel>
+
+                            <!-- Stop-summary verdict: media-duration parity, recording drops, finalize time. -->
+                            <TextBlock DockPanel.Dock="Top" Text="{CompiledBinding StopSummaryText}" IsVisible="{CompiledBinding IsStopSummaryVisible}"
+                                       Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,6"
+                                       AutomationProperties.LiveSetting="Assertive"/>
+
+                            <!-- NET-020: the next-launch offer (only when dumps are really waiting) and
+                                 the export outcome. LiveSetting is deliberate: both appear without focus. -->
+                            <TextBlock DockPanel.Dock="Top" Text="{CompiledBinding DiagnosticsBundleOfferText}" IsVisible="{CompiledBinding IsDiagnosticsBundleOffered}"
+                                       Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,6"
+                                       AutomationProperties.LiveSetting="Polite"/>
+
+                            <TextBlock DockPanel.Dock="Top" Text="{CompiledBinding DiagnosticsBundleStatusText}" IsVisible="{CompiledBinding IsDiagnosticsBundleStatusVisible}"
+                                       Foreground="{DynamicResource StudioTextPrimary}" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,6"
+                                       AutomationProperties.LiveSetting="Polite"/>
+
+                            <ScrollViewer MaxHeight="160" HorizontalScrollBarVisibility="Disabled">
+                                <TextBlock x:Name="TxtDiagnosticTail" Text="{CompiledBinding DiagnosticTailText}" FontFamily="Consolas, monospace" FontSize="10"
+                                           Foreground="{DynamicResource StudioTextSecondary}" TextWrapping="Wrap"/>
+                            </ScrollViewer>
+                        </DockPanel>
+                    </Border>
+
+                    <!-- Video Viewport HUD Overlay (Top-Left) -->
+                    <Border Background="{DynamicResource StudioHudScrim}" CornerRadius="{DynamicResource RadiusSm}" Padding="8,4" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse x:Name="LiveIndicator" Width="8" Height="8" Fill="{CompiledBinding LiveIndicatorBrush}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <TextBlock x:Name="TxtLiveStatus" Text="{CompiledBinding LiveStatusText}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontWeight="Bold" VerticalAlignment="Center" AutomationProperties.LiveSetting="Assertive"/>
+                            <TextBlock x:Name="TxtSourceName" Text="{CompiledBinding SourceNameText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="8,0,0,0"
+                                       MaxWidth="380" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Video Viewport HUD Overlay (Top-Right: Resolution & FPS) -->
+                    <Border Background="{DynamicResource StudioHudScrim}" CornerRadius="{DynamicResource RadiusSm}" Padding="8,4" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="8">
+                        <TextBlock x:Name="TxtVideoSpecs" Text="{CompiledBinding VideoSpecsText}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="11" FontFamily="Consolas, monospace" VerticalAlignment="Center"/>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <!-- VU Meter Control (Right Side) -->
+            <controls:VuMeterControl x:Name="VuMeter" Grid.Column="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+        </Grid>
+</UserControl>

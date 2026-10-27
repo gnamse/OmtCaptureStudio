@@ -24,7 +24,11 @@ public partial class App : Application
             // that we keep the reference, because crash forensics has to read the LIVE recording state
             // when a native fault kills the process. Nothing else about composition changes.
             var session = new CaptureSession();
-            var viewModel = new MainWindowViewModel(session, new OmtDiscoveryService(), ownsDependencies: true);
+            // ADR-0011: the shell state is owned here (one per window), so the composition root can
+            // hand the same instance to anything else that needs to know which mode is showing. It
+            // starts in ModeSelection by contract — the picker is always what opens.
+            var appModeState = new AppModeState();
+            var viewModel = new MainWindowViewModel(session, new OmtDiscoveryService(), appModeState, ownsDependencies: true);
             desktop.MainWindow = new MainWindow(viewModel);
 
             CrashForensics.RegisterStateProvider(() => CrashForensics.CaptureState(session, viewModel.BroadcastState));

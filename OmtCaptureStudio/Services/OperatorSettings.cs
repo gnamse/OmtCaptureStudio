@@ -27,6 +27,13 @@ public sealed class OperatorSettings
 
     public int Version { get; set; } = CurrentVersion;
 
+    /// <summary>
+    /// ADR-0011: the last operating mode the operator chose. It pre-highlights the matching card on the
+    /// picker; the picker is still always shown at open (no auto-skip). Nullable so a file written by an
+    /// older build — or a hand-edited file — falls back to the picker rather than to <c>default(AppMode)</c>.
+    /// </summary>
+    public AppMode? LastAppMode { get; set; }
+
     /// <summary>The selected preset name, or <c>Custom</c>. Restored by name, never by index.</summary>
     public string? SelectedPreset { get; set; }
 

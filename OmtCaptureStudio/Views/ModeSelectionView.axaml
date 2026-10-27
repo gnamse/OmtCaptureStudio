@@ -1,0 +1,109 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:OmtCaptureStudio.ViewModels"
+             xmlns:svc="clr-namespace:OmtCaptureStudio.Services"
+             mc:Ignorable="d"
+             x:Class="OmtCaptureStudio.Views.ModeSelectionView"
+             x:DataType="vm:MainWindowViewModel">
+
+    <!-- ADR-0011 decision 1: the picker is the app's first impression. Calm and obvious, not
+         decorated — two large, equally-weighted choices, no marketing copy, no icons shouting. The
+         only asymmetry is the pre-highlight on the card matching LastUsedAppMode. -->
+    <Border Background="{DynamicResource StudioBg}" Padding="32">
+        <Grid RowDefinitions="Auto,*,Auto" VerticalAlignment="Center" MaxWidth="900">
+            <!-- Header -->
+            <StackPanel Grid.Row="0" Margin="0,0,0,28">
+                <TextBlock Text="OMT CAPTURE STUDIO"
+                           Foreground="{DynamicResource StudioTextPrimary}"
+                           FontSize="22" FontWeight="Black"
+                           HorizontalAlignment="Center"/>
+                <TextBlock Text="How do you want to use it today?"
+                           Foreground="{DynamicResource StudioTextSecondary}"
+                           FontSize="13" Margin="0,6,0,0"
+                           HorizontalAlignment="Center"/>
+            </StackPanel>
+
+            <!-- Two cards -->
+            <Grid Grid.Row="1" ColumnDefinitions="*,20,*" MinHeight="200">
+                <!-- Capture card -->
+                <Button Grid.Column="0"
+                        Command="{CompiledBinding SelectModeCommand}"
+                        CommandParameter="{x:Static svc:AppMode.CaptureMode}"
+                        AutomationProperties.Name="Choose Capture mode — record to file"
+                        ToolTip.Tip="Record an OMT source to a file on this machine"
+                        Padding="20"
+                        VerticalAlignment="Stretch"
+                        VerticalContentAlignment="Top"
+                        HorizontalContentAlignment="Left"
+                        Background="{DynamicResource StudioSurface}"
+                        BorderBrush="{DynamicResource StudioBorder}"
+                        BorderThickness="2"
+                        CornerRadius="{DynamicResource RadiusLg}">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="Capture"
+                                   Foreground="{DynamicResource StudioTextPrimary}"
+                                   FontSize="18" FontWeight="Bold"/>
+                        <TextBlock Text="Record an OMT source to a file."
+                                   Foreground="{DynamicResource StudioTextSecondary}"
+                                   FontSize="12" TextWrapping="Wrap"/>
+                        <TextBlock Text="Choose a source, pick your quality, press record. The file lands in the folder you choose."
+                                   Foreground="{DynamicResource StudioTextMuted}"
+                                   FontSize="11" TextWrapping="Wrap"/>
+                        <Border IsVisible="{CompiledBinding IsCaptureCardHighlighted}"
+                                Background="{DynamicResource StudioSurfaceElevated}"
+                                CornerRadius="{DynamicResource RadiusSm}"
+                                Padding="6,3" HorizontalAlignment="Left" Margin="0,8,0,0">
+                            <TextBlock Text="LAST USED"
+                                       Foreground="{DynamicResource StudioTextSecondary}"
+                                       FontSize="9" FontWeight="Bold"/>
+                        </Border>
+                    </StackPanel>
+                </Button>
+
+                <!-- Broadcast card -->
+                <Button Grid.Column="2"
+                        Command="{CompiledBinding SelectModeCommand}"
+                        CommandParameter="{x:Static svc:AppMode.BroadcastMode}"
+                        AutomationProperties.Name="Choose Broadcast mode — stream to OMT receivers"
+                        ToolTip.Tip="Broadcast your screen or window over OMT"
+                        Padding="20"
+                        VerticalAlignment="Stretch"
+                        VerticalContentAlignment="Top"
+                        HorizontalContentAlignment="Left"
+                        Background="{DynamicResource StudioSurface}"
+                        BorderBrush="{DynamicResource StudioBorder}"
+                        BorderThickness="2"
+                        CornerRadius="{DynamicResource RadiusLg}">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="Broadcast"
+                                   Foreground="{DynamicResource StudioTextPrimary}"
+                                   FontSize="18" FontWeight="Bold"/>
+                        <TextBlock Text="Stream your screen or window over OMT."
+                                   Foreground="{DynamicResource StudioTextSecondary}"
+                                   FontSize="12" TextWrapping="Wrap"/>
+                        <TextBlock Text="Pick a screen or window, choose an audio device and network, then start broadcasting to OMT receivers."
+                                   Foreground="{DynamicResource StudioTextMuted}"
+                                   FontSize="11" TextWrapping="Wrap"/>
+                        <Border IsVisible="{CompiledBinding IsBroadcastCardHighlighted}"
+                                Background="{DynamicResource StudioSurfaceElevated}"
+                                CornerRadius="{DynamicResource RadiusSm}"
+                                Padding="6,3" HorizontalAlignment="Left" Margin="0,8,0,0">
+                            <TextBlock Text="LAST USED"
+                                       Foreground="{DynamicResource StudioTextSecondary}"
+                                       FontSize="9" FontWeight="Bold"/>
+                        </Border>
+                    </StackPanel>
+                </Button>
+            </Grid>
+
+            <!-- Footer hint -->
+            <TextBlock Grid.Row="2"
+                       Text="You can change modes at any time — except while a take or broadcast is live."
+                       Foreground="{DynamicResource StudioTextMuted}"
+                       FontSize="11" HorizontalAlignment="Center" Margin="0,28,0,0"
+                       TextWrapping="Wrap" TextAlignment="Center"/>
+        </Grid>
+    </Border>
+</UserControl>
