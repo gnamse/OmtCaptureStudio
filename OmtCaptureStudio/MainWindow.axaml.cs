@@ -4,6 +4,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Platform.Storage;
 using OmtCaptureStudio.ViewModels;
+using OmtCaptureStudio.Views;
 
 namespace OmtCaptureStudio;
 
@@ -21,12 +22,11 @@ public partial class MainWindow : Window
         _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         DataContext = _viewModel;
 
-        // View-specific bindings for hardware viewport and VU meter
-        _viewModel.VideoFrameReceived += VideoViewport.UpdateFrame;
-        _viewModel.ViewportClearRequested += VideoViewport.Clear;
-        _viewModel.AudioLevelsUpdated += VuMeter.UpdateLevels;
-        _viewModel.MetersResetRequested += VuMeter.ResetMeters;
-        VuMeter.MonitoringToggled += OnMonitoringToggled;
+        // ADR-0011: the viewport and VU meter now live inside the mode views (through VideoSurface),
+        // so the window wires whichever surface is LIVE — and re-wires when the shell mode changes.
+        // The ViewModel raises the same frame/level events as before; only their destination moved.
+        _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        WireVideoSurface();
 
         // Platform storage provider dialog hook
         _viewModel.PickFolderAsync = async currentFolder =>
@@ -59,9 +59,65 @@ public partial class MainWindow : Window
         KeyDown += MainWindow_KeyDown;
     }
 
+    private VideoSurface? _wiredSurface;
+
     private void OnMonitoringToggled(bool enabled)
     {
         _viewModel.SetAudioMonitoring(enabled);
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(MainWindowViewModel.IsCaptureModeVisible)
+            or nameof(MainWindowViewModel.IsBroadcastModeVisible))
+        {
+            WireVideoSurface();
+        }
+    }
+
+    /// <summary>
+    /// ADR-0011: points the frame/level events at the surface of whichever mode view is now showing.
+    /// Idempotent — re-wiring to the same surface is a no-op, so a duplicate notification costs nothing.
+    /// In the picker there is no surface, and the events are simply unhooked.
+    /// </summary>
+    private void WireVideoSurface()
+    {
+        VideoSurface? surface = _viewModel.IsCaptureModeVisible ? CaptureView?.Surface
+                              : _viewModel.IsBroadcastModeVisible ? BroadcastView?.Surface
+                              : null;
+
+        if (ReferenceEquals(surface, _wiredSurface))
+        {
+            return;
+        }
+
+        UnwireVideoSurface();
+        _wiredSurface = surface;
+        if (surface == null)
+        {
+            return;
+        }
+
+        _viewModel.VideoFrameReceived += surface.Viewport.UpdateFrame;
+        _viewModel.ViewportClearRequested += surface.Viewport.Clear;
+        _viewModel.AudioLevelsUpdated += surface.Meter.UpdateLevels;
+        _viewModel.MetersResetRequested += surface.Meter.ResetMeters;
+        surface.Meter.MonitoringToggled += OnMonitoringToggled;
+    }
+
+    private void UnwireVideoSurface()
+    {
+        if (_wiredSurface == null)
+        {
+            return;
+        }
+
+        _viewModel.VideoFrameReceived -= _wiredSurface.Viewport.UpdateFrame;
+        _viewModel.ViewportClearRequested -= _wiredSurface.Viewport.Clear;
+        _viewModel.AudioLevelsUpdated -= _wiredSurface.Meter.UpdateLevels;
+        _viewModel.MetersResetRequested -= _wiredSurface.Meter.ResetMeters;
+        _wiredSurface.Meter.MonitoringToggled -= OnMonitoringToggled;
+        _wiredSurface = null;
     }
 
     private void OnRequestClose()
@@ -91,12 +147,9 @@ public partial class MainWindow : Window
         }
 
         // Cleanly unhook all view event subscriptions to prevent memory leaks
-        _viewModel.VideoFrameReceived -= VideoViewport.UpdateFrame;
-        _viewModel.ViewportClearRequested -= VideoViewport.Clear;
-        _viewModel.AudioLevelsUpdated -= VuMeter.UpdateLevels;
-        _viewModel.MetersResetRequested -= VuMeter.ResetMeters;
+        _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        UnwireVideoSurface();
         _viewModel.RequestClose -= OnRequestClose;
-        VuMeter.MonitoringToggled -= OnMonitoringToggled;
         Closing -= MainWindow_Closing;
         KeyDown -= MainWindow_KeyDown;
         _viewModel.PickFolderAsync = null;

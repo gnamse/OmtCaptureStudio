@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Runtime.InteropServices;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
@@ -8,6 +9,7 @@ using OmtCaptureStudio.Services.Sinks;
 using OmtCaptureStudio.Services.Sources;
 using OmtCaptureStudio.ViewModels;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.Tests;
 
 class Program
@@ -86,6 +88,13 @@ class Program
         TestCompositeRecordingSink();
         TestCompositeRecordingWiring();
         TestProgressiveDisclosure();
+        TestOperatorSettings();
+        TestScheduledStopAndRemainingTime();
+        TestLogLocationAndReadOnlyInstall();
+        TestTakeSupervisor();
+        TestAsioInputPairSelector();
+        TestDiagnosticsBundle();
+        TestAppModeShell();
 
         TestMainWindowViewModel();
 
@@ -440,6 +449,13 @@ class Program
             case "0.689": TestCompositeRecordingSink(); break;
             case "0.690": TestCompositeRecordingWiring(); break;
             case "0.691": TestProgressiveDisclosure(); break;
+            case "0.692": TestOperatorSettings(); break;
+            case "0.693": TestScheduledStopAndRemainingTime(); break;
+            case "0.694": TestLogLocationAndReadOnlyInstall(); break;
+            case "0.695": TestTakeSupervisor(); break;
+            case "0.696": TestAsioInputPairSelector(); break;
+            case "0.697": TestDiagnosticsBundle(); break;
+            case "0.698": TestAppModeShell(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");
@@ -620,6 +636,469 @@ class Program
     /// row's collapse keyed to BROADCAST state only (never recording), the locking composition, and the
     /// preset-Custom flow working from inside the tier.
     /// </summary>
+// ================================================================================================
+    // ADR-0006: operator settings persistence.
+    // ================================================================================================
+    // ================================================================================================
+    // NET-016: scheduled stop + the remaining-time readout.
+    // ================================================================================================
+    // ================================================================================================
+    // NET-017: one location ladder for logs and forensics + the read-only-install crash link.
+    // ================================================================================================
+    static void TestLogLocationAndReadOnlyInstall()
+    {
+        Console.WriteLine("\n[Step 0.694] Verifying LogLocation (one ladder) + the read-only-install crash link...");
+
+        string root = Path.Combine(Path.GetTempPath(), "omt-logloc-" + Guid.NewGuid().ToString("N"));
+        string primary = Path.Combine(root, "app");
+        string fallback = Path.Combine(root, "localappdata");
+        Directory.CreateDirectory(primary);
+        Directory.CreateDirectory(fallback);
+
+        try
+        {
+            string primaryLogs = Path.Combine(primary, "logs");
+            string primaryDumps = Path.Combine(primary, "crashdumps");
+
+            // ---- 1. THE LADDER AS PURE POLICY (injected probe) ----------------------------------
+            LogLocationResult writable = LogLocation.Resolve(primaryLogs, primaryDumps, fallback, _ => true);
+            Expect(!writable.UsingFallback,
+                "A writable primary must be used as-is - the portable ZIP keeps its own logs and forensics.");
+            Expect(writable.LogDirectory == primaryLogs && writable.DumpDirectory == primaryDumps,
+                "A writable primary must place logs AND dumps in the application directory.");
+
+            LogLocationResult readOnly = LogLocation.Resolve(primaryLogs, primaryDumps, fallback, _ => false);
+            Expect(readOnly.UsingFallback, "A read-only primary must redirect.");
+            Expect(readOnly.LogDirectory == Path.Combine(fallback, "logs"),
+                "LOG LINES must follow the same ladder as the dumps - ONE policy, not two. This is the finding.");
+            Expect(readOnly.DumpDirectory == Path.Combine(fallback, "crashdumps"),
+                "and the dumps follow the same ladder.");
+            Expect(readOnly.PrimaryLogDirectory == primaryLogs && readOnly.PrimaryDumpDirectory == primaryDumps,
+                "The result must still report where the primary WOULD have been, so the redirect can be explained.");
+
+            // ---- 2. END TO END: a read-only install must not lose the lines that led to the crash --
+            CrashForensics.ConfigureLocations(primaryLogs, primaryDumps, fallback, writableProbe: _ => false);
+
+            Expect(CrashForensics.IsUsingFallbackLocation,
+                "A read-only primary must put forensics in the fallback.");
+            Expect(AppLogger.LogDir == Path.Combine(fallback, "logs"),
+                "AppLogger MUST follow the same resolution. Before NET-017 it stayed pinned at the app " +
+                "directory, so on a read-only install every log line was written somewhere it could not be.");
+
+            AppLogger.LogInfo("NET-017 probe: the line BEFORE the fault");
+            AppLogger.Flush();
+
+            string? reportPath = CrashForensics.HandleException(
+                "NET-017 probe", new InvalidOperationException("NET-017 simulated fault"), fatal: false);
+
+            Expect(reportPath != null && File.Exists(reportPath), "The crash report must be written.");
+            Expect(Path.GetDirectoryName(reportPath) == Path.Combine(fallback, "logs"),
+                "The crash report must land in the FALLBACK when the primary is read-only.");
+
+            AppLogger.LogInfo("NET-017 probe: the line AFTER the fault");
+            AppLogger.Flush();
+
+            // THE ASSERTION THAT CLOSES THE FINDING: the report is SURROUNDED by its log lines.
+            string[] daily = Directory.GetFiles(Path.Combine(fallback, "logs"), "????-??-??.log");
+            Expect(daily.Length == 1,
+                $"Exactly one daily log must exist in the fallback; found {daily.Length}.");
+
+            string logText = File.ReadAllText(daily[0]);
+            Expect(logText.Contains("the line BEFORE the fault"),
+                "The log lines written BEFORE the fault must be in the fallback - losing exactly these is " +
+                "what the read-only-install defect did.");
+            Expect(logText.Contains("the line AFTER the fault"),
+                "Log lines must keep flowing to the fallback after the fault as well.");
+            Expect(Path.GetDirectoryName(daily[0]) == Path.GetDirectoryName(reportPath),
+                "The crash report must sit in the SAME directory as the lines that led to it - the " +
+                "report-to-surrounding-lines link that the defect broke.");
+
+            // THE DEFECT, ASSERTED ABSENT: nothing was written where it could not be written.
+            bool primaryHoldsLogs = Directory.Exists(primaryLogs) && Directory.GetFiles(primaryLogs).Length > 0;
+            Expect(!primaryHoldsLogs,
+                "The read-only primary must hold NO log lines at all - not a directory of silent losses.");
+
+            // ---- 3. THE SAME SEAM MOVES THE LOGGING SIDE (one seam, two consumers) ---------------
+            string appLogs = Path.Combine(primary, "logsApp");
+            AppLogger.ConfigureLocation(appLogs);
+            Expect(AppLogger.LogDir == appLogs,
+                "The AppLogger location must be settable through the shared policy, not pinned at type init.");
+            AppLogger.LogInfo("NET-017 probe: writable primary line");
+            AppLogger.Flush();
+            Expect(Directory.GetFiles(appLogs, "????-??-??.log").Length == 1,
+                "With a writable location, log lines must land there instead.");
+        }
+        finally
+        {
+            // Restore production resolution so later steps and the app are unaffected by this probe.
+            CrashForensics.ConfigureLocations(
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs"),
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crashdumps"),
+                LogLocation.FallbackRoot);
+
+            try { Directory.Delete(root, recursive: true); } catch { /* best effort */ }
+        }
+
+        Console.WriteLine(" -> ONE ladder: a read-only install redirects log lines AND crash artifacts together, so " +
+                          "the crash report is surrounded by the lines that led to it - the original defect " +
+                          "asserted absent (the primary holds no log lines at all)!");
+    }
+
+    static void TestScheduledStopAndRemainingTime()
+    {
+        Console.WriteLine("\n[Step 0.693] Verifying STOP AFTER resolution + the remaining-time readout...");
+
+        var now = new DateTime(2026, 10, 18, 3, 0, 0, DateTimeKind.Utc);
+        long nowTicks = now.Ticks;
+        long takeStart = nowTicks;
+        long segmentStart = nowTicks;
+        TimeSpan M(double m) => TimeSpan.FromMinutes(m);
+
+        // ---- 1. STOP-AFTER RESOLUTION MIRRORS THE START DELAY ------------------------------------
+        Expect(RecordingSchedule.ResolveStopUtc(new RecordingConfig { ScheduledStopAfterMinutes = 90 }, now)
+                   == now.AddMinutes(90),
+            "A stop-after delay must resolve to an absolute instant measured from the arm, exactly " +
+            "like the start delay resolves ScheduledStartUtc.");
+
+        Expect(RecordingSchedule.ResolveStopUtc(new RecordingConfig(), now) is null,
+            "No stop-after and no absolute instant must resolve to null - an unbounded take.");
+
+        Expect(RecordingSchedule.ResolveStopUtc(
+                   new RecordingConfig { ScheduledStopUtc = now.AddMinutes(20) }, now) == now.AddMinutes(20),
+            "With no delay set, an absolute stop instant must be honoured as-is.");
+
+        Expect(RecordingSchedule.ResolveStopUtc(
+                   new RecordingConfig { ScheduledStopAfterMinutes = 90, ScheduledStopUtc = now.AddMinutes(5) },
+                   now) == now.AddMinutes(90),
+            "A stop-after delay must WIN over an absolute instant, mirroring the start rule - the delay " +
+            "is the more specific instruction.");
+
+        // ---- 2. THE NEAREST TIME BOUNDARY --------------------------------------------------------
+        // max length only
+        RecordingBoundaryEta? eta = RecordingBoundaries.NearestTimeBoundary(
+            new RecordingConfig { MaxDurationMinutes = 120 }, takeStart, segmentStart,
+            nowTicks + M(39).Ticks);
+        Expect(eta is { Boundary: RecordingBoundary.MaxDuration },
+            "With only a max length set, the nearest boundary must be MaxDuration.");
+        Expect(eta!.Value.Remaining == M(81),
+            $"Remaining must be max-minus-elapsed (120-39=81); got {eta.Value.Remaining}.");
+
+        // scheduled stop NEARER than max length
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            new RecordingConfig { MaxDurationMinutes = 120, ScheduledStopUtc = now.AddMinutes(20) },
+            takeStart, segmentStart, nowTicks + M(1).Ticks);
+        Expect(eta is { Boundary: RecordingBoundary.ScheduledStop },
+            "A scheduled stop nearer than the max length must win the readout - the operator needs the " +
+            "boundary that actually happens first.");
+        Expect(eta!.Value.Remaining == M(19), $"Remaining must be to the stop instant; got {eta.Value.Remaining}.");
+
+        // max length NEARER than the scheduled stop (the comparison must go both ways).
+        // 19 min elapsed, max 30 -> 11 min left; the stop is 120 min out, so MaxDuration is nearest.
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            new RecordingConfig { MaxDurationMinutes = 30, ScheduledStopUtc = now.AddMinutes(120) },
+            takeStart, segmentStart, nowTicks + M(19).Ticks);
+        Expect(eta is { Boundary: RecordingBoundary.MaxDuration },
+            "With the max length nearer, MaxDuration must win instead - the switch must be symmetric.");
+        Expect(eta!.Value.Remaining == M(11),
+            $"Remaining must be 30-19=11 min; got {eta.Value.Remaining}.");
+
+        // rollover nearest (segment clock, not take clock)
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            new RecordingConfig { MaxDurationMinutes = 120, SegmentRolloverMinutes = 15 },
+            takeStart, segmentStart, nowTicks + M(12).Ticks);
+        Expect(eta is { Boundary: RecordingBoundary.SegmentRollover },
+            "A rollover due sooner than the max length must win the readout.");
+        Expect(eta!.Value.Remaining == M(3), $"Remaining must be 15-12=3 min; got {eta.Value.Remaining}.");
+
+        // THE TWO CLOCKS ARE INDEPENDENT. Same config, two different elapsed measurements - this is the
+        // split NET-008's boundary arithmetic makes (the take clock survives a rollover; the segment
+        // clock does not), and getting it wrong is how a countdown silently lies.
+        var dualClock = new RecordingConfig { MaxDurationMinutes = 60, SegmentRolloverMinutes = 30 };
+
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            dualClock, takeStart - M(40).Ticks, segmentStart, nowTicks);
+        Expect(eta is { Boundary: RecordingBoundary.MaxDuration } && eta!.Value.Remaining == M(20),
+            "The TAKE clock must be measured from the take start: 40 min into a 60 min max leaves 20 min, " +
+            "even though the segment was just restarted.");
+
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            dualClock, takeStart - M(40).Ticks, segmentStart - M(25).Ticks, nowTicks);
+        Expect(eta is { Boundary: RecordingBoundary.SegmentRollover } && eta!.Value.Remaining == M(5),
+            "The SEGMENT clock must be measured from the segment start: 25 min into a 30 min segment " +
+            "leaves 5 min, and that now beats the take's 20 min.");
+
+        // ---- 3. NOTHING BOUNDED -> NO READOUT ----------------------------------------------------
+        Expect(RecordingBoundaries.NearestTimeBoundary(new RecordingConfig(), takeStart, segmentStart, nowTicks) is null,
+            "An unbounded take must produce NO readout, rather than a countdown to nothing.");
+
+        Expect(RecordingBoundaries.NearestTimeBoundary(
+                   new RecordingConfig { SegmentRolloverGigabytes = 2 }, takeStart, segmentStart, nowTicks) is null,
+            "A SIZE-ONLY rollover must have no countdown: it depends on the achieved bitrate, so any " +
+            "time we printed would be a guess dressed up as a measurement.");
+
+        // ---- 4. OVERDUE CLAMPS TO ZERO, NEVER NEGATIVE -------------------------------------------
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            new RecordingConfig { MaxDurationMinutes = 10 }, takeStart, segmentStart, nowTicks + M(25).Ticks);
+        Expect(eta!.Value.Remaining == TimeSpan.Zero,
+            $"An overdue boundary must clamp to zero, never report negative time; got {eta.Value.Remaining}.");
+
+        eta = RecordingBoundaries.NearestTimeBoundary(
+            new RecordingConfig { ScheduledStopUtc = now.AddMinutes(-5) }, takeStart, segmentStart, nowTicks);
+        Expect(eta!.Value.Remaining == TimeSpan.Zero,
+            "A scheduled stop already in the past must clamp to zero too.");
+
+        // ---- 5. THE STOP-AFTER CHOICE SURVIVES A RELAUNCH -----------------------------------------
+        string root = Path.Combine(Path.GetTempPath(), "omt-stopafter-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            string settingsPath = Path.Combine(root, "settings.json");
+            var store = new SettingsStore(settingsPath);
+            Expect(store.Save(SettingsStore.FromConfig(new RecordingConfig { ScheduledStopAfterMinutes = 60 }, null)),
+                "Saving a stop-after choice must succeed.");
+
+            var reloadStore = new SettingsStore(settingsPath);
+            OperatorSettings reloaded = reloadStore.Load();
+            Expect(reloaded.ScheduledStopAfterMinutes == 60,
+                "The stop-after CHOICE must persist - the operator must not re-pick it every launch.");
+            Expect(SettingsStore.ToConfig(reloaded).ScheduledStopAfterMinutes == 60,
+                "The persisted stop-after choice must map back onto the config.");
+
+            using (var seam = BuildHeadlessSession())
+            {
+                var vm = seam.ViewModel!;
+                vm.AttachSettings(new SettingsStore(Path.Combine(root, "vm.json"), logError: _ => { }), reloaded);
+                Expect(vm.SelectedStopAfter?.Value == 60,
+                    "The VM must map the restored stop-after onto a real picker option (1 h).");
+
+                vm.SelectedStopAfter = MainWindowViewModel.StopAfterOptions.First(o => o.Value == 480);
+                Expect(File.Exists(Path.Combine(root, "vm.json")),
+                    "Changing STOP AFTER must persist immediately.");
+                Expect(File.ReadAllText(Path.Combine(root, "vm.json")).Contains("480"),
+                    "The written file must carry the new stop-after choice.");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* best effort */ }
+        }
+
+        Console.WriteLine(" -> STOP AFTER resolves like START IN (delay wins over absolute, null = unbounded); the " +
+                          "readout picks the nearest clock-driven boundary, stays silent when nothing is bounded, " +
+                          "refuses to guess a size-based rollover, clamps instead of going negative, and the " +
+                          "choice survives a relaunch!");
+    }
+
+    static void TestOperatorSettings()
+    {
+        Console.WriteLine("\n[Step 0.692] Verifying operator settings persistence (load/save/validate/fallback)...");
+
+        string root = Path.Combine(Path.GetTempPath(), "omt-settings-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string settingsPath = Path.Combine(root, "settings.json");
+
+        try
+        {
+            // ---- 1. MISSING FILE: a first run is all-defaults, and nothing is quarantined. ----------
+            var store = new SettingsStore(settingsPath);
+            OperatorSettings first = store.Load();
+            Expect(store.LastOutcome == SettingsLoadOutcome.Missing,
+                "A missing settings file must report Missing.");
+            Expect(first.OutputDirectory is null && first.SelectedPreset is null,
+                "A missing file must leave every field unset, so defaults are in force.");
+            Expect(!File.Exists(settingsPath + ".corrupt"),
+                "A missing file must NOT be quarantined - there is nothing to quarantine.");
+
+            // ---- 2. ROUND TRIP: config -> JSON -> load -> identical values. --------------------------
+            string destination = Path.Combine(root, "takes");
+            string backupDir = Path.Combine(root, "backup");
+            Directory.CreateDirectory(destination);
+            Directory.CreateDirectory(backupDir);
+
+            var original = new RecordingConfig
+            {
+                ContainerFormat = OutputContainerFormat.MKV,
+                EncoderChoice = VideoEncoderChoice.NvidiaNvenc,
+                Quality = QualityPreset.Ultra,
+                OutputDirectory = destination,
+                BackupOutputDirectory = backupDir,
+                FilenamePrefix = "MORNING_SHOW",
+                InputLossThresholdSeconds = 7.5,
+                InputRecoveryGraceSeconds = 45,
+                SegmentRolloverMinutes = 15,
+                SegmentRolloverGigabytes = 2,
+                MaxDurationMinutes = 120,
+                ScheduledStartDelayMinutes = 5,
+                ScheduledStopUtc = new DateTime(2026, 10, 17, 3, 30, 0, DateTimeKind.Utc)
+            };
+
+            Expect(store.Save(SettingsStore.FromConfig(original, "Long event - MKV")),
+                "Saving settings to a writable directory must succeed.");
+            Expect(File.Exists(settingsPath), "Save must create the settings file.");
+
+            var reloadStore = new SettingsStore(settingsPath);
+            OperatorSettings reloaded = reloadStore.Load();
+            Expect(reloadStore.LastOutcome == SettingsLoadOutcome.Loaded,
+                "A well-formed file must load as Loaded.");
+
+            RecordingConfig rt = SettingsStore.ToConfig(reloaded);
+            Expect(rt.ContainerFormat == original.ContainerFormat, "Round trip: container format.");
+            Expect(rt.EncoderChoice == original.EncoderChoice, "Round trip: encoder choice.");
+            Expect(rt.Quality == original.Quality, "Round trip: quality.");
+            Expect(rt.OutputDirectory == original.OutputDirectory, "Round trip: destination.");
+            Expect(rt.BackupOutputDirectory == original.BackupOutputDirectory, "Round trip: backup destination.");
+            Expect(rt.FilenamePrefix == original.FilenamePrefix, "Round trip: filename prefix.");
+            Expect(rt.InputLossThresholdSeconds == original.InputLossThresholdSeconds,
+                "Round trip: ADR-0002 input-loss threshold (a field the UI does not expose).");
+            Expect(rt.InputRecoveryGraceSeconds == original.InputRecoveryGraceSeconds,
+                "Round trip: ADR-0002 reconnect grace period.");
+            Expect(rt.SegmentRolloverMinutes == original.SegmentRolloverMinutes, "Round trip: rollover minutes.");
+            Expect(rt.SegmentRolloverGigabytes == original.SegmentRolloverGigabytes, "Round trip: rollover GB.");
+            Expect(rt.MaxDurationMinutes == original.MaxDurationMinutes, "Round trip: max duration.");
+            Expect(rt.ScheduledStartDelayMinutes == original.ScheduledStartDelayMinutes, "Round trip: start delay.");
+            Expect(rt.ScheduledStopUtc == original.ScheduledStopUtc, "Round trip: scheduled stop instant.");
+            Expect(reloaded.SelectedPreset == "Long event - MKV",
+                "Round trip: the selected preset name.");
+            Expect(rt.HasBackupDestination,
+                "Round trip: the backup destination is still recognised as a real fan-out.");
+
+            // ENUMS ARE NAMES, not ordinals - reordering an enum in code must not reinterpret the file.
+            string json = File.ReadAllText(settingsPath);
+            Expect(json.Contains("\"MKV\"") && json.Contains("\"NvidiaNvenc\"") && json.Contains("\"Ultra\""),
+                "Enums must persist as NAMES, so reordering an enum in code cannot silently " +
+                "reinterpret an operator's saved choice.");
+
+            // ---- 3. VANISHED DRIVE: that FIELD falls back; the rest of the file is honoured. --------
+            var vanishedStore = new SettingsStore(
+                Path.Combine(root, "vanished.json"),
+                directoryExists: existing => existing == destination,
+                logInfo: _ => { });
+
+            Expect(vanishedStore.Save(new OperatorSettings
+                {
+                    ContainerFormat = "MOV",
+                    Quality = "Low",
+                    OutputDirectory = @"Z:\gone\takes",
+                    BackupOutputDirectory = @"Z:\gone\backup",
+                    SelectedPreset = "Low disk - x264 MP4"
+                }),
+                "Saving must succeed even when a path inside it is invalid.");
+
+            OperatorSettings recovered = vanishedStore.Load();
+            Expect(recovered.OutputDirectory is null,
+                "A destination on a vanished drive must fall back to that field's default.");
+            Expect(recovered.BackupOutputDirectory is null,
+                "A backup destination on a vanished drive must fall back to that field's default.");
+            Expect(recovered.Quality == "Low" && recovered.ContainerFormat == "MOV",
+                "A vanished path must cost that field ONLY - the rest of the file must be honoured.");
+            Expect(recovered.SelectedPreset == "Low disk - x264 MP4",
+                "A vanished path must not cost the operator the preset either.");
+            Expect(SettingsStore.ToConfig(recovered).OutputDirectory == new RecordingConfig().OutputDirectory,
+                "The fallen-back destination must be the config's own default, not an empty string.");
+
+            // The usability rule itself: existing folder OK, not-yet-created folder OK while its DRIVE
+            // exists, vanished drive NOT OK.
+            Expect(SettingsStore.IsUsablePath(destination, existing => existing == destination),
+                "An existing folder is usable.");
+            string notYetCreated = Path.Combine(root, "not-yet-created");
+            string? notYetRoot = Path.GetPathRoot(notYetCreated);
+            Expect(SettingsStore.IsUsablePath(notYetCreated, existing => existing == notYetRoot),
+                "A folder that does not exist YET is usable while its DRIVE does - the recorder creates it. " +
+                "Falling back just because the operator has not made the subfolder yet would be obnoxious.");
+            Expect(!SettingsStore.IsUsablePath(@"Z:\gone", _ => false),
+                "A vanished drive is NOT usable - that is the 3 a.m. case this module exists for.");
+            Expect(!SettingsStore.IsUsablePath("", _ => true) && !SettingsStore.IsUsablePath(null, _ => true),
+                "A blank path is never usable.");
+
+            // ---- 4. CORRUPT FILE: all defaults, and the evidence is KEPT. ---------------------------
+            File.WriteAllText(settingsPath, "{ this is not json");
+            var corruptStore = new SettingsStore(settingsPath);
+            OperatorSettings afterCorrupt = corruptStore.Load();
+            Expect(corruptStore.LastOutcome == SettingsLoadOutcome.Corrupt,
+                "An unparseable file must report Corrupt.");
+            Expect(afterCorrupt.OutputDirectory is null && afterCorrupt.SelectedPreset is null,
+                "A corrupt file must fall back to ALL defaults rather than a partial restore.");
+            Expect(File.Exists(settingsPath + ".corrupt"),
+                "The corrupt file must be KEPT (renamed .corrupt) for forensics, never deleted.");
+            Expect(File.ReadAllText(settingsPath + ".corrupt").Contains("this is not json"),
+                "The quarantined file must still hold the original bytes.");
+            Expect(!File.Exists(settingsPath),
+                "The corrupt file is MOVED, so startup is unblocked on the next run.");
+
+            // A SECOND corruption must not destroy the first file's evidence.
+            File.WriteAllText(settingsPath, "{{ also broken");
+            new SettingsStore(settingsPath).Load();
+            Expect(File.Exists(settingsPath + ".corrupt.1"),
+                "A second corruption must quarantine to .corrupt.1 rather than overwrite the first evidence.");
+
+            // A literal null document is valid JSON but useless settings - corruption, not a crash.
+            File.WriteAllText(settingsPath, "null");
+            var nullStore = new SettingsStore(settingsPath);
+            Expect(nullStore.Load().OutputDirectory is null
+                   && nullStore.LastOutcome == SettingsLoadOutcome.Corrupt,
+                "A literal null document must be treated as corrupt rather than throwing.");
+
+            // ---- 5. WRITE FAILURE: reported, logged, never thrown. ----------------------------------
+            var logged = new List<string>();
+            var unwritable = new SettingsStore(
+                Path.Combine(root, "family", "\0invalid", "settings.json"),
+                logError: logged.Add);
+
+            Expect(!unwritable.Save(reloaded),
+                "A write that cannot land must REPORT failure rather than throwing - a settings write " +
+                "must never be able to interrupt the operator.");
+            Expect(logged.Count > 0,
+                "A failed write must be LOGGED, so the field problem is diagnosable.");
+
+            // ---- 6. THE VIEWMODEL APPLIES RESTORED VALUES, AND WRITES ONLY ON CHANGE. ---------------
+            using (var seam = BuildHeadlessSession())
+            {
+                var vm = seam.ViewModel!;
+                string vmPath = Path.Combine(root, "vm.json");
+                vm.AttachSettings(new SettingsStore(vmPath, logError: _ => { }), reloaded);
+
+                Expect(vm.SelectedContainerFormat == original.ContainerFormat,
+                    "The VM must apply the restored container format.");
+                Expect(vm.SelectedEncoderChoice == original.EncoderChoice,
+                    "The VM must apply the restored encoder choice.");
+                Expect(vm.SelectedQualityPreset == original.Quality, "The VM must apply the restored quality.");
+                Expect(vm.OutputDirectory == original.OutputDirectory,
+                    "The VM must apply the restored destination.");
+                Expect(vm.BackupOutputDirectory == original.BackupOutputDirectory,
+                    "The VM must apply the restored backup destination.");
+                Expect(vm.SelectedRecordingPreset == "Long event - MKV",
+                    "The VM must restore the preset NAME, not re-apply the preset over the restored axes.");
+                Expect(vm.SelectedRolloverMinutes?.Value == 15,
+                    "The VM must map the restored rollover onto a real picker option.");
+                Expect(vm.SelectedMaxDuration?.Value == 120,
+                    "The VM must map the restored max duration onto a real picker option.");
+                Expect(!File.Exists(vmPath),
+                    "RESTORING must not write a file - nothing has changed yet.");
+
+                // A committed change now writes immediately.
+                vm.SelectedQualityPreset = QualityPreset.Low;
+                Expect(File.Exists(vmPath), "A committed change must write the settings file immediately.");
+                string written = File.ReadAllText(vmPath);
+                Expect(written.Contains("\"Low\""), "The written file must carry the new value.");
+                Expect(written.Contains("takes"),
+                    "The written file must still carry the destination the operator had set.");
+
+                // Changing the destination writes too (a field that had no change hook before NET-015).
+                vm.OutputDirectory = Path.Combine(root, "other-takes");
+                Expect(File.ReadAllText(vmPath).Contains("other-takes"),
+                    "A destination change must persist - the folder is the field the operator most needs back.");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* best effort */ }
+        }
+
+        Console.WriteLine(" -> Settings persist across a relaunch: round trip exact, a corrupt file is quarantined " +
+                          "with its evidence kept, a vanished drive costs only that field, a failed write is " +
+                          "logged not thrown, and restoring is silent while a real change writes immediately!");
+    }
+
     static void TestProgressiveDisclosure()
     {
         Console.WriteLine("\n[Step 0.691] Verifying progressive disclosure (advanced tier, collapsed broadcast row)...");
@@ -632,9 +1111,10 @@ class Program
             "The Advanced tier must be COLLAPSED by default - the default path is preset -> folder -> record.");
         Expect(vm.IsAdvancedChevronDown, "A collapsed tier must show the down chevron.");
         Expect(!vm.IsBroadcastRowVisible,
-            "The broadcast configuration row must start hidden - it is revealed by Broadcast being ON.");
+            "The app opens on the picker, so the broadcast configuration row must not be shown at startup.");
         Expect(vm.IsLiveSettingSummaryVisible,
-            "While the broadcast row is hidden the compact summary must be the thing that is shown.");
+            "Away from Broadcast mode the broadcast row is not shown, so the compact summary is what carries " +
+            "the selection - it must never be suppressed by the row.");
 
         // ---- 2. THE DISCLOSURE observable + its accessible name ---------------------------------
         Expect(vm.AdvancedOptionsAutomationName.Contains("Show"),
@@ -667,14 +1147,18 @@ class Program
         Expect(vm.SelectedRecordingPreset == RecordingPresets.CustomName,
             $"Editing a control inside the tier must switch the picker to Custom; got '{vm.SelectedRecordingPreset}'.");
 
-        // ---- 5. THE THREE-STATE BROADCAST FLOW (NET-014) ------------------------------------------
-        // State 1 - HIDDEN.
-        Expect(!vm.IsBroadcastRowVisible, "State 1 (Hidden): the row must be hidden.");
+        // ---- 5. THE THREE-STATE BROADCAST FLOW (NET-014, re-keyed to ADR-0011) ---------------------
+        // The old middle state was a REVEAL toggle. Under the mode-based shell the MODE is the reveal
+        // (ADR-0011 decision 1): "revealed" is now "the operator is in Broadcast mode". The three states
+        // and every assertion they carried survive - only the thing that opens the row changed.
+        // State 1 - not in Broadcast mode, so the row is not shown.
+        Expect(!vm.IsBroadcastRowVisible, "State 1 (not in Broadcast mode): the row must not be shown.");
         Expect(!vm.IsBroadcastSelecting, "State 1: nothing is being selected.");
 
-        // State 2 - REVEALED: the pickers are open and ENABLED. Nothing is live yet.
-        vm.IsBroadcastRevealed = true;
-        Expect(vm.IsBroadcastRowVisible, "State 2 (Revealed): the row must be visible.");
+        // State 2 - IN BROADCAST MODE: the pickers are open and ENABLED. Nothing is live yet.
+        vm.SelectModeCommand.Execute(AppMode.BroadcastMode);
+        Expect(vm.IsBroadcastModeVisible, "State 2: selecting the Broadcast card must enter Broadcast mode.");
+        Expect(vm.IsBroadcastRowVisible, "State 2 (Broadcast mode): the row must be visible - the mode IS the reveal.");
         Expect(vm.IsBroadcastSelecting, "State 2: the row is SELECTING, not live.");
         Expect(!vm.IsDesktopCaptureActive, "State 2: revealing must NOT start a broadcast.");
         Expect(vm.IsCaptureSelectorEnabled,
@@ -709,25 +1193,29 @@ class Program
         Expect(lockProbe.IsCaptureSelectorEnabled, "Stopping must unlock the pickers again.");
 
         // THE NEVER-ORPHAN INVARIANT: a live broadcast cannot be hidden behind a collapsed row.
-        vm.IsBroadcastRevealed = false;
+        // Leaving Broadcast mode is the STRONGEST form of the old probe - it bypasses the Change-Mode gate
+        // entirely, so if the live state did not hold the row open this would orphan the send.
+        vm.SelectModeCommand.Execute(AppMode.CaptureMode);
         Expect(vm.IsBroadcastRowVisible,
-            "A LIVE broadcast must remain visible even with the reveal flag cleared - it can never be orphaned.");
-        vm.IsBroadcastRevealed = true;   // restore: the probe above cleared a flag the operator never cleared
+            "A LIVE broadcast must remain visible even after the mode moves away - it can never be orphaned.");
+        vm.SelectModeCommand.Execute(AppMode.BroadcastMode);   // restore the mode the operator was in
 
         // Stopping from the in-row action returns to REVEALED, with the pickers usable again. The unlock is
         // a projection of the state machine (proved on lockProbe above), so mirror it here.
         vm.IsDesktopCaptureActive = false;
         vm.IsCaptureSelectorEnabled = true;
-        Expect(vm.IsBroadcastRevealed, "The in-row stop leaves the panel revealed.");
+        Expect(vm.IsBroadcastModeVisible,
+            "The in-row stop leaves the operator in Broadcast mode, with the pickers usable again.");
         Expect(vm.IsCaptureSelectorEnabled, "After a stop the pickers must be usable again.");
         Expect(vm.BroadcastActionText == "Start Broadcasting", "After a stop the action returns to Start.");
 
-        // The row-0 dismiss returns to HIDDEN.
-        vm.IsBroadcastRevealed = false;
-        Expect(!vm.IsBroadcastRowVisible, "Dismissing returns to State 1 (Hidden).");
+        // Change Mode returns to the picker, where the row is not shown.
+        vm.ChangeModeCommand.Execute(null);
+        Expect(vm.IsPickerVisible, "Change Mode must return to the picker.");
+        Expect(!vm.IsBroadcastRowVisible, "On the picker the broadcast row is not shown.");
 
         // ---- 6. RECORDING IS STILL AN INDEPENDENT AXIS --------------------------------------------
-        vm.IsBroadcastRevealed = true;
+        vm.SelectModeCommand.Execute(AppMode.BroadcastMode);
         vm.IsDesktopCaptureActive = true;
 
         long frames = 0;
@@ -746,10 +1234,10 @@ class Program
         {
             bool rowWasVisibleWhileRecording = vm.IsBroadcastRowVisible;
 
-            // Broadcast OFF mid-take: the row returns to Hidden (reveal cleared + no longer live) and the
-            // take must not notice.
+            // Broadcast OFF mid-take: the row stops being shown (mode left + no longer live) and the take
+            // must not notice.
             vm.IsDesktopCaptureActive = false;
-            vm.IsBroadcastRevealed = false;
+            vm.SelectModeCommand.Execute(AppMode.CaptureMode);
             Expect(!vm.IsBroadcastRowVisible,
                 "Broadcast OFF must hide the row even while a take is running - the row is not keyed to recording.");
             Expect(rowWasVisibleWhileRecording,
@@ -2437,6 +2925,1146 @@ class Program
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> BroadcastSessionState transitions, stop-first ordering, and selector-lock derivation verified!");
         Console.ResetColor();
+    }
+
+    /// <summary>
+    /// NET-018: the extracted TakeSupervisor driven IN ISOLATION — a fake recorder, a fake watchable
+    /// feed and the injected clock. No AudioEngine, no sink, no CaptureSession event plumbing: this is
+    /// the ADR-0002 policy on its own, which is the whole reason the state machine was extracted.
+    /// </summary>
+    static void TestTakeSupervisor()
+    {
+        Console.WriteLine("\n[Step 0.695] Verifying TakeSupervisor in isolation (fake recorder + injected clock)...");
+
+        var config = new RecordingConfig
+        {
+            InputLossThresholdSeconds = 5.0,
+            InputRecoveryGraceSeconds = 30.0,
+            MaxDurationMinutes = 30
+        };
+        var format = new StreamFormat { Width = 1920, Height = 1080, FrameRate = 30, SampleRate = 48000, Channels = 2 };
+
+        // ---- 1. TAKE LIFECYCLE + WATCHDOG ARMING -------------------------------------------
+        {
+            long now = 1_000_000;
+            Func<long> clock = () => now;
+            var recorder = new FakeTakeRecorder();
+            var feed = new FakeWatchableFeed();
+            var watchdog = new InputHealthWatchdog(thresholdMs: 5000, clock: clock);
+
+            using var supervisor = new TakeSupervisor(recorder, watchdog, () => feed, clock);
+
+            Expect(!supervisor.TakeInProgress, "A supervisor with no take must not report one in progress.");
+            Expect(!watchdog.IsArmed, "The watchdog must start disarmed.");
+
+            recorder.IsRecording = true;
+            supervisor.BeginTake(config, format);
+
+            Expect(supervisor.TakeInProgress, "BeginTake must put the supervisor into the take state.");
+            Expect(watchdog.IsArmed, "A take over a watchable (network) feed must arm the watchdog.");
+            Expect(supervisor.InputLossThreshold == TimeSpan.FromSeconds(5),
+                $"BeginTake must apply the config's input-loss threshold; got {supervisor.InputLossThreshold}.");
+            Expect(supervisor.InputRecoveryGracePeriod == TimeSpan.FromSeconds(30),
+                $"BeginTake must apply the config's grace period; got {supervisor.InputRecoveryGracePeriod}.");
+
+            supervisor.EndTake();
+            Expect(!supervisor.TakeInProgress, "EndTake must leave the take state.");
+            Expect(!watchdog.IsArmed, "EndTake must disarm the watchdog.");
+
+            // An in-process source is NEVER watched, even mid-take (ADR-0002 decision 2).
+            feed.RequiresInputHealthWatch = false;
+            recorder.IsRecording = true;
+            supervisor.BeginTake(config, format);
+            Expect(!watchdog.IsArmed,
+                "A take over an in-process feed (test signal / host capture) must never arm the watchdog.");
+            supervisor.EndTake();
+        }
+
+        // ---- 2. BOUNDARY EVALUATION ORDERING -----------------------------------------------
+        // Boundaries are evaluated BEFORE the watchdog edge. A take that ends on a boundary this tick
+        // must be disarmed before the poll can report a false input loss.
+        {
+            long now = 2_000_000;
+            Func<long> clock = () => now;
+            var recorder = new FakeTakeRecorder();
+            var feed = new FakeWatchableFeed();
+            var watchdog = new InputHealthWatchdog(thresholdMs: 5000, clock: clock);
+
+            using var supervisor = new TakeSupervisor(recorder, watchdog, () => feed, clock);
+
+            bool lostFired = false;
+            bool maxFired = false;
+            supervisor.InputLost += () => lostFired = true;
+            supervisor.MaxDurationReached += () => maxFired = true;
+
+            recorder.IsRecording = true;
+            supervisor.BeginTake(config, format);
+            Expect(watchdog.IsArmed, "Precondition: the watchdog must be armed for the ordering test.");
+
+            // Silence past the loss threshold AND a due max-duration boundary on the SAME tick.
+            recorder.NextBoundary = RecordingBoundary.MaxDuration;
+            now += 6000;
+            supervisor.Tick();
+
+            Expect(maxFired, "The max-duration boundary must be reported.");
+            Expect(!lostFired,
+                "The boundary is evaluated BEFORE the watchdog edge, so a take that just ended must not " +
+                "also report an input loss on the same tick.");
+            Expect(!supervisor.TakeInProgress, "A max-duration boundary must end the take.");
+            Expect(!watchdog.IsArmed, "Ending the take on a boundary must disarm the watchdog before the poll.");
+            Expect(recorder.Stops.Count == 1 && recorder.Stops[0] == RecordingStopReason.MaxDuration,
+                $"The boundary stop must route through the recorder (the arm's single finalize path); " +
+                $"got [{string.Join(",", recorder.Stops)}].");
+        }
+
+        // ---- 3. OUTAGE -> RECONNECT BACKOFF -> GRACE EXPIRY --------------------------------
+        {
+            long now = 3_000_000;
+            Func<long> clock = () => now;
+            var recorder = new FakeTakeRecorder();
+            var feed = new FakeWatchableFeed();
+            var watchdog = new InputHealthWatchdog(thresholdMs: 5000, clock: clock);
+
+            using var supervisor = new TakeSupervisor(recorder, watchdog, () => feed, clock);
+
+            int lostCount = 0;
+            int recoveredCount = 0;
+            bool failed = false;
+            supervisor.InputLost += () => lostCount++;
+            supervisor.InputRecovered += () => recoveredCount++;
+            supervisor.InputRecoveryFailed += () => failed = true;
+
+            recorder.IsRecording = true;
+            supervisor.BeginTake(config, format);
+
+            // Outage boundary: silence past the threshold.
+            now += 5001;
+            supervisor.Tick();
+
+            Expect(lostCount == 1, $"Exactly one InputLost must be raised at the outage boundary; got {lostCount}.");
+            Expect(!recorder.IsRecording,
+                "The current segment must be finalized AT the outage boundary (stop routed through the recorder).");
+            Expect(recorder.Stops.Count == 1 && recorder.Stops[0] == RecordingStopReason.InputLoss,
+                $"The outage stop must be recorded as InputLoss; got [{string.Join(",", recorder.Stops)}].");
+            Expect(supervisor.TakeInProgress,
+                "The TAKE must stay in progress across an outage (only the segment ended), so the watchdog " +
+                "keeps watching for restored frames.");
+
+            // Backoff: attempt 1 fires on the outage tick, then 250 ms, then 500 ms (ReconnectBackoff).
+            WaitFor(() => feed.ReconnectCount >= 1, "first auto-reconnect attempt");
+            now += 249;
+            supervisor.Tick();
+            Thread.Sleep(40);
+            Expect(feed.ReconnectCount == 1,
+                $"No reconnect may fire before the 250 ms backoff window elapses; got {feed.ReconnectCount}.");
+
+            now += 1; // exactly 250 ms
+            supervisor.Tick();
+            WaitFor(() => feed.ReconnectCount >= 2, "second auto-reconnect attempt");
+
+            // Grace expiry: still lost past the 30 s window -> the take ends and the alarm persists.
+            now += 31_000;
+            supervisor.Tick();
+
+            Expect(failed, "The bounded grace period expiring must raise InputRecoveryFailed.");
+            Expect(!supervisor.TakeInProgress, "Grace expiry must end the take.");
+            Expect(recoveredCount == 0, "A never-restored feed must not report a recovery.");
+        }
+
+        // ---- 4. RECOVERY RESUMES THE TAKE INTO THE NEXT SEGMENT ----------------------------
+        {
+            long now = 4_000_000;
+            Func<long> clock = () => now;
+            var recorder = new FakeTakeRecorder();
+            var feed = new FakeWatchableFeed();
+            var watchdog = new InputHealthWatchdog(thresholdMs: 5000, clock: clock);
+
+            using var supervisor = new TakeSupervisor(recorder, watchdog, () => feed, clock);
+
+            int recoveredCount = 0;
+            supervisor.InputRecovered += () => recoveredCount++;
+
+            recorder.IsRecording = true;
+            supervisor.BeginTake(config, format);
+
+            now += 5001;
+            supervisor.Tick();
+            Expect(recorder.Stops.Count == 1, "Precondition: the outage must finalize the first segment.");
+            int segmentAfterOutage = recorder.CurrentSegmentIndex;
+
+            // Frames return within grace: the watchdog edge flips on the next poll.
+            watchdog.NotifyVideoFrame();
+            now += 100;
+            supervisor.Tick();
+
+            Expect(recoveredCount == 1, $"Recovery must raise InputRecovered exactly once; got {recoveredCount}.");
+            Expect(supervisor.TakeInProgress, "A recovered take must still be in progress.");
+            Expect(recorder.IsRecording, "Recovery must resume recording through the recorder.");
+            Expect(recorder.ResumeCount == 1,
+                $"Recovery must resume into the next segment via the recorder; got {recorder.ResumeCount}.");
+            Expect(recorder.CurrentSegmentIndex == segmentAfterOutage + 1,
+                $"Resume must open the NEXT segment; went {segmentAfterOutage} -> {recorder.CurrentSegmentIndex}.");
+        }
+
+        Console.WriteLine(" -> Take lifecycle, watchdog arming (watchable only), boundary-before-watchdog ordering, " +
+                          "outage -> backoff -> grace expiry, and segment resume all verified with NO audio engine!");
+    }
+
+    /// <summary>
+    /// NET-018: stands in for StreamRecorderService in the supervisor's isolation test. Records the
+    /// effect calls so their SEQUENCE can be asserted, and lets the test decide what the arm reports.
+    /// No sink, no transport, no audio engine.
+    /// </summary>
+    private sealed class FakeTakeRecorder : ITakeRecorder
+    {
+        private readonly List<RecordingStopReason> _stops = new();
+
+        public bool IsRecording { get; set; }
+
+        public int CurrentSegmentIndex { get; set; } = 1;
+
+        public string? CurrentRecordingPath { get; set; } = "/fake/seg01.mp4";
+
+        /// <summary>The boundary the fake arm reports on the NEXT evaluation, then clears.</summary>
+        public RecordingBoundary NextBoundary { get; set; } = RecordingBoundary.None;
+
+        public IReadOnlyList<RecordingStopReason> Stops => _stops;
+
+        public int ResumeCount { get; private set; }
+
+        public RecordingBoundary EvaluateBoundary(RecordingConfig config)
+        {
+            RecordingBoundary boundary = NextBoundary;
+            NextBoundary = RecordingBoundary.None;   // a real boundary fires once
+            return boundary;
+        }
+
+        public bool RollSegment(RecordingConfig config, StreamFormat format, RecordingStopReason reason)
+        {
+            CurrentSegmentIndex++;
+            CurrentRecordingPath = $"/fake/seg{CurrentSegmentIndex:00}.mp4";
+            return true;
+        }
+
+        public bool StartNextSegment(RecordingConfig config, StreamFormat format)
+        {
+            ResumeCount++;
+            CurrentSegmentIndex++;
+            CurrentRecordingPath = $"/fake/seg{CurrentSegmentIndex:00}.mp4";
+            IsRecording = true;
+            return true;
+        }
+
+        public void StopRecording(RecordingStopReason reason)
+        {
+            _stops.Add(reason);
+            IsRecording = false;
+        }
+    }
+
+    /// <summary>
+    /// NET-018: a watchable feed with no transport behind it. The supervisor only asks two questions —
+    /// "must this be watched?" and "please reconnect" — so that is all this answers.
+    /// </summary>
+    private sealed class FakeWatchableFeed : IMediaSource, IRecoverableMediaSource
+    {
+        private int _reconnectCount;
+
+        public string Name => "Fake Watchable Feed";
+        public string Address => "fake://watchable";
+        public bool IsConnected => true;
+
+        public bool RequiresInputHealthWatch { get; set; } = true;
+
+        public int ReconnectCount => Volatile.Read(ref _reconnectCount);
+
+        public event Action<IntPtr, int, int, int, int, double, long>? VideoFrameReceived { add { } remove { } }
+        public event Action<IntPtr, int, int, int, long>? AudioFrameReceived { add { } remove { } }
+        public event Action<StreamTelemetry>? TelemetryUpdated { add { } remove { } }
+        public event Action<string>? StatusChanged { add { } remove { } }
+        public event Action<string>? ErrorOccurred { add { } remove { } }
+
+        public void Connect() { }
+        public void Disconnect() { }
+
+        public void EnsureConnected() => Interlocked.Increment(ref _reconnectCount);
+
+        public void Dispose() { }
+    }
+
+    /// <summary>
+    /// NET-022 / ADR-0011: the mode-based shell. Headless — the state is constructed with no Avalonia
+    /// platform, and the ViewModel is driven through its real commands. Covers the three states, the
+    /// "picker always opens" rule, the Change-Mode gate, and LastAppMode persistence.
+    /// </summary>
+    static void TestAppModeShell()
+    {
+        Console.WriteLine("\n[Step 0.698] Verifying the mode-based shell (states, projection, gate, persistence)...");
+
+        // ---- 1. THE HEADLESS STATE ---------------------------------------------------------------
+        var state = new AppModeState();
+        Expect(state.CurrentMode == AppMode.ModeSelection,
+            $"The shell must OPEN on the picker (ADR-0011 decision 1); got {state.CurrentMode}.");
+        Expect(state.IsModeSelection && !state.IsOperatingMode, "A fresh state is the picker, not an operating mode.");
+
+        int events = 0;
+        AppMode? lastOld = null, lastNew = null;
+        state.ModeChanged += (_, e) => { events++; lastOld = e.OldMode; lastNew = e.NewMode; };
+
+        bool moved = state.SetMode(AppMode.CaptureMode);
+        Expect(moved, "SetMode must report that it moved.");
+        Expect(events == 1, $"One transition must raise exactly one event; got {events}.");
+        Expect(lastOld == AppMode.ModeSelection && lastNew == AppMode.CaptureMode,
+            $"The event must carry old/new; got {lastOld}->{lastNew}.");
+        Expect(!state.SetMode(AppMode.CaptureMode) && events == 1,
+            "Re-entering the same mode must be a no-op and raise nothing.");
+        Expect(state.IsOperatingMode, "Capture mode is an operating mode.");
+
+        // ---- 2. THE VIEW MODEL PROJECTION ---------------------------------------------------------
+        using (var seam = BuildHeadlessSession())
+        {
+            var vm = seam.ViewModel!;
+            var vmState = new AppModeState();
+            // The fixture's VM owns its own state; drive that same projection through the commands.
+            Expect(vm.IsPickerVisible && !vm.IsCaptureModeVisible && !vm.IsBroadcastModeVisible,
+                "At construction the shell must project the picker and only the picker.");
+
+            vm.SelectModeCommand.Execute(AppMode.CaptureMode);
+            Expect(vm.IsCaptureModeVisible && !vm.IsPickerVisible,
+                "Selecting Capture must swap the content region to the capture mode.");
+            Expect(vm.LastUsedAppMode == AppMode.CaptureMode,
+                $"Selecting a mode must remember it; got {vm.LastUsedAppMode}.");
+            Expect(vm.IsCaptureCardHighlighted && !vm.IsBroadcastCardHighlighted,
+                "The picker must pre-highlight the mode that was just used.");
+            Expect(vm.IsModeChangeAllowed,
+                "Change Mode must be allowed while nothing is recording or broadcasting.");
+
+            vm.ChangeModeCommand.Execute(null);
+            Expect(vm.IsPickerVisible && !vm.IsCaptureModeVisible,
+                "Change Mode must return to the picker.");
+            Expect(vm.LastUsedAppMode == AppMode.CaptureMode,
+                "Returning to the picker must NOT erase the last-used mode (ADR-0011 decision 1).");
+
+            vm.SelectModeCommand.Execute(AppMode.BroadcastMode);
+            Expect(vm.IsBroadcastModeVisible && !vm.IsPickerVisible,
+                "Selecting Broadcast must swap the content region to the broadcast mode.");
+            Expect(vm.LastUsedAppMode == AppMode.BroadcastMode, "The last-used mode must follow the new choice.");
+
+            // ---- 2a. THE BROADCAST ROW IS KEYED TO THE MODE (P2-01) -------------------------------
+            // The reveal toggle used to own this flag. Once it left the UI nothing could set it, so it
+            // stayed false forever: in Broadcast mode the row never showed, the selection hint was
+            // permanently invisible, and the compact summary inverted over it. The mode now drives all three.
+            Expect(vm.IsBroadcastRowVisible,
+                "In Broadcast mode the configuration row must be visible - the mode IS the reveal (ADR-0011 d.1).");
+            Expect(vm.IsBroadcastSelecting,
+                "In Broadcast mode with nothing live the row must report SELECTING, or the selection hint " +
+                "stays permanently invisible (P2-01).");
+            Expect(!vm.IsLiveSettingSummaryVisible,
+                "The compact summary must stand down while the row is up, so it can never cover the hint.");
+            Expect(!vm.IsDesktopCaptureActive, "Entering Broadcast mode must not start a send.");
+
+            // Selecting the picker as a "mode" is not a card action and must be ignored.
+            vm.SelectModeCommand.Execute(AppMode.ModeSelection);
+            Expect(vm.IsBroadcastModeVisible, "SelectMode(ModeSelection) is a no-op - the picker is reached via ChangeMode.");
+        }
+
+        // ---- 2b. THE GATE: a LIVE TAKE closes Change Mode, stopping reopens it ---------------------
+        using (var gateSeam = BuildHeadlessSession())
+        {
+            var gateVm = gateSeam.ViewModel!;
+            gateVm.SelectModeCommand.Execute(AppMode.CaptureMode);
+
+            long gateFrames = 0;
+            gateSeam.Session.VideoFrameAvailable += (ptr, len, w, h, st, fps, ts) => Interlocked.Increment(ref gateFrames);
+            gateSeam.Session.Connect(new SyntheticPatternSource());
+
+            int gateWait = 0;
+            while (Interlocked.Read(ref gateFrames) < 5 && gateWait < 40)
+            {
+                Thread.Sleep(50);
+                gateWait++;
+            }
+
+            var gateConfig = new RecordingConfig
+            {
+                OutputDirectory = Path.GetTempPath(),
+                FilenamePrefix = "ModeGateTest"
+            };
+
+            if (gateSeam.Session.StartRecording(gateConfig))
+            {
+                try
+                {
+                    Expect(!gateVm.IsModeChangeAllowed,
+                        "Change Mode must be DISABLED while a take is live (ADR-0011 decision 4).");
+                    Expect(gateVm.ModeChangeBlockedHint.Contains("recording"),
+                        $"The hint must name the blocker; got '{gateVm.ModeChangeBlockedHint}'.");
+
+                    gateVm.ChangeModeCommand.Execute(null);
+                    Expect(gateVm.IsCaptureModeVisible && !gateVm.IsPickerVisible,
+                        "A Change Mode command must be REFUSED while a take is live - never a silent teardown.");
+                }
+                finally
+                {
+                    gateSeam.Session.StopRecordingAsync().GetAwaiter().GetResult();
+                }
+
+                // The stop notification runs on the pool then posts to the UI thread (headless-safe).
+                int reopenWait = 0;
+                while (!gateVm.IsModeChangeAllowed && reopenWait < 60)
+                {
+                    Thread.Sleep(50);
+                    reopenWait++;
+                }
+
+                Expect(gateVm.IsModeChangeAllowed,
+                    "Stopping the take must reopen Change Mode.");
+                Expect(gateVm.ModeChangeBlockedHint.Length == 0,
+                    "The blocker hint must clear when the gate reopens.");
+
+                gateVm.ChangeModeCommand.Execute(null);
+                Expect(gateVm.IsPickerVisible, "With nothing live, Change Mode must now return to the picker.");
+            }
+            else
+            {
+                Console.WriteLine("   [SKIP] the canned take did not start; the gate's live half is unproven here.");
+            }
+        }
+
+        // ---- 3. PERSISTENCE: LastAppMode rides ADR-0006, and the picker STILL opens ----------------
+        string root = Path.Combine(Path.GetTempPath(), "omt-mode-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+        Directory.CreateDirectory(root);
+        try
+        {
+            string path = Path.Combine(root, "settings.json");
+            var store = new SettingsStore(path);
+            using (var seam = BuildHeadlessSession())
+            {
+                var vm = seam.ViewModel!;
+                vm.AttachSettings(store, new OperatorSettings());
+                vm.SelectModeCommand.Execute(AppMode.CaptureMode);
+
+                var reloaded = store.Load();
+                Expect(reloaded.LastAppMode == AppMode.CaptureMode,
+                    $"LastAppMode must persist through the settings store; got {reloaded.LastAppMode}.");
+            }
+
+            // A FRESH session with those settings: the picker still opens, but Capture is pre-highlighted.
+            using (var seam2 = BuildHeadlessSession())
+            {
+                var vm2 = seam2.ViewModel!;
+                var restored = store.Load();
+                vm2.AttachSettings(store, restored);
+
+                Expect(vm2.IsPickerVisible,
+                    "A restored LastAppMode must NOT auto-skip the picker (ADR-0011 decision 1).");
+                Expect(vm2.CurrentAppMode == AppMode.ModeSelection,
+                    $"The window must still open on the picker; got {vm2.CurrentAppMode}.");
+                Expect(vm2.IsCaptureCardHighlighted,
+                    "The restored mode must pre-highlight its card on the picker.");
+            }
+
+            // An older/hand-edited file with no mode: the picker opens and highlights NOTHING.
+            using (var seam3 = BuildHeadlessSession())
+            {
+                var vm3 = seam3.ViewModel!;
+                vm3.AttachSettings(new SettingsStore(Path.Combine(root, "empty.json")), new OperatorSettings());
+                Expect(vm3.IsPickerVisible && !vm3.IsCaptureCardHighlighted && !vm3.IsBroadcastCardHighlighted,
+                    "With no saved mode, the picker must open and highlight neither card.");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+
+        // ---- 4. STRUCTURAL GUARD: grid placement in EVERY multi-row grid ---------------------------
+        // Headless tests cannot RENDER XAML, so a child that silently defaults to Grid.Row 0 - because a
+        // move stripped its Grid.Row - is invisible to every other assertion in this suite. It is NOT
+        // invisible to the operator: the recording bar stacked behind the source picker and vanished, the
+        // shared status bar floated over the content, and in BroadcastModeView the Start/Stop and
+        // Change-Mode buttons overlapped by 115x23px at the 950px floor. Pixel verification caught each;
+        // this keeps them caught in CI.
+        //
+        // The FIRST version of this guard checked only each file's OUTER grid, so every NESTED multi-row
+        // grid escaped it - which is exactly where the BroadcastModeView P1 lived. It now walks EVERY Grid
+        // descendant. Rule: in ANY Grid declaring more than one row, every child states its Grid.Row.
+        {
+            string[] axamlFiles =
+            {
+                "OmtCaptureStudio/MainWindow.axaml",
+                "OmtCaptureStudio/Views/CaptureModeView.axaml",
+                "OmtCaptureStudio/Views/BroadcastModeView.axaml",
+                "OmtCaptureStudio/Views/ModeSelectionView.axaml",
+                "OmtCaptureStudio/Views/VideoSurface.axaml"
+            };
+
+            // Rows can be declared EITHER as a <Grid.RowDefinitions> element or with the
+            // RowDefinitions="Auto,*,Auto" attribute shorthand. Counting only the element form made the
+            // first version of this guard silently skip every file that used the shorthand - i.e. all of
+            // them - and pass with the bug deliberately reintroduced. Support both forms.
+            static int RowCount(System.Xml.Linq.XElement grid, System.Xml.Linq.XNamespace ns)
+            {
+                int n = grid.Elements(ns + "Grid.RowDefinitions")
+                            .SelectMany(r => r.Elements(ns + "RowDefinition")).Count();
+                if (n == 0)
+                {
+                    string? shorthand = grid.Attribute("RowDefinitions")?.Value;
+                    if (!string.IsNullOrWhiteSpace(shorthand))
+                    {
+                        n = shorthand!.Split(',').Length;
+                    }
+                }
+
+                return n;
+            }
+
+            int multiRowGridsChecked = 0;
+
+            foreach (string rel in axamlFiles)
+            {
+                string? axamlPath = FindRepoSource(rel);
+                if (axamlPath == null)
+                {
+                    Console.WriteLine($"   [SKIP] {rel} is not reachable from this tree.");
+                    continue;
+                }
+
+                var axaml = System.Xml.Linq.XDocument.Load(axamlPath);
+                var xns = axaml.Root!.Name.Namespace;
+                var grids = axaml.Descendants(xns + "Grid").ToList();
+                Expect(grids.Count > 0, $"{rel} must contain a Grid.");
+                if (grids.Count == 0) continue;
+
+                foreach (var grid in grids)
+                {
+                    int rowCount = RowCount(grid, xns);
+                    if (rowCount <= 1) continue;
+
+                    multiRowGridsChecked++;
+
+                    var unplaced = grid.Elements()
+                        .Where(e => e.Name.LocalName is not ("Grid.RowDefinitions" or "Grid.ColumnDefinitions"))
+                        .Where(e => e.Attribute("Grid.Row") == null)
+                        .Select(e => e.Name.LocalName)
+                        .ToList();
+
+                    Expect(unplaced.Count == 0,
+                        $"{rel}: a child of a {rowCount}-row Grid omits Grid.Row, so it silently defaults to " +
+                        $"row 0 and overlaps its siblings. Offenders: {string.Join(", ", unplaced)}.");
+                }
+            }
+
+            // ANTI-VACUITY FLOOR. A guard that checks nothing passes for the wrong reason - exactly how the
+            // first version shipped broken. Seven multi-row grids exist across these five files; if row
+            // counting regresses or a file drops out of the walk, this fails loudly instead of silently
+            // certifying a layout it never examined.
+            Expect(multiRowGridsChecked >= 7,
+                $"The XAML row guard only reached {multiRowGridsChecked} multi-row Grid(s), expected at least 7 " +
+                "- it is not exercising the views, so it cannot certify them.");
+        }
+
+        Console.WriteLine(" -> Three states, one projection, the Change-Mode gate, LastAppMode persistence " +
+                          "and the XAML row-placement invariant (ALL multi-row grids) all verified!");
+    }
+
+    /// <summary>
+    /// NET-020: the diagnostics bundle. The readout is asserted PURE first (no filesystem at all), then
+    /// collection across BOTH forensics locations, the global keep-last-N rule, the empty-artifact edge,
+    /// and a write failure that must return a result rather than throw.
+    /// </summary>
+    static void TestDiagnosticsBundle()
+    {
+        Console.WriteLine("\n[Step 0.697] Verifying the diagnostics bundle (readout, dual-location, keep-last-N, empty edge, write failure)...");
+
+        // ---- 1. THE READOUT IS PURE ------------------------------------------------------------------
+        var live = new DiagnosticsSnapshot
+        {
+            AppVersion = "v9.9.9-test",
+            FfmpegVersion = "ffmpeg version 9.0.1-test",
+            Health = new RecordingHealthSnapshot
+            {
+                IsRecording = true,
+                HasTake = true,
+                SegmentIndex = 3,
+                EncoderName = "h264_nvenc",
+                AchievedBitrateMbps = 12.5,
+                VideoFramesWritten = 1234,
+                VideoFramesDropped = 7,
+                AudioChunksDropped = 2,
+                MediaDuration = TimeSpan.FromSeconds(61.5),
+                AudioDuration = TimeSpan.FromSeconds(61.5),
+                WallClockDuration = TimeSpan.FromSeconds(66),
+                AvDriftRatio = 1.0004,
+                DiagnosticTail = "frame= 1234 fps=60"
+            },
+            DetachedChildNames = new[] { "Backup/folder" },
+            LogDirectory = "C:/x/logs",
+            PrimaryLogDirectory = "C:/x/logs",
+            DumpDirectory = "C:/x/crashdumps",
+            PrimaryDumpDirectory = "C:/x/crashdumps",
+            CrashReportPath = "C:/x/crashdumps/crash-1.dmp",
+            GeneratedUtc = new DateTimeOffset(2026, 10, 18, 21, 30, 0, TimeSpan.Zero),
+            OsDescription = "Microsoft Windows 11 Pro"
+        };
+
+        string text = DiagnosticsBundle.BuildDiagnosticsText(live);
+        Expect(text.Contains("v9.9.9-test"), "The readout must carry the app version.");
+        Expect(text.Contains("Microsoft Windows 11 Pro"), "The readout must carry the OS.");
+        Expect(text.Contains("2026-10-18 21:30:00 UTC"), "The readout must carry the generation time.");
+        Expect(text.Contains("h264_nvenc"), "The readout must carry the encoder actually used.");
+        Expect(text.Contains("segment index : 3"), "The readout must carry the segment index.");
+        Expect(text.Contains("video frames  : 1234 written, 7 dropped"), "The readout must carry both frame counters.");
+        Expect(text.Contains("audio chunks  : 2 dropped"), "The readout must carry the dropped audio chunks.");
+        Expect(text.Contains("12.50 Mbps"), "The readout must carry the achieved bitrate.");
+        Expect(text.Contains("frame= 1234 fps=60"), "The readout must carry the FFmpeg diagnostic tail.");
+        Expect(text.Contains("Backup/folder"), "The readout must name a detached destination.");
+        Expect(text.Contains("status : available"), "A proven ffmpeg must read as available.");
+        Expect(!text.Contains("UNAVAILABLE"), "An available ffmpeg must not report UNAVAILABLE.");
+
+        var down = live with
+        {
+            IsRecordingUnavailable = true,
+            RecordingUnavailableText = "ffmpeg was not found in the application directory or on PATH",
+            FfmpegVersion = string.Empty,
+            DetachedChildNames = Array.Empty<string>()
+        };
+        string downText = DiagnosticsBundle.BuildDiagnosticsText(down);
+        Expect(downText.Contains("status : UNAVAILABLE"), "A failed preflight must read as UNAVAILABLE.");
+        Expect(downText.Contains("ffmpeg was not found in the application directory"), "The unavailability reason must be spelled out.");
+        Expect(downText.Contains("no destination was detached"), "No detach must say so rather than printing nothing.");
+        Expect(DiagnosticsBundle.BuildDiagnosticsText(live) == text, "The readout must be pure - the same snapshot must yield the same text.");
+
+        // ---- 2. COLLECTION: BOTH LOCATIONS, GLOBAL KEEP-LAST-N ---------------------------------------
+        string root = Path.Combine(Path.GetTempPath(), "omt-diag-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+        string logs = Path.Combine(root, "logs");
+        string oldLogs = Path.Combine(root, "readonly-run", "logs");
+        string dumps = Path.Combine(root, "crashdumps");
+        string oldDumps = Path.Combine(root, "readonly-run", "crashdumps");
+        Directory.CreateDirectory(logs);
+        Directory.CreateDirectory(oldLogs);
+        Directory.CreateDirectory(dumps);
+        Directory.CreateDirectory(oldDumps);
+
+        var stamp = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
+        for (int i = 0; i < 7; i++) WriteTemp(Path.Combine(logs, $"2026-10-{i + 1:00}.log"), $"day {i}", stamp.AddDays(i));
+        WriteTemp(Path.Combine(logs, "crash-0.log"), "boom", stamp.AddDays(30));
+        WriteTemp(Path.Combine(logs, "crash-1.log"), "boom again", stamp.AddDays(31));
+        for (int i = 0; i < 4; i++) WriteTemp(Path.Combine(dumps, $"crash-{i}.dmp"), "dump", stamp.AddDays(i));
+
+        // A previous run fell back to LOCALAPPDATA while this one resolves to the app directory. Its
+        // artifacts are the NEWEST and exist ONLY there - collecting just the active directory would
+        // omit exactly what the operator is being asked to send.
+        WriteTemp(Path.Combine(oldLogs, "2026-09-09.log"), "old day (newest of all)", stamp.AddDays(100));
+        WriteTemp(Path.Combine(oldDumps, "crash-9.dmp"), "old dump (newest of all)", stamp.AddDays(200));
+
+        var spread = live with
+        {
+            LogDirectory = logs,
+            PrimaryLogDirectory = oldLogs,
+            DumpDirectory = dumps,
+            PrimaryDumpDirectory = oldDumps
+        };
+
+        var picked = DiagnosticsBundle.CollectArtifacts(spread);
+        var names = picked.Select(a => a.EntryName).ToList();
+
+        int daily = picked.Count(a => a.EntryName.StartsWith("logs/"));
+        int crashLogs = picked.Count(a => a.EntryName.StartsWith("crashlogs/"));
+        int dumpsPicked = picked.Count(a => a.EntryName.StartsWith("crashdumps/"));
+
+        Expect(daily == DiagnosticsBundle.KeepLastLogs,
+            $"Keep-last-N must be GLOBAL across locations: expected {DiagnosticsBundle.KeepLastLogs} daily logs, got {daily}.");
+        Expect(names.Contains("logs/2026-09-09.log"),
+            "A daily log that exists ONLY in the fallback location must still be collected.");
+        Expect(!names.Contains("logs/2026-10-01.log"),
+            "The OLDEST daily log must be dropped by the cap; the pick was not by recency.");
+        Expect(crashLogs == 2, $"Both crash reports belong in the bundle (under the cap); got {crashLogs}.");
+        Expect(dumpsPicked == DiagnosticsBundle.KeepLastDumps,
+            $"Expected the newest {DiagnosticsBundle.KeepLastDumps} dumps, got {dumpsPicked}.");
+        Expect(names.Contains("crashdumps/crash-9.dmp"),
+            "A minidump that exists ONLY in the fallback location must still be collected.");
+        Expect(picked.Count == names.Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+            "Entry names must be unique - an archive with duplicate entries is not valid.");
+
+        // ---- 3. A REAL ARCHIVE: diagnostics.txt is first and carries the readout ---------------------
+        string outDir = Path.Combine(root, "out");
+        string bundlePath = Path.Combine(outDir, DiagnosticsBundle.DefaultFileName(spread.GeneratedUtc));
+
+        DiagnosticsBundleResult made = DiagnosticsBundle.Create(spread, bundlePath);
+        Expect(made.Success, $"Creating the bundle must succeed; got '{made.Error}'.");
+        Expect(File.Exists(bundlePath), "Create must have written the archive.");
+        Expect(made.SizeBytes > 0, "The archive must not be empty.");
+        Expect(made.Entries.Count == picked.Count + 1, "The archive must hold every artifact plus the readout.");
+        Expect(made.Entries[0] == DiagnosticsBundle.DiagnosticsEntryName, "diagnostics.txt must be the FIRST entry.");
+
+        using (var zip = ZipFile.OpenRead(bundlePath))
+        {
+            var entryNames = zip.Entries.Select(e => e.FullName).ToList();
+            Expect(entryNames.Contains(DiagnosticsBundle.DiagnosticsEntryName), "The archive must contain diagnostics.txt.");
+            Expect(entryNames.Contains("logs/2026-09-09.log"), "The archive must contain the fallback-location log.");
+            Expect(entryNames.Contains("crashdumps/crash-9.dmp"), "The archive must contain the fallback-location dump.");
+
+            string inside;
+            using (var reader = new StreamReader(zip.GetEntry(DiagnosticsBundle.DiagnosticsEntryName)!.Open()))
+            {
+                inside = reader.ReadToEnd();
+            }
+
+            Expect(inside.Contains("v9.9.9-test"), "The bundled readout must carry the version.");
+            Expect(inside.Contains("h264_nvenc"), "The bundled readout must carry the health snapshot.");
+            Expect(inside.Contains("logs/2026-09-09.log"),
+                "The bundled readout must list the artifacts actually in the archive.");
+        }
+
+        // ---- 4. THE EMPTY EDGE: no logs, no dumps, still a VALID bundle ------------------------------
+        var barren = live with
+        {
+            LogDirectory = Path.Combine(root, "no-such-logs"),
+            PrimaryLogDirectory = Path.Combine(root, "no-such-primary-logs"),
+            DumpDirectory = Path.Combine(root, "no-such-dumps"),
+            PrimaryDumpDirectory = Path.Combine(root, "no-such-primary-dumps"),
+            CrashReportPath = null
+        };
+        Expect(DiagnosticsBundle.CollectArtifacts(barren).Count == 0, "A dir-less snapshot must collect nothing.");
+
+        string emptyPath = Path.Combine(outDir, "empty.zip");
+        DiagnosticsBundleResult empty = DiagnosticsBundle.Create(barren, emptyPath);
+        Expect(empty.Success, $"A bundle with no artifacts must still succeed; got '{empty.Error}'.");
+        Expect(empty.Entries.Count == 1 && empty.Entries[0] == DiagnosticsBundle.DiagnosticsEntryName,
+            "An empty bundle must carry diagnostics.txt and nothing else.");
+        Expect(File.Exists(emptyPath) && new FileInfo(emptyPath).Length > 0,
+            "An empty bundle must still be a real, non-zero-byte archive.");
+
+        using (var zip = ZipFile.OpenRead(emptyPath))
+        {
+            using var reader = new StreamReader(zip.GetEntry(DiagnosticsBundle.DiagnosticsEntryName)!.Open());
+            string inside = reader.ReadToEnd();
+            Expect(inside.Contains("no logs or crash artifacts were found"),
+                "An empty bundle's readout must SAY it found nothing, not just omit the section.");
+        }
+
+        // ---- 5. A WRITE FAILURE RETURNS A RESULT, AND LEAVES NO HALF-WRITTEN ARCHIVE -----------------
+        string blocker = Path.Combine(root, "not-a-directory");
+        File.WriteAllText(blocker, "x");
+        string impossible = Path.Combine(blocker, "bundle.zip");
+        DiagnosticsBundleResult failed = DiagnosticsBundle.Create(spread, impossible);
+        Expect(!failed.Success, "A bundle that cannot be written must report failure, not throw.");
+        Expect(!string.IsNullOrWhiteSpace(failed.Error), "A failed bundle must carry the reason.");
+        Expect(failed.Summary.Contains("could not be created"), "The status line must say the bundle failed.");
+        Expect(!File.Exists(impossible), "A failed bundle must not leave a file behind.");
+
+        DiagnosticsBundleResult noPath = DiagnosticsBundle.Create(spread, "");
+        Expect(!noPath.Success && noPath.Error != null, "An empty output path must fail cleanly, not throw.");
+
+        // ---- 6. DEFAULTS -----------------------------------------------------------------------------
+        Expect(DiagnosticsBundle.DefaultFileName(stamp).EndsWith(".zip"), "The default bundle name must be a zip.");
+        Expect(DiagnosticsBundle.DefaultFileName(stamp) != DiagnosticsBundle.DefaultFileName(stamp.AddSeconds(1)),
+            "The default name must be timestamped so repeat exports cannot overwrite each other.");
+        Expect(DiagnosticsBundle.DefaultBundleDirectory(spread) == Path.Combine(root, "diagnostics"),
+            $"The default bundle folder belongs beside the logs; got '{DiagnosticsBundle.DefaultBundleDirectory(spread)}'.");
+
+        // ---- 7. END-TO-END THROUGH THE VIEW MODEL ----------------------------------------------------
+        // The module is proven above; this proves the WIRING - the view model builds the snapshot from
+        // the live surfaces, derives the destination, and writes a real archive. The forensics locations
+        // are captured first and restored in a finally, so this step cannot leak state into the steps
+        // that follow it.
+        string[] logDirsBefore = CrashForensics.LogDirectories();
+        string[] dumpDirsBefore = CrashForensics.DumpDirectories();
+        string fallbackBefore = CrashForensics.FallbackRoot;
+
+        string vmRoot = Path.Combine(root, "vm");
+        string vmLogs = Path.Combine(vmRoot, "logs");
+        string vmDumps = Path.Combine(vmRoot, "crashdumps");
+        Directory.CreateDirectory(vmLogs);
+        Directory.CreateDirectory(vmDumps);
+        WriteTemp(Path.Combine(vmLogs, "2026-10-18.log"), "a live line", stamp.AddDays(300));
+        WriteTemp(Path.Combine(vmDumps, "crash-1.dmp"), "a dump", stamp.AddDays(300));
+
+        try
+        {
+            CrashForensics.ConfigureLocations(vmLogs, vmDumps, Path.Combine(vmRoot, "fallback"));
+
+            using var vmSeam = BuildHeadlessSession();
+            var vm = vmSeam.ViewModel!;
+
+            Expect(vm.IsDiagnosticsBundleOffered, "One dump is present, so the next-launch offer must be ON.");
+            Expect(vm.DiagnosticsBundleOfferText.Contains("1 crash dump"),
+                $"The offer must state how many dumps are waiting; got '{vm.DiagnosticsBundleOfferText}'.");
+            Expect(!vm.IsDiagnosticsBundleStatusVisible, "No bundle has been created yet, so no outcome line.");
+
+            vm.CreateDiagnosticsBundleCommand.Execute(null);
+
+            Expect(vm.IsDiagnosticsBundleStatusVisible, "Creating a bundle must publish the outcome line.");
+            Expect(vm.DiagnosticsBundleStatusText.Contains("saved"),
+                $"A successful export must read as saved; got '{vm.DiagnosticsBundleStatusText}'.");
+
+            string expectedDir = Path.Combine(vmRoot, DiagnosticsBundle.BundleFolder);
+            string[] written = Directory.Exists(expectedDir)
+                ? Directory.GetFiles(expectedDir, "*.zip")
+                : Array.Empty<string>();
+
+            Expect(written.Length == 1, $"The view model must write exactly one archive; found {written.Length}.");
+            if (written.Length == 1)
+            {
+                using var zip = ZipFile.OpenRead(written[0]);
+                var inZip = zip.Entries.Select(e => e.FullName).ToList();
+                Expect(inZip.Contains(DiagnosticsBundle.DiagnosticsEntryName),
+                    "The view model's bundle must carry the generated readout.");
+                Expect(inZip.Contains("logs/2026-10-18.log"),
+                    "The view model's bundle must carry the log from the configured location.");
+                Expect(inZip.Contains("crashdumps/crash-1.dmp"),
+                    "The view model's bundle must carry the minidump from the configured location.");
+            }
+        }
+        finally
+        {
+            CrashForensics.ConfigureLocations(logDirsBefore[0], dumpDirsBefore[0], fallbackBefore);
+        }
+
+        // ---- 8. THE DETACH CHAIN: sink -> service -> session -> the generated readout ---------------
+        // Brief item 1 wants the composite's detach history in diagnostics.txt. This drives a REAL
+        // composite until a child detaches and then walks the whole chain the bundle reads through.
+        {
+            const string ChainPrimary = "C:/take/chain.mp4";
+            const string ChainBackup = "D:/take/chain.mp4";
+            var chainConfig = new RecordingConfig { OutputDirectory = Path.GetTempPath(), FilenamePrefix = "DiagChain" };
+            var chainFormat = new StreamFormat { Width = 320, Height = 240, FrameRate = 10.0, SampleRate = 48000, Channels = 2 };
+            IntPtr chainFrame = System.Runtime.InteropServices.Marshal.AllocHGlobal(64);
+
+            try
+            {
+                var keepsWriting = new ScriptedRecordingSink("primary");
+                var goesAway = new ScriptedRecordingSink("backup")
+                {
+                    ThrowOnVideo = new IOException("the backup folder went away")
+                };
+
+                using var composite = new CompositeRecordingSink(
+                    new CompositeChild("primary", keepsWriting, ChainPrimary),
+                    new CompositeChild("backup", goesAway, ChainBackup));
+
+                var chained = new StreamRecorderService(composite);
+                using var chainedSession = new CaptureSession(new AudioEngine(), chained);
+
+                // The honest default: nothing detached, and every layer says so rather than guessing.
+                Expect(composite.DetachedDestinationNames.Count == 0,
+                    "A fresh composite must report no detached destination.");
+                Expect(chained.DetachedDestinationNames.Count == 0,
+                    "The service must forward the empty list, not invent one.");
+                Expect(chainedSession.DetachedDestinationNames.Count == 0,
+                    "The session must forward the empty list too - a single/healthy take has detached nothing.");
+
+                composite.Initialize(chainConfig, chainFormat, ChainPrimary);
+                composite.WriteVideo(chainFrame, 64);   // the backup child throws -> it detaches
+
+                Expect(composite.DetachedChildNames.Count == 1 && composite.DetachedChildNames[0] == "backup",
+                    $"The failing child must be reported as detached; got [{string.Join(",", composite.DetachedChildNames)}].");
+
+                var viaService = chained.DetachedDestinationNames;
+                Expect(viaService.Count == 1 && viaService[0] == "backup",
+                    $"StreamRecorderService must forward the composite's detach list unchanged; got [{string.Join(",", viaService)}].");
+
+                var viaSession = chainedSession.DetachedDestinationNames;
+                Expect(viaSession.Count == 1 && viaSession[0] == "backup",
+                    $"CaptureSession must surface the composite's detach list - the bundle reaches it no other way; got [{string.Join(",", viaSession)}].");
+
+                // ...and it survives all the way into the generated readout.
+                string fanOutText = DiagnosticsBundle.BuildDiagnosticsText(live with { DetachedChildNames = viaSession });
+                Expect(fanOutText.Contains("detached: backup"),
+                    "A destination detached by the REAL composite must appear in the generated diagnostics.txt.");
+                Expect(!fanOutText.Contains("no destination was detached"),
+                    "The readout must not claim nothing detached while naming a detached destination.");
+
+                // The DIM default is the OTHER half: a sink that cannot detach anything reports nothing.
+                // Declared as the INTERFACE on purpose - a default interface member is only reachable
+                // through the interface, never on the implementing class. Same for HasSurvivingDestination.
+                IRecordingSink plainSink = new ScriptedRecordingSink("only-destination");
+                using (plainSink)
+                {
+                    Expect(plainSink.DetachedDestinationNames.Count == 0,
+                        "A single-destination sink must report no detached destination (the honest DIM default).");
+                }
+
+                // ...and the VIEW MODEL must CONSUME the chain rather than the empty stub it carried
+                // before this pass. Build a view model over the chained session and read the archive it
+                // actually writes - that is the only assertion that discriminates the wiring.
+                string[] chainLogsBefore = CrashForensics.LogDirectories();
+                string[] chainDumpsBefore = CrashForensics.DumpDirectories();
+                string chainFallbackBefore = CrashForensics.FallbackRoot;
+
+                string chainRoot = Path.Combine(root, "vm-chain");
+                string chainLogs = Path.Combine(chainRoot, "logs");
+                string chainDumps = Path.Combine(chainRoot, "crashdumps");
+                Directory.CreateDirectory(chainLogs);
+                Directory.CreateDirectory(chainDumps);
+
+                try
+                {
+                    CrashForensics.ConfigureLocations(chainLogs, chainDumps, Path.Combine(chainRoot, "fallback"));
+
+                    using var chainDiscovery = new OmtDiscoveryService();
+                    using var chainVm = new MainWindowViewModel(chainedSession, chainDiscovery);
+                    chainVm.CreateDiagnosticsBundleCommand.Execute(null);
+
+                    string chainDir = Path.Combine(chainRoot, DiagnosticsBundle.BundleFolder);
+                    string[] chainWritten = Directory.Exists(chainDir)
+                        ? Directory.GetFiles(chainDir, "*.zip")
+                        : Array.Empty<string>();
+                    Expect(chainWritten.Length == 1,
+                        $"The view model must write exactly one archive over the chained session; found {chainWritten.Length}.");
+
+                    string chainReadout;
+                    using (var zip = ZipFile.OpenRead(chainWritten[0]))
+                    using (var reader = new StreamReader(zip.GetEntry(DiagnosticsBundle.DiagnosticsEntryName)!.Open()))
+                    {
+                        chainReadout = reader.ReadToEnd();
+                    }
+
+                    Expect(chainReadout.Contains("detached: backup"),
+                        "The VIEW MODEL's bundle must carry the composite's detach history, not the empty stub " +
+                        $"it returned before the completion pass. Readout tail: {chainReadout.Substring(Math.Max(0, chainReadout.Length - 220))}");
+                    Expect(!chainReadout.Contains("no destination was detached"),
+                        "The view model must not claim nothing detached while naming a detached destination.");
+                }
+                finally
+                {
+                    CrashForensics.ConfigureLocations(chainLogsBefore[0], chainDumpsBefore[0], chainFallbackBefore);
+                }
+            }
+            finally
+            {
+                System.Runtime.InteropServices.Marshal.FreeHGlobal(chainFrame);
+            }
+        }
+
+        try { Directory.Delete(root, recursive: true); } catch { }
+
+        Console.WriteLine(" -> Readout, dual-location collection, global keep-last-N, the empty edge, a " +
+                          "non-throwing write failure, a real export through the view model, and the full " +
+                          "detach chain into diagnostics.txt all verified!");
+    }
+
+    /// <summary>Writes a file with an explicit timestamp, so keep-last-N is deterministic.</summary>
+    static void WriteTemp(string path, string content, DateTime stampUtc)
+    {
+        File.WriteAllText(path, content);
+        File.SetLastWriteTimeUtc(path, stampUtc);
+    }
+
+    /// <summary>
+    /// NET-019: the ASIO pair selector in isolation — an injected probe and an inline UI hop, so the
+    /// whole probe / retry / degrade lifecycle is covered WITHOUT constructing the 2,600-line view
+    /// model and WITHOUT opening a driver.
+    /// </summary>
+    static void TestAsioInputPairSelector()
+    {
+        Console.WriteLine("\n[Step 0.696] Verifying AsioInputPairSelector in isolation (injected probe, no view model)....");
+
+        var clsid = Guid.Parse("11111111-2222-3333-4444-555555555555");
+        var driver = new AsioDriverInfo("Test ASIO", clsid, "C:/fake/test-asio.dll");
+        var asioOption = HostAudioCaptureOption.ForAsio(clsid, "ASIO - Test ASIO (In 1/2)", 0);
+        var muteOption = new HostAudioCaptureOption(HostAudioCaptureMode.Mute, "Mute");
+
+        static IReadOnlyList<AsioInputChannel> Chans(int n) =>
+            Enumerable.Range(0, n).Select(i => new AsioInputChannel(i, $"Input {i + 1}")).ToList();
+
+        // ---- 1. THE PURE PAIR DERIVATION (the ONE place pairs come from) -----------------------
+        Expect(AsioInputPairSelector.BuildPairs(null).Count == 0, "A null channel list yields no pairs.");
+        Expect(AsioInputPairSelector.BuildPairs(Array.Empty<AsioInputChannel>()).Count == 0,
+            "A driver with no input channels yields no pairs.");
+
+        var two = AsioInputPairSelector.BuildPairs(Chans(2));
+        Expect(two.Count == 1 && two[0].FirstChannelIndex == 0 && two[0].DisplayName == "In 1/2",
+            "Two channels yield exactly one pair, In 1/2.");
+
+        var four = AsioInputPairSelector.BuildPairs(Chans(4));
+        Expect(four.Count == 2 && four[1].FirstChannelIndex == 2 && four[1].DisplayName == "In 3/4",
+            "Four channels yield In 1/2 and In 3/4.");
+
+        var five = AsioInputPairSelector.BuildPairs(Chans(5));
+        Expect(five.Count == 3 && five[2].FirstChannelIndex == 4 && five[2].DisplayName == "In 5",
+            "A trailing odd channel is offered on its own (the capture source duplicates it to L+R).");
+
+        // ---- 2. SUPPRESSION IS A SCOPE, NOT A HAND-PAIRED BOOL ---------------------------------
+        // This is the invariant that used to be hand-set and hand-reset at five sites. Getting it
+        // wrong leaves the picker permanently deaf to the operator, so the nesting semantics matter.
+        {
+            var guard = new AsioInputPairSelector(_ => new AsioPairProbeResult(Chans(0), null),
+                                                 action => action(), () => null);
+
+            Expect(!guard.IsSuppressingUserChoice, "A fresh selector must not suppress.");
+
+            using (guard.SuppressUserChoice())
+            {
+                Expect(guard.IsSuppressingUserChoice, "The scope must suppress.");
+
+                using (guard.SuppressUserChoice())
+                {
+                    Expect(guard.IsSuppressingUserChoice, "A nested scope stays suppressed.");
+                }
+
+                Expect(guard.IsSuppressingUserChoice,
+                    "The inner scope must NOT un-suppress the outer one — the guard is a DEPTH, not a bool.");
+            }
+
+            Expect(!guard.IsSuppressingUserChoice, "The outer scope must release on dispose.");
+
+            try { using (guard.SuppressUserChoice()) throw new InvalidOperationException("boom"); }
+            catch (InvalidOperationException) { }
+            Expect(!guard.IsSuppressingUserChoice,
+                "A scope must release even when its body throws — that is what `using` buys over a raw bool.");
+        }
+
+        // ---- 3. THE PROBE LIFECYCLE: lazy, cached, and it never runs during construction --------
+        {
+            int probes = 0;
+            HostAudioCaptureOption? current = asioOption;
+            var selector = new AsioInputPairSelector(
+                _ => { Interlocked.Increment(ref probes); return new AsioPairProbeResult(Chans(8), null); },
+                action => action(),
+                () => current);
+            selector.RegisterDriver(driver);
+
+            var gate = new object();
+            AsioPairProjection latest = AsioPairProjection.Hidden;
+            bool selectionRaisedUnderSuppression = false;
+            selector.ProjectionChanged += p =>
+            {
+                lock (gate) latest = p;
+                if (p.SelectedPair != null && selector.IsSuppressingUserChoice)
+                {
+                    selectionRaisedUnderSuppression = true;
+                }
+            };
+            AsioPairProjection Latest() { lock (gate) return latest; }
+
+            Expect(probes == 0, "Constructing the selector must NOT probe — the whole path is lazy.");
+
+            // A non-ASIO device hides and clears, and still probes nothing.
+            selector.SyncSelection(muteOption);
+            Expect(!Latest().IsVisible, "A non-ASIO device must hide the pair picker.");
+            Expect(Latest().Options.Count == 0, "A non-ASIO device must clear the pair options.");
+            Expect(probes == 0, "A non-ASIO device must never trigger a probe.");
+
+            // Selecting an ASIO device shows the control immediately and starts one probe.
+            selector.SyncSelection(asioOption);
+            Expect(Latest().IsVisible, "An ASIO device must show the picker immediately, before the probe lands.");
+            string? probingHint = Latest().Hint;
+            Expect(probingHint != null && probingHint.Contains("Probing"),
+                $"The hint must say a probe is running; got '{probingHint}'.");
+
+            // The probe itself runs off-thread, so wait for it to LAND before asserting the count.
+            for (int i = 0; i < 400 && Latest().Options.Count == 0; i++) Thread.Sleep(5);
+            Expect(probes == 1, $"Selecting an ASIO device must start exactly one probe; got {probes}.");
+            Expect(Latest().Options.Count == 4, $"8 channels must yield 4 pairs; got {Latest().Options.Count}.");
+            Expect(Latest().SelectedPair?.FirstChannelIndex == 0, "The remembered pair (0 = In 1/2) must be selected.");
+            Expect(selectionRaisedUnderSuppression,
+                "A projection that carries a SELECTION must be raised while suppression is active, or the " +
+                "host applying it looks like an operator pick and the picker reacts to itself.");
+
+            // A second sync for the same driver is served from the cache — no new probe, no driver open.
+            selector.SyncSelection(asioOption);
+            Expect(probes == 1, $"A cached driver must not be re-probed; got {probes} probes.");
+
+            // PairText derives its label from the CACHE once there is one.
+            Expect(selector.PairText(clsid, 2) == "In 3/4",
+                $"PairText must name a cached pair; got '{selector.PairText(clsid, 2)}'.");
+            Expect(selector.PairText(Guid.Empty, 0) == "In 1/2",
+                "PairText must fall back to the index when there is no cached probe.");
+        }
+
+        // ---- 4. DEGRADE: a failed probe hides the picker and names the reason -------------------
+        {
+            HostAudioCaptureOption? current = asioOption;
+            var selector = new AsioInputPairSelector(
+                _ => new AsioPairProbeResult(Chans(0), "held by another application"),
+                action => action(),
+                () => current);
+            selector.RegisterDriver(driver);
+
+            var gate = new object();
+            AsioPairProjection latest = AsioPairProjection.Hidden;
+            selector.ProjectionChanged += p => { lock (gate) latest = p; };
+            AsioPairProjection Latest() { lock (gate) return latest; }
+
+            selector.SyncSelection(asioOption);
+            for (int i = 0; i < 400; i++)
+            {
+                string? h;
+                lock (gate) h = latest.Hint;
+                if (h != null && h.Contains("Input pairs unavailable")) break;
+                Thread.Sleep(5);
+            }
+
+            Expect(!Latest().IsVisible, "A failed probe must hide the pair picker.");
+            Expect(Latest().Options.Count == 0, "A failed probe must leave no pairs.");
+            Expect(Latest().SelectedPair == null, "A failed probe must select nothing.");
+
+            string? degradeHint = Latest().Hint;
+            Expect(degradeHint != null && degradeHint.Contains("held by another application"),
+                $"The failure reason must reach the hint; got '{degradeHint}'.");
+        }
+
+        // ---- 5. RETRY ON DROPDOWN OPEN, exactly once, and never while one is in flight ----------
+        {
+            int probes = 0;
+            HostAudioCaptureOption? current = asioOption;
+            var selector = new AsioInputPairSelector(
+                _ => { Interlocked.Increment(ref probes); return new AsioPairProbeResult(Chans(0), "no channels"); },
+                action => action(),
+                () => current);
+            selector.RegisterDriver(driver);
+
+            selector.SyncSelection(asioOption);
+            for (int i = 0; i < 200 && probes == 0; i++) Thread.Sleep(5);
+            Thread.Sleep(60);
+
+            int afterFirst = probes;
+            selector.RetryIfUnusable(asioOption);
+            for (int i = 0; i < 200 && probes == afterFirst; i++) Thread.Sleep(5);
+            Expect(probes == afterFirst + 1, $"Opening the picker after a failure must retry ONCE; got {probes}.");
+
+            // A usable cached result must never be thrown away for a retry.
+            int before = probes;
+            Thread.Sleep(60);
+            selector.RetryIfUnusable(muteOption);
+            Thread.Sleep(40);
+            Expect(probes == before, "A non-ASIO selection must never trigger a retry.");
+        }
+
+        // ---- 6. A LATE PROBE FOR A DEVICE THE OPERATOR LEFT IS DROPPED, NOT APPLIED -------------
+        {
+            HostAudioCaptureOption? current = asioOption;
+            var selector = new AsioInputPairSelector(
+                _ => new AsioPairProbeResult(Chans(8), null),
+                action => action(),
+                () => current);
+            selector.RegisterDriver(driver);
+
+            var gate = new object();
+            AsioPairProjection latest = AsioPairProjection.Hidden;
+            selector.ProjectionChanged += p => { lock (gate) latest = p; };
+
+            // The operator selects the ASIO device, then switches away before the probe lands. `current`
+            // must move FIRST: SyncSelection takes its option as an argument, so setting it after the
+            // call is a race against a probe that can already have landed.
+            current = muteOption;
+            selector.SyncSelection(asioOption);
+
+            // PairText is derived from the cache, so it tells us the probe has landed without exposing
+            // internals or racing a fixed sleep.
+            for (int i = 0; i < 400 && selector.PairText(clsid, 0) != "In 1/2"; i++) Thread.Sleep(5);
+
+            Expect(latest.Options.Count == 0 && latest.SelectedPair == null,
+                "A probe that lands after the operator moved to another device must be cached, not applied " +
+                "to the picker (the picker must still show no pairs and no selection).");
+            Expect(selector.PairText(clsid, 0) == "In 1/2",
+                "The dropped result must still have been CACHED, so the next visit is instant.");
+        }
+
+        Console.WriteLine(" -> Pair derivation, lazy probe, cache, degrade, one-shot retry and the suppression " +
+                          "SCOPE all verified with no view model and no ASIO driver!");
     }
 
     /// <summary>
@@ -4225,7 +5853,8 @@ class Program
         string? armSrc = FindRepoSource("OmtCaptureStudio/Services/RecordingArm.cs");
         string? svcSrc = FindRepoSource("OmtCaptureStudio/Services/StreamRecorderService.cs");
         string? sesSrc = FindRepoSource("OmtCaptureStudio/Services/CaptureSession.cs");
-        if (armSrc == null || svcSrc == null || sesSrc == null)
+        string? supSrc = FindRepoSource("OmtCaptureStudio/Services/TakeSupervisor.cs");
+        if (armSrc == null || svcSrc == null || sesSrc == null || supSrc == null)
         {
             Console.WriteLine($" -> [SKIP] source tree not reachable from {AppContext.BaseDirectory}; locality assertions skipped.");
         }
@@ -4234,12 +5863,14 @@ class Program
             string armText = File.ReadAllText(armSrc);
             string svcText = File.ReadAllText(svcSrc);
             string sesText = File.ReadAllText(sesSrc);
+            string supText = File.ReadAllText(supSrc);
 
             if (CountIn(armText, "FinalizeSink(") != 1) throw new Exception("The arm must have exactly one FinalizeSink call site.");
             if (CountIn(svcText, "FinalizeSink(") != 0) throw new Exception("StreamRecorderService must not finalize — it is a facade now.");
             if (CountIn(sesText, "FinalizeSink(") != 0) throw new Exception("CaptureSession must not finalize — it goes through the arm.");
             if (CountIn(svcText, "Task.Run") != 0) throw new Exception("StreamRecorderService must not own a thread hop.");
-            if (CountIn(sesText, "Task.Run(") != 1) throw new Exception("CaptureSession should only Task.Run the reconnect hop, nothing else.");
+            if (CountIn(sesText, "Task.Run(") != 0) throw new Exception("CaptureSession must not own a thread hop — the reconnect hop moved to TakeSupervisor (NET-018).");
+            if (CountIn(supText, "Task.Run(") != 1) throw new Exception("TakeSupervisor should only Task.Run the reconnect hop, nothing else.");
             if (CountIn(armText, "Task.Run") != 1) throw new Exception("The arm must own the single off-thread disarm.");
             if (sesText.Contains("_audioResampler")) throw new Exception("CaptureSession must no longer own the A/V clock.");
             // The arm is the only file that assigns the gate, and it does so exactly three times:
@@ -4252,7 +5883,7 @@ class Program
             {
                 throw new Exception("The arm must be the ONLY place the gate is assigned (1 open, 2 closes) and no other class may touch it.");
             }
-            Console.WriteLine(" -> Finalize locality: 1 FinalizeSink site (the arm), 0 in the facade/session, 1 thread hop; the gate is assigned in NO other class (the arm itself has 1 open + 2 closes: Arm, Disarm, and Arm's failure rollback).");
+            Console.WriteLine(" -> Finalize locality: 1 FinalizeSink site (the arm), 0 in the facade/session, 1 thread hop (now in TakeSupervisor — NET-018); the gate is assigned in NO other class (the arm itself has 1 open + 2 closes: Arm, Disarm, and Arm's failure rollback).");
         }
 
         Console.ForegroundColor = ConsoleColor.Green;

@@ -5,6 +5,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using OmtCaptureStudio.Models;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.Services;
 
 /// <summary>

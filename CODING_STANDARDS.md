@@ -298,7 +298,7 @@ A reviewer must confirm **all** of the following before merge. Any "No" blocks.
 | Recording transport (pipes, pool, bounded queue) | `OmtCaptureStudio/Services/Sinks/FfmpegPipeSink.cs`, `BoundedMediaQueue.cs`, `FfmpegProcessHost.cs` |
 | Session engine (headless, polymorphic source) | `OmtCaptureStudio/Services/CaptureSession.cs` |
 | Recording orchestration | `OmtCaptureStudio/Services/StreamRecorderService.cs` |
-| Async logger | `OmtCaptureStudio/AppLogger.cs` |
+| Async logger | `OmtCaptureStudio/Services/Forensics/AppLogger.cs` (NET-017) |
 | Headless E2E suite | `OmtCaptureStudio.Tests/Program.cs` |
 | Build / AOT publish / release | `scripts/build-release.ps1`, `installer/OmtCaptureStudio.iss` |
 | Project settings | `OmtCaptureStudio/OmtCaptureStudio.csproj`, `OmtCaptureStudio.Tests/*.csproj` |

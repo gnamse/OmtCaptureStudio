@@ -91,6 +91,15 @@ public class RecordingConfig
     public DateTime? ScheduledStopUtc { get; set; }
 
     /// <summary>
+    /// NET-016: "stop after N minutes" - the operator-facing, delay-based mirror of
+    /// <see cref="ScheduledStartDelayMinutes"/>. Resolved ONCE into an absolute
+    /// <see cref="ScheduledStopUtc"/> when the take is armed, exactly as a start delay is resolved into
+    /// <see cref="ScheduledStartUtc"/>. <c>0</c> = no stop-after. This is what the picker binds to and
+    /// what persists; the absolute instant is per-take and would go stale in the file.
+    /// </summary>
+    public double ScheduledStopAfterMinutes { get; set; }
+
+    /// <summary>
     /// NET-011: write a SECOND copy of the take into this directory as well. <c>null</c>/empty = a
     /// single destination, exactly as before. When set, recording fans out through a composite sink:
     /// if the primary's volume fills or its transport fails, that destination is shed and the take
@@ -134,6 +143,7 @@ public class RecordingConfig
         ScheduledStartUtc = ScheduledStartUtc,
         ScheduledStartDelayMinutes = ScheduledStartDelayMinutes,
         ScheduledStopUtc = ScheduledStopUtc,
+        ScheduledStopAfterMinutes = ScheduledStopAfterMinutes,
         BackupOutputDirectory = BackupOutputDirectory
     };
 }
@@ -226,7 +236,72 @@ public static class RecordingBoundaries
     /// <summary>True when the wall-clock scheduled stop instant has arrived.</summary>
     public static bool ScheduledStopReached(RecordingConfig config, long nowUtcTicks)
         => config.ScheduledStopUtc is { } stop && nowUtcTicks >= stop.Ticks;
+
+    /// <summary>
+    /// NET-016: the nearest boundary that has a CLOCK, and the time left until it. Pure - the caller
+    /// supplies <paramref name="nowUtcTicks"/>, so the whole readout is assertable with a local clock and
+    /// no waits.
+    ///
+    /// <para>Only time-driven boundaries are candidates. <see cref="RecordingConfig.SegmentRolloverGigabytes"/>
+    /// is deliberately EXCLUDED: a size rollover depends on the achieved bitrate, so it has no honest
+    /// "ends in" - presenting one would be a guess dressed up as a countdown.</para>
+    ///
+    /// <para>Returns <c>null</c> when nothing is bounded, so the readout disappears rather than counting
+    /// down to nothing. A boundary already PASSED clamps to zero rather than reporting negative time - the
+    /// stop is imminent either way, and a negative countdown reads as a bug.</para>
+    /// </summary>
+    public static RecordingBoundaryEta? NearestTimeBoundary(
+        RecordingConfig config,
+        long takeStartUtcTicks,
+        long segmentStartUtcTicks,
+        long nowUtcTicks)
+    {
+        RecordingBoundary nearest = RecordingBoundary.None;
+        TimeSpan remaining = TimeSpan.Zero;
+        bool found = false;
+
+        void Consider(RecordingBoundary boundary, TimeSpan candidate)
+        {
+            if (candidate < TimeSpan.Zero) candidate = TimeSpan.Zero;
+            if (found && candidate >= remaining) return;
+
+            found = true;
+            nearest = boundary;
+            remaining = candidate;
+        }
+
+        if (config.MaxDurationMinutes > 0)
+        {
+            Consider(
+                RecordingBoundary.MaxDuration,
+                TimeSpan.FromMinutes(config.MaxDurationMinutes)
+                    - TimeSpan.FromTicks(nowUtcTicks - takeStartUtcTicks));
+        }
+
+        if (config.ScheduledStopUtc is { } stop)
+        {
+            Consider(
+                RecordingBoundary.ScheduledStop,
+                new DateTime(stop.Ticks, DateTimeKind.Utc) - new DateTime(nowUtcTicks, DateTimeKind.Utc));
+        }
+
+        if (config.SegmentRolloverMinutes > 0)
+        {
+            Consider(
+                RecordingBoundary.SegmentRollover,
+                TimeSpan.FromMinutes(config.SegmentRolloverMinutes)
+                    - TimeSpan.FromTicks(nowUtcTicks - segmentStartUtcTicks));
+        }
+
+        return found ? new RecordingBoundaryEta(nearest, remaining) : null;
+    }
 }
+
+/// <summary>
+/// NET-016: which time-driven boundary is coming next, and how long until it. A value type, so the UI
+/// tick can project it without allocating.
+/// </summary>
+public readonly record struct RecordingBoundaryEta(RecordingBoundary Boundary, TimeSpan Remaining);
 
 /// <summary>
 /// Scheduled-start arithmetic, also pure. It lives beside <see cref="RecordingBoundaries"/> because
@@ -252,4 +327,19 @@ public static class RecordingSchedule
     /// <summary>True when a resolved start instant has arrived. A null instant means "start now".</summary>
     public static bool StartReached(DateTime? resolvedStartUtc, DateTime nowUtc)
         => resolvedStartUtc is not { } start || nowUtc >= start;
+
+    /// <summary>
+    /// Resolves when an armed take should actually stop (NET-016) - the exact mirror of
+    /// <see cref="ResolveStartUtc"/>. A stop-after delay wins over an absolute instant, and <c>null</c>
+    /// means "no scheduled stop". Pure: the caller supplies <paramref name="nowUtc"/>.
+    /// </summary>
+    public static DateTime? ResolveStopUtc(RecordingConfig config, DateTime nowUtc)
+    {
+        if (config.ScheduledStopAfterMinutes > 0)
+        {
+            return nowUtc.AddMinutes(config.ScheduledStopAfterMinutes);
+        }
+
+        return config.ScheduledStopUtc;
+    }
 }

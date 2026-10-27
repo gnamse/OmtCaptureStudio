@@ -73,6 +73,18 @@ public interface IRecordingSink : IDisposable
     bool HasSurvivingDestination => false;
 
     /// <summary>
+    /// Names of the destinations this sink has detached, in detach order (NET-020). Read by the
+    /// diagnostics bundle: a backup that silently stopped receiving data is otherwise only visible in
+    /// the error stream, long after the take that lost it.
+    ///
+    /// <para>The default is empty - a single-destination sink has nothing to detach, so the bundle says
+    /// "no destination was detached", which is the truth rather than a missing value. Same shape and
+    /// same reasoning as <see cref="HasSurvivingDestination"/>: default to the OLD behaviour, never to
+    /// the optimistic one.</para>
+    /// </summary>
+    IReadOnlyList<string> DetachedDestinationNames => Array.Empty<string>();
+
+    /// <summary>
     /// Told that the destination this sink is writing to has failed for <paramref name="reason"/> (low
     /// space, I/O error) (NET-011). Returns <c>true</c> when the sink shed that destination and has
     /// another to continue on, reporting it through <paramref name="survivingPath"/>; <c>false</c> when

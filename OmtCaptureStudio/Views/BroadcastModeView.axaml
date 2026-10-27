@@ -1,0 +1,203 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:controls="clr-namespace:OmtCaptureStudio.Controls"
+             xmlns:models="clr-namespace:OmtCaptureStudio.Models"
+             xmlns:views="clr-namespace:OmtCaptureStudio.Views"
+             xmlns:vm="clr-namespace:OmtCaptureStudio.ViewModels"
+             mc:Ignorable="d"
+             x:Class="OmtCaptureStudio.Views.BroadcastModeView"
+             x:DataType="vm:MainWindowViewModel">
+
+    <!-- ADR-0011: Broadcast mode = the host-broadcast controls. The reveal-toggle that used to gate
+         this row is GONE: the mode IS the reveal, so the row is always shown here. The controls and
+         bindings are the originals, moved verbatim. -->
+    <Grid RowDefinitions="Auto,*,Auto" Background="{DynamicResource StudioBg}">
+
+        <Border Grid.Row="0" Background="{DynamicResource StudioSurface}"
+                BorderBrush="{DynamicResource StudioBorder}" BorderThickness="0,0,0,1" Padding="14,8"
+                IsEnabled="{CompiledBinding IsMainContentEnabled}">
+            <Grid RowDefinitions="Auto,Auto" VerticalAlignment="Center">
+
+                <Grid Grid.Row="0" VerticalAlignment="Center">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Border Background="{DynamicResource StudioAccentPrimary}" CornerRadius="{DynamicResource RadiusSm}" Padding="6,3" Margin="0,0,8,0" VerticalAlignment="Center">
+                            <TextBlock Text="OMT" Foreground="{DynamicResource StudioTextOnAccent}" FontWeight="Black" FontSize="13"/>
+                        </Border>
+                        <TextBlock Text="BROADCAST STUDIO" Foreground="{DynamicResource StudioTextPrimary}" FontWeight="Bold" FontSize="14" VerticalAlignment="Center"/>
+                    </StackPanel>
+
+                    <TextBlock Grid.Column="1" Text="{CompiledBinding LiveSettingSummary}"
+                               IsVisible="{CompiledBinding IsLiveSettingSummaryVisible}"
+                               Foreground="{DynamicResource StudioTextSecondary}" FontSize="11"
+                               VerticalAlignment="Center" Margin="16,0,16,0"
+                               TextTrimming="CharacterEllipsis"
+                               AutomationProperties.Name="Selected broadcast target and audio"
+                               AutomationProperties.LiveSetting="Polite"/>
+
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="{CompiledBinding ModeChangeBlockedHint}"
+                                   IsVisible="{CompiledBinding !IsModeChangeAllowed}"
+                                   Foreground="{DynamicResource StudioTextMuted}" FontSize="10"
+                                   VerticalAlignment="Center" Margin="0,0,8,0"
+                                   MaxWidth="240" TextTrimming="CharacterEllipsis"/>
+                        <Button x:Name="BtnChangeModeBroadcast" Content="Change Mode" Padding="10,5" MinHeight="30"
+                                IsEnabled="{CompiledBinding IsModeChangeAllowed}"
+                                AutomationProperties.Name="Change mode - return to the mode picker"
+                                ToolTip.Tip="Return to the picker to switch between Capture and Broadcast"
+                                Command="{CompiledBinding ChangeModeCommand}"/>
+                    </StackPanel>
+                </Grid>
+
+                <!-- Row 1: Host Broadcast Studio Bar (Screen/Window Target, Audio Device, Network
+                     Interface). NET-012: revealed BY THE BROADCAST STATE only - never by recording state,
+                     so collapsing it can never disturb a running take. -->
+                <Border Grid.Row="1" BorderBrush="{DynamicResource StudioBorderSubtle}" BorderThickness="0,1,0,0" Margin="0,7,0,0" Padding="0,7,0,0"
+                       >
+                    <Grid VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/> <!-- 0: Broadcast Badge -->
+                            <ColumnDefinition Width="Auto"/> <!-- 1: Target Label -->
+                            <ColumnDefinition Width="1.15*" MinWidth="130" MaxWidth="320"/> <!-- 2: Capture Target ComboBox -->
+                            <ColumnDefinition Width="Auto"/> <!-- 3: Audio Label -->
+                            <ColumnDefinition Width="1.25*" MinWidth="140" MaxWidth="340"/> <!-- 4: Audio Device ComboBox -->
+                            <ColumnDefinition Width="Auto"/> <!-- 5: Network Label -->
+                            <ColumnDefinition Width="1*" MinWidth="130" MaxWidth="280"/> <!-- 6: Network Adapter ComboBox -->
+                            <ColumnDefinition Width="Auto"/> <!-- 7: Refresh Targets/Devices/Networks Button -->
+                            <!-- NET-014: the freed toggle column is now the selection hint. ELASTIC with
+                                 MinWidth 0 so it shrinks and trims before it can push the row's action
+                                 button out of the window (the P1-01 lesson). MaxWidth caps it at wide sizes. -->
+                            <ColumnDefinition Width="*" MinWidth="0" MaxWidth="260"/> <!-- 8: select hint -->
+                            <ColumnDefinition Width="Auto"/> <!-- 9: Start/Stop Broadcasting -->
+                        </Grid.ColumnDefinitions>
+
+                        <Border Grid.Column="0" Background="{DynamicResource StudioSurfaceElevated}" BorderBrush="{DynamicResource StudioBorderSubtle}" BorderThickness="1" CornerRadius="{DynamicResource RadiusSm}" Padding="6,3" Margin="0,0,10,0" VerticalAlignment="Center">
+                            <TextBlock Text="HOST BROADCAST" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" VerticalAlignment="Center"/>
+                        </Border>
+
+                        <!-- Target (Monitor / Window) -->
+                        <TextBlock Grid.Column="1" Text="Target:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <ComboBox x:Name="CmbCaptureTarget" Grid.Column="2" Margin="0,0,10,0" MinHeight="30" MaxWidth="300" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                  IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
+                                  ItemsSource="{CompiledBinding CaptureTargets}"
+                                  SelectedItem="{CompiledBinding SelectedCaptureTarget, Mode=TwoWay}"
+                                  IsDropDownOpen="{CompiledBinding IsCaptureTargetDropDownOpen, Mode=TwoWay}"
+                                  AutomationProperties.Name="Host capture target"
+                                  ToolTip.Tip="Select which screen or window to broadcast over OMT">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate x:DataType="models:CaptureTarget">
+                                    <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+
+                        <!-- Audio Device (Presets + Specific WASAPI Output Loopback / Microphone Devices) -->
+                        <TextBlock Grid.Column="3" Text="Audio:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,5,0"/>
+
+                        <!-- Column 4 hosts the audio picker; the ASIO input-pair picker docks to its right and
+                             collapses (IsVisible=false) for every non-ASIO option, so it costs no width normally.
+                             The right margin that used to sit on the audio ComboBox now sits on this DockPanel,
+                             leaving the spacing to the Network label unchanged. -->
+                        <DockPanel Grid.Column="4" Margin="0,0,10,0" VerticalAlignment="Center" LastChildFill="True">
+                            <!-- ASIO input pair (In 1/2, 3/4, …), built from the driver's real input channel count -->
+                            <ComboBox x:Name="CmbAsioInputPair" DockPanel.Dock="Right" Margin="5,0,0,0" MinHeight="30" MinWidth="84" MaxWidth="130"
+                                      VerticalAlignment="Center"
+                                      IsVisible="{CompiledBinding IsAsioInputPairVisible}"
+                                      IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
+                                      ItemsSource="{CompiledBinding AsioInputPairOptions}"
+                                      SelectedItem="{CompiledBinding SelectedAsioInputPair, Mode=TwoWay}"
+                                      IsDropDownOpen="{CompiledBinding IsAsioInputPairDropDownOpen, Mode=TwoWay}"
+                                      ToolTip.Tip="{CompiledBinding AsioInputPairHint}"
+                                      AutomationProperties.Name="ASIO input channel pair">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:AsioInputPairOption">
+                                        <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+
+                            <ComboBox x:Name="CmbCaptureAudio" HorizontalAlignment="Stretch" MaxWidth="320" MinHeight="30" VerticalAlignment="Center"
+                                      IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
+                                      ItemsSource="{CompiledBinding CaptureAudioOptions}"
+                                      SelectedItem="{CompiledBinding SelectedCaptureAudioOption, Mode=TwoWay}"
+                                      IsDropDownOpen="{CompiledBinding IsCaptureAudioDropDownOpen, Mode=TwoWay}"
+                                      AutomationProperties.Name="Host broadcast audio device"
+                                      ToolTip.Tip="Select preset audio mode or specific WASAPI Output (loopback) / Microphone device">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate x:DataType="models:HostAudioCaptureOption">
+                                        <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+                        </DockPanel>
+
+                        <!-- Network Interface (All Networks, Specific NIC IPv4, or Localhost) -->
+                        <TextBlock Grid.Column="5" Text="Network:" Foreground="{DynamicResource StudioTextSecondary}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <ComboBox x:Name="CmbCaptureNetwork" Grid.Column="6" Margin="0,0,6,0" MinHeight="30" MaxWidth="260" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                  IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
+                                  ItemsSource="{CompiledBinding BroadcastNetworks}"
+                                  SelectedItem="{CompiledBinding SelectedBroadcastNetwork, Mode=TwoWay}"
+                                  IsDropDownOpen="{CompiledBinding IsBroadcastNetworkDropDownOpen, Mode=TwoWay}"
+                                  AutomationProperties.Name="Host broadcast network interface"
+                                  ToolTip.Tip="Select which network interface OMT broadcasts on">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate x:DataType="models:BroadcastNetworkOption">
+                                    <TextBlock Text="{CompiledBinding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+
+                        <!-- Refresh Capture Targets, Audio Devices & Networks -->
+                        <Button x:Name="BtnRefreshCaptureTargets" Grid.Column="7" Padding="7,0" Margin="0,0,6,0" MinHeight="30" VerticalAlignment="Center"
+								IsEnabled="{CompiledBinding IsCaptureSelectorEnabled}"
+                                AutomationProperties.Name="Refresh capture targets, audio devices, and networks"
+                                ToolTip.Tip="Refresh monitors, windows, audio devices, and network adapters"
+                                Command="{CompiledBinding RefreshCaptureTargetsCommand}">
+                            <Path Data="{DynamicResource IconRefresh}" Stroke="{DynamicResource StudioTextPrimary}" StrokeThickness="1.8" Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center"/>
+                        </Button>
+
+                        <!-- NET-014: shown only in the SELECTING state, so the operator knows the row is
+                             waiting on them and nothing is live yet. Polite - it is guidance, not an alarm. -->
+                        <TextBlock x:Name="TxtBroadcastSelectHint" Grid.Column="8"
+                                   Text="Choose target, audio and network, then Start Broadcasting"
+                                   IsVisible="{CompiledBinding IsBroadcastSelecting}"
+                                   Foreground="{DynamicResource StudioTextSecondary}" FontSize="11"
+                                   VerticalAlignment="Center" Margin="0,0,10,0"
+                                   TextTrimming="CharacterEllipsis"
+                                   AutomationProperties.Name="Broadcast selection hint"
+                                   AutomationProperties.LiveSetting="Polite"
+                                   ToolTip.Tip="Pick what to broadcast, then press Start Broadcasting to go live"/>
+
+                        <!-- NET-014: the in-row action. Reveal shows it as Start Broadcasting; once live it
+                             reads Stop Broadcasting. MinHeight 30 like every other toolbar control. -->
+                        <Button x:Name="BtnStartStopBroadcast" Grid.Column="9" MinHeight="30"
+                                Content="{CompiledBinding BroadcastActionText}"
+                                Background="{CompiledBinding BroadcastActionBackground}"
+                                Foreground="{CompiledBinding BroadcastActionForeground}"
+                                Padding="12,5" VerticalAlignment="Center" FontWeight="Bold"
+                                AutomationProperties.Name="{CompiledBinding BroadcastActionAutomationName}"
+                                ToolTip.Tip="Start broadcasting the selected target and audio, or stop a live broadcast"
+                                Command="{CompiledBinding StartStopBroadcastCommand}"/>
+                    </Grid>
+                </Border>
+            </Grid>
+        </Border>
+
+        <views:VideoSurface x:Name="BroadcastSurface" Grid.Row="1"/>
+
+        <Border Grid.Row="2" Background="{DynamicResource StudioSurface}"
+                BorderBrush="{DynamicResource StudioBorder}" BorderThickness="0,1,0,0"
+                Padding="{DynamicResource BarPadding}" MinHeight="42">
+            <TextBlock Text="Broadcast mode: recording to file is available in Capture mode."
+                       Foreground="{DynamicResource StudioTextMuted}" FontSize="11"
+                       VerticalAlignment="Center" Margin="2,0,0,0"/>
+        </Border>
+    </Grid>
+</UserControl>

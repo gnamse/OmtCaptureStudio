@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using Avalonia;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio;
 
 public static class Program

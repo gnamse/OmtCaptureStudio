@@ -5,7 +5,7 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 
-namespace OmtCaptureStudio;
+namespace OmtCaptureStudio.Services.Forensics;
 
 /// <summary>
 /// Lightweight, Native AOT-safe logger that writes to rolling daily files.
@@ -18,7 +18,16 @@ public static class AppLogger
     // single marker line so they aren't silently lost.
     private const int MaxQueuedLogLines = 4096;
 
-    private static readonly string LogDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
+    // NET-017: NOT readonly any more. The directory is delegated to LogLocation's resolution so a
+    // read-only install redirects log lines to the fallback ALONGSIDE the crash artifacts. A field read
+    // (not a re-computation), so the live logging path costs exactly what it did before.
+    private static string _logDir = LogLocation.PrimaryLogDirectory;
+
+    /// <summary>
+    /// Where log lines are written. Follows <see cref="CrashForensics"/>'s location so a crash report is
+    /// always surrounded by the lines that led to it - the link the read-only-install defect broke.
+    /// </summary>
+    public static string LogDir => _logDir;
     private static readonly Channel<string> _logChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(MaxQueuedLogLines)
     {
         SingleReader = true,
@@ -54,6 +63,19 @@ public static class AppLogger
     /// before a crash are the most valuable ones in the file. Never throws, never blocks longer than
     /// <paramref name="timeoutMs"/>.
     /// </summary>
+    /// <summary>
+    /// Applies a resolved location (NET-017). Called once by the resolver, never per write. The default
+    /// - application directory - stays in place until then, so the headless suite works with no runtime
+    /// resources and nothing to configure.
+    /// </summary>
+    public static void ConfigureLocation(string logDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(logDirectory)) return;
+
+        _logDir = logDirectory;
+        LogLocation.TryCreateDirectory(logDirectory);
+    }
+
     public static void Flush(int timeoutMs = 1500)
     {
         var watch = Stopwatch.StartNew();

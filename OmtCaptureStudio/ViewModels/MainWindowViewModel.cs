@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Avalonia.Media;
 using Avalonia.Threading;
@@ -12,6 +13,7 @@ using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
 using OmtCaptureStudio.Services.Sources;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.ViewModels;
 
 public delegate void VideoFrameReceivedHandler(IntPtr pData, int dataLength, int width, int height, int stride);
@@ -43,6 +45,18 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     // projection of this state, never an input to it.
     private readonly BroadcastSessionState _broadcastState = new();
     private readonly IBroadcastSessionEffects _broadcastEffects;
+
+    // ADR-0011: the SHELL state — which of the three modes the window is showing. Headless and owned
+    // here; the views only project it. Defaults to ModeSelection so the picker is always what opens.
+    private readonly AppModeState _appModeState;
+
+    /// <summary>
+    /// ADR-0011: the mode the operator last CHOSE (the value that pre-highlights a picker card).
+    /// Null means "never chosen one yet" — the picker then highlights nothing. Deliberately NOT the
+    /// live <see cref="CurrentAppMode"/>: returning to the picker must not erase the memory of which
+    /// mode they used (ADR-0011 decision 1, "no auto-skip" + "last mode pre-highlighted").
+    /// </summary>
+    private AppMode? _lastUsedAppMode;
 
     private OmtDesktopCaptureGenerator? _desktopCapture;
 
@@ -176,16 +190,14 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _isCaptureAudioDropDownOpen;
 
-    // ---- ASIO input pair selection ------------------------------------------------------------
+    // ---- ASIO input pair selection (NET-019: the policy lives in AsioInputPairSelector) ---------
     // ASIO interfaces routinely expose 8/16/32 inputs, so "In 1/2" must be a choice, not a given.
     // The list of real pairs comes from opening the driver *briefly* (no buffers, no start), which
     // is why every bit of this is lazy: nothing here may run during ViewModel construction, and a
     // driver locked by another application (or absent entirely) must degrade to plain In 1/2.
-    private readonly Dictionary<Guid, AsioDriverInfo> _asioDriversByClsid = new();
-    private readonly Dictionary<Guid, AsioPairProbeResult> _asioPairCache = new();
-    private readonly Dictionary<Guid, int> _asioChosenPairIndex = new();
-    private readonly HashSet<Guid> _asioProbeInFlight = new();
-    private bool _suppressAsioPairSync;
+    // The probe lifecycle, the cache, the retry and the suppression invariant all live in the
+    // selector; this view model only applies the projection it emits.
+    private readonly AsioInputPairSelector _asioSelector;
 
     [ObservableProperty]
     private bool _isAsioInputPairVisible;
@@ -355,24 +367,27 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         => IsAdvancedRecordingOptionsExpanded = !IsAdvancedRecordingOptionsExpanded;
 
     /// <summary>
-    /// NET-014: the broadcast row is REVEALED for selection before anything is sent. Revealing shows the
-    /// pickers ENABLED; the send only starts when the operator presses Start Broadcasting.
-    /// </summary>
-    [ObservableProperty]
-    private bool _isBroadcastRevealed;
-
-    /// <summary>
-    /// NET-012/NET-014: the broadcast configuration row's visibility.
+    /// NET-012/NET-014/ADR-0011: the broadcast configuration row's visibility.
     ///
-    /// <para>Driven by the REVEAL (so the pickers can be worked on before anything is live) and OR'd with
-    /// the live state, so a running broadcast can never be orphaned behind a hidden row.</para>
+    /// <para>Keyed to <see cref="IsBroadcastModeVisible"/>: under the mode-based shell the MODE is the
+    /// reveal (ADR-0011 decision 1), so the pickers are shown whenever the operator is in Broadcast mode
+    /// and stay ENABLED for selection before anything is live. OR'd with the live state, so a running
+    /// broadcast can never be orphaned behind a hidden row even if the mode moves underneath it.</para>
     ///
     /// <para>Deliberately keyed to broadcast state and NOT to recording state: hiding this row must never
     /// disturb a take.</para>
+    ///
+    /// <para>Replaced the old <c>IsBroadcastRevealed</c> flag. Once the reveal toggle left the UI nothing
+    /// could set it, so it stayed false forever: the row never showed, <see cref="IsBroadcastSelecting"/>
+    /// was never true (the selection hint was permanently invisible), and
+    /// <see cref="IsLiveSettingSummaryVisible"/> was inverted so the compact summary covered the hint.</para>
     /// </summary>
-    public bool IsBroadcastRowVisible => IsBroadcastRevealed || IsDesktopCaptureActive;
+    public bool IsBroadcastRowVisible => IsBroadcastModeVisible || IsDesktopCaptureActive;
 
-    /// <summary>True in the middle state: the row is open for selection and nothing is being sent yet.</summary>
+    /// <summary>
+    /// True in the middle state: the row is open for selection and nothing is being sent yet. Gates the
+    /// broadcast selection hint, which under the old reveal flag could never appear.
+    /// </summary>
     public bool IsBroadcastSelecting => IsBroadcastRowVisible && !IsDesktopCaptureActive;
 
     /// <summary>The in-row action: arm the live state, or stop it (NET-014).</summary>
@@ -390,6 +405,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// <summary>
     /// The compact broadcast summary substitutes for the row exactly when the row is hidden - the point
     /// is that hiding the pickers never hides WHICH devices are selected.
+    ///
+    /// <para>Because it is the complement of <see cref="IsBroadcastRowVisible"/>, and the row is now
+    /// visible throughout Broadcast mode, the summary stands down while the operator is selecting. That
+    /// is deliberate: it must never cover the selection hint.</para>
     /// </summary>
     public bool IsLiveSettingSummaryVisible => !IsBroadcastRowVisible;
 
@@ -428,6 +447,23 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private bool _isDiagnosticsDrawerOpen;
+
+    // NET-020: diagnostics bundle export. The offer rides the existing next-launch notice - it is
+    // DERIVED from the same fact (dumps present) rather than duplicating the notice, so the operator is
+    // not told twice.
+    [ObservableProperty]
+    private string _diagnosticsBundleStatusText = string.Empty;
+
+    [ObservableProperty]
+    private bool _isDiagnosticsBundleStatusVisible;
+
+    [ObservableProperty]
+    private bool _isDiagnosticsBundleOffered;
+
+    [ObservableProperty]
+    private string _diagnosticsBundleOfferText = string.Empty;
+
+    private int _pendingCrashDumpCount;
 
     // 7. Recording Configuration Choices
     public IReadOnlyList<OutputContainerFormat> ContainerFormats { get; } = Enum.GetValues<OutputContainerFormat>();
@@ -496,8 +532,159 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private RecordingChoiceOption _selectedScheduleDelay = ScheduleDelayOptions[0];
 
+    /// <summary>
+    /// NET-016: "stop after N minutes". Deliberately the SAME shape as START IN (a delay measured from
+    /// the moment the take is armed) rather than a time-of-day picker: the start precedent is
+    /// delay-based, and a delay means the same thing whether the operator armed at 2 p.m. or 3 a.m.
+    /// The horizon is longer than START IN's because a take is usually longer than a wait.
+    /// </summary>
+    public static IReadOnlyList<RecordingChoiceOption> StopAfterOptions { get; } = new RecordingChoiceOption[]
+    {
+        new("Off", 0), new("15 min", 15), new("30 min", 30), new("1 h", 60),
+        new("2 h", 120), new("4 h", 240), new("8 h", 480)
+    };
+
+    [ObservableProperty]
+    private RecordingChoiceOption _selectedStopAfter = StopAfterOptions[0];
+
     /// <summary>True while a preset is being applied, so the per-axis hooks don't flip the picker back.</summary>
     private bool _applyingRecordingPreset;
+
+    // ============================================================================================
+    // ADR-0006: operator settings persistence.
+    //
+    // The composition root attaches the store BEFORE this ViewModel is bound to the window, so the
+    // restored values are already in place for the first render (no visible flicker from default to
+    // restored). Persisting rides the existing change hooks below: one immediate full-file write per
+    // committed change - the file is a few hundred bytes, so a debounce would buy nothing and would
+    // introduce a window in which a crash loses the last change.
+    // ============================================================================================
+
+    private SettingsStore? _settingsStore;
+
+    /// <summary>While true, changes are APPLIED but not written back - restoring must be silent.</summary>
+    private bool _isRestoringSettings;
+
+    // ------------------------------------------------------------------------------------------
+    // NET-016: the remaining-time readout.
+    //
+    // The countdown is projected on the EXISTING UI health tick from the existing pure
+    // RecordingBoundaries arithmetic - no new timer. The active take's clock is held here because the
+    // ViewModel is what armed the take; nothing on the transport path is touched.
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>The config the ACTIVE take was armed with - the boundary arithmetic reads this, not the UI.</summary>
+    private RecordingConfig? _activeTakeConfig;
+
+    private long _activeTakeStartUtcTicks;
+
+    /// <summary>Survives the take clock: a rollover restarts the segment, not the take.</summary>
+    private long _activeSegmentStartUtcTicks;
+
+    /// <summary>Last rendered countdown, so an unchanged second does not rebuild the string.</summary>
+    private int _lastRemainingSeconds = -1;
+
+    private RecordingBoundary _lastRemainingBoundary = RecordingBoundary.None;
+
+    [ObservableProperty]
+    private string _remainingTimeText = string.Empty;
+
+    [ObservableProperty]
+    private bool _isRemainingTimeVisible;
+
+    /// <summary>
+    /// ADR-0006: the persisted values the recording UI does not expose - the ADR-0002 watchdog
+    /// thresholds, the filename prefix and the scheduled instants (NET-016 gives the last one a control).
+    /// A new take is seeded from these, so a restored value is HONOURED rather than merely stored.
+    /// </summary>
+    private RecordingConfig _operatorDefaults = new();
+
+    /// <summary>
+    /// Applies restored settings and attaches the store. Called once, by the composition root, before
+    /// the window binds. Nothing is written here - nothing has changed yet.
+    /// </summary>
+    public void AttachSettings(SettingsStore store, OperatorSettings restored)
+    {
+        // BOTH guards, for two different reasons: _isRestoringSettings stops any of these assignments
+        // writing a file (nothing has changed yet), and _applyingRecordingPreset stops the preset-name
+        // assignment below from APPLYING the preset and overwriting a restored axis with the preset's
+        // idea of it - the file's per-axis values are the authority.
+        _isRestoringSettings = true;
+        _applyingRecordingPreset = true;
+        try
+        {
+            _operatorDefaults = SettingsStore.ToConfig(restored, _operatorDefaults);
+
+            // ADR-0011: remember which card to pre-highlight. Deliberately does NOT enter that mode —
+            // the picker is always what opens (decision 1), and silently skipping it would hide the
+            // choice the ADR says the operator must make.
+            _lastUsedAppMode = restored.LastAppMode;
+
+            SelectedContainerFormat = _operatorDefaults.ContainerFormat;
+            SelectedEncoderChoice = _operatorDefaults.EncoderChoice;
+            SelectedQualityPreset = _operatorDefaults.Quality;
+            OutputDirectory = _operatorDefaults.OutputDirectory;
+            BackupOutputDirectory = _operatorDefaults.BackupOutputDirectory ?? string.Empty;
+
+            SelectedRolloverMinutes = OptionFor(RolloverMinuteOptions, _operatorDefaults.SegmentRolloverMinutes);
+            SelectedRolloverGigabytes = OptionFor(RolloverGigabyteOptions, _operatorDefaults.SegmentRolloverGigabytes);
+            SelectedMaxDuration = OptionFor(MaxDurationOptions, _operatorDefaults.MaxDurationMinutes);
+            SelectedScheduleDelay = OptionFor(ScheduleDelayOptions, _operatorDefaults.ScheduledStartDelayMinutes);
+            SelectedStopAfter = OptionFor(StopAfterOptions, _operatorDefaults.ScheduledStopAfterMinutes);
+
+            // Restored by name, never by index - and only if it is a name this build still knows.
+            if (!string.IsNullOrWhiteSpace(restored.SelectedPreset)
+                && RecordingPresetNames.Contains(restored.SelectedPreset))
+            {
+                SelectedRecordingPreset = restored.SelectedPreset!;
+            }
+        }
+        finally
+        {
+            _applyingRecordingPreset = false;
+            _isRestoringSettings = false;
+        }
+
+        // Attach last, so none of the assignments above could have written a file.
+        _settingsStore = store;
+    }
+
+    /// <summary>
+    /// ADR-0006: the config for a new take - the operator's persisted (non-UI) fields as the BASE, with
+    /// the live UI selections layered on top. Seeding from <see cref="RecordingConfig"/>'s own defaults
+    /// is what used to happen; now a restored watchdog threshold or filename prefix is actually used.
+    /// </summary>
+    private RecordingConfig BuildRecordingConfigFromUi()
+    {
+        var config = _operatorDefaults.Clone();
+
+        config.ContainerFormat = SelectedContainerFormat;
+        config.EncoderChoice = SelectedEncoderChoice;
+        config.Quality = SelectedQualityPreset;
+        config.OutputDirectory = OutputDirectory?.Trim() ?? string.Empty;
+        config.BackupOutputDirectory = string.IsNullOrWhiteSpace(BackupOutputDirectory)
+            ? null
+            : BackupOutputDirectory.Trim();
+        config.SegmentRolloverMinutes = SelectedRolloverMinutes?.Value ?? 0;
+        config.SegmentRolloverGigabytes = SelectedRolloverGigabytes?.Value ?? 0;
+        config.MaxDurationMinutes = SelectedMaxDuration?.Value ?? 0;
+        config.ScheduledStartDelayMinutes = SelectedScheduleDelay?.Value ?? 0;
+        config.ScheduledStopAfterMinutes = SelectedStopAfter?.Value ?? 0;
+
+        return config;
+    }
+
+    /// <summary>
+    /// ADR-0006: one immediate full-file write per committed change. Never throws and never surfaces a
+    /// failure to the operator - a settings write must not be able to interrupt a take.
+    /// </summary>
+    private void PersistSettings()
+    {
+        if (_settingsStore is null || _isRestoringSettings) return;
+
+        _operatorDefaults = BuildRecordingConfigFromUi();
+        _settingsStore.Save(SettingsStore.FromConfig(_operatorDefaults, SelectedRecordingPreset, _lastUsedAppMode));
+    }
 
     // 8. Status & Telemetry
     [ObservableProperty]
@@ -544,6 +731,42 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     public bool IsRecording => _session.IsRecording;
     public bool IsConnected => _session.IsConnected;
 
+    // ---- ADR-0011: the shell projection -------------------------------------------------------
+
+    /// <summary>The live shell mode. Presentation binds to the visibility flags below, never to this directly.</summary>
+    public AppMode CurrentAppMode => _appModeState.CurrentMode;
+
+    /// <summary>True while the picker is the active shell content.</summary>
+    public bool IsPickerVisible => _appModeState.IsModeSelection;
+
+    /// <summary>True while the capture stack is the active shell content.</summary>
+    public bool IsCaptureModeVisible => _appModeState.CurrentMode == AppMode.CaptureMode;
+
+    /// <summary>True while the broadcast controls are the active shell content.</summary>
+    public bool IsBroadcastModeVisible => _appModeState.CurrentMode == AppMode.BroadcastMode;
+
+    /// <summary>
+    /// ADR-0011 decision 4: "Change Mode" is disabled while a take or a host broadcast is live. A mode
+    /// switch must never silently tear down a running session, so this is the single gate the views read.
+    /// </summary>
+    public bool IsModeChangeAllowed => !IsRecording && !_broadcastState.IsBroadcasting;
+
+    /// <summary>The mode the operator last CHOSE — pre-highlights a picker card. Null = nothing highlighted.</summary>
+    public AppMode? LastUsedAppMode => _lastUsedAppMode;
+
+    /// <summary>True when the Capture card should be pre-highlighted on the picker.</summary>
+    public bool IsCaptureCardHighlighted => _lastUsedAppMode == AppMode.CaptureMode;
+
+    /// <summary>True when the Broadcast card should be pre-highlighted on the picker.</summary>
+    public bool IsBroadcastCardHighlighted => _lastUsedAppMode == AppMode.BroadcastMode;
+
+    /// <summary>The hint shown beside a disabled "Change Mode" affordance — empty when the switch is allowed.</summary>
+    public string ModeChangeBlockedHint => IsRecording
+        ? "Stop the recording before changing modes."
+        : _broadcastState.IsBroadcasting
+            ? "Stop the host broadcast before changing modes."
+            : string.Empty;
+
     /// <summary>The named broadcast-mode state (ADR-0001); all presentation is a projection of it.</summary>
     public BroadcastState BroadcastState => _broadcastState.State;
 
@@ -567,20 +790,55 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     #endregion
 
     public MainWindowViewModel()
-        : this(new CaptureSession(), new OmtDiscoveryService(), ownsDependencies: true)
+        : this(new CaptureSession(), new OmtDiscoveryService(), new AppModeState(), ownsDependencies: true)
     {
     }
 
     public MainWindowViewModel(
         CaptureSession session,
         OmtDiscoveryService discoveryService,
+        AppModeState? appModeState = null,
         bool ownsDependencies = false)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _discoveryService = discoveryService ?? throw new ArgumentNullException(nameof(discoveryService));
+        // Optional so existing construction sites (tests, the parameterless ctor) keep compiling. A
+        // standalone instance starts in ModeSelection, which is the ADR-0011 open state anyway.
+        _appModeState = appModeState ?? new AppModeState();
         _ownsDependencies = ownsDependencies;
         _broadcastEffects = new SessionEffects(_session);
         _updateVideoHudDelegate = UpdateVideoHudOnUIThread;
+
+        // NET-019: the ASIO pair probe lifecycle lives in the selector. It gets the real probe, the
+        // headless-safe UI hop, a live read of the operator's audio selection, and a driver
+        // re-enumeration fallback. Nothing here opens a driver — the probe stays deferred until the
+        // operator actually selects an ASIO device.
+        _asioSelector = new AsioInputPairSelector(
+            driver =>
+            {
+                IReadOnlyList<AsioInputChannel> channels = AsioInputChannelProbe.Probe(driver, out string? reason);
+                return new AsioPairProbeResult(channels, reason);
+            },
+            PostToUIThreadSafely,
+            () => SelectedCaptureAudioOption,
+            () =>
+            {
+                try
+                {
+                    return AsioDriverEnumerator.Enumerate();
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.LogInfo($"[ASIO] could not re-enumerate drivers for probing: {ex.Message}");
+                    return Array.Empty<AsioDriverInfo>();
+                }
+            });
+
+        _asioSelector.ProjectionChanged += ApplyAsioProjection;
+
+        // NET-020: seed the next-launch offer. Cheap and fully guarded (two directory probes behind a
+        // try/catch inside CrashForensics), never a hardware probe, so it is safe to run here.
+        RefreshDiagnosticsOffer();
 
         // Load version info
         string version = "Unknown";
@@ -624,6 +882,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
         HookEvents();
         ApplyBroadcastStateProjection();
+        ApplyAppModeProjection();
         _discoveryService.Start();
 
         // Seed the capture-target picker, audio device picker, and broadcast network picker
@@ -687,6 +946,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     private void HookEvents()
     {
         _broadcastState.StateChanged += OnBroadcastStateChanged;
+        _appModeState.ModeChanged += OnAppModeChanged;
         _discoveryService.SourcesUpdated += OnSourcesUpdated;
 
         _session.VideoFrameAvailable += OnVideoFrameAvailable;
@@ -734,6 +994,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
         // NET-008: a manual container change means the config no longer matches a named preset.
         MarkRecordingPresetCustom();
+
+        PersistSettings();   // ADR-0006
     }
 
     partial void OnSelectedSourceChanged(OmtSourceInfo? value)
@@ -786,14 +1048,6 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(BroadcastActionBackground));
     }
 
-    partial void OnIsBroadcastRevealedChanged(bool value)
-    {
-        OnPropertyChanged(nameof(IsBroadcastRowVisible));
-        OnPropertyChanged(nameof(IsBroadcastSelecting));
-        OnPropertyChanged(nameof(IsLiveSettingSummaryVisible));
-        OnPropertyChanged(nameof(LiveSettingSummary));
-    }
-
     partial void OnIsAdvancedRecordingOptionsExpandedChanged(bool value)
     {
         OnPropertyChanged(nameof(AdvancedOptionsAutomationName));
@@ -803,7 +1057,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     partial void OnSelectedCaptureAudioOptionChanged(HostAudioCaptureOption value)
     {
         OnPropertyChanged(nameof(SelectedCaptureAudioMode));
-        SyncAsioInputPairSelection(value);
+        _asioSelector.SyncSelection(value);
         if (_desktopCapture is { IsRunning: true } activeBroadcast && value != null)
         {
             try
@@ -964,29 +1218,6 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             AppLogger.LogError($"Error toggling test signal: {ex.Message}", ex);
             StatusText = $"Test signal error: {ex.Message}";
             OnPropertyChanged(nameof(IsTestSignalActive));
-        }
-    }
-
-    [RelayCommand(AllowConcurrentExecutions = false)]
-    private async Task ToggleDesktopCaptureAsync()
-    {
-        if (IsRecordingCloseOverlayVisible) return;
-
-        // NET-014: while LIVE this button is the DISMISS - it stops the send and hides the panel. A live
-        // broadcast is never orphaned behind a hidden row: it is stopped, not hidden.
-        if (IsBroadcasting)
-        {
-            await SetDesktopCaptureActiveAsync(false);
-            IsBroadcastRevealed = false;
-            return;
-        }
-
-        // While OFF it is the reveal/hide entry only - revealing NEVER starts a send (that was the bug:
-        // the pickers the operator needed to touch appeared already locked).
-        IsBroadcastRevealed = !IsBroadcastRevealed;
-        if (IsBroadcastRevealed && CaptureTargets.Count == 0)
-        {
-            PopulateCaptureTargets();
         }
     }
 
@@ -1151,8 +1382,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// opened here, only when the user actually selects it. Registry failures (headless, no drivers,
     /// locked-down hive) leave the dropdown exactly as it was.
     /// </summary>
-    /// This never opens a driver: probing is deferred to <see cref="BeginAsioInputPairProbe"/>, which
-    /// only ever runs once the user selects (or opens the dropdown of) an ASIO entry.
+    /// This never opens a driver: probing is deferred to the pair selector, which only ever runs once
+    /// the user selects (or opens the dropdown of) an ASIO entry.
     /// </summary>
     private void InsertAsioOptions(List<HostAudioCaptureOption> options)
     {
@@ -1182,14 +1413,14 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         var entries = new List<HostAudioCaptureOption>(drivers.Count);
         foreach (AsioDriverInfo driver in drivers)
         {
-            _asioDriversByClsid[driver.Clsid] = driver;
+            _asioSelector.RegisterDriver(driver);
 
             // Remembered per driver (not per dropdown rebuild) so re-opening the audio picker never
             // silently resets a chosen 3/4 back to 1/2. The first pair stays the default.
-            int first = _asioChosenPairIndex.TryGetValue(driver.Clsid, out int saved) ? saved : 0;
+            int first = _asioSelector.ChosenPairIndex(driver.Clsid);
             entries.Add(HostAudioCaptureOption.ForAsio(
                 driver.Clsid,
-                $"ASIO · {driver.DisplayName} ({AsioPairText(driver.Clsid, first)})",
+                $"ASIO · {driver.DisplayName} ({_asioSelector.PairText(driver.Clsid, first)})",
                 first));
         }
 
@@ -1197,69 +1428,46 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     }
 
     // ============================================================================================
-    // ASIO input pair selection
+    // ASIO input pair selection (NET-019 — the policy lives in AsioInputPairSelector)
     // ============================================================================================
 
     /// <summary>
-    /// Keeps the pair picker in step with the selected audio option. Purely reactive: the options
-    /// list hold real driver data only once <see cref="BeginAsioInputPairProbe"/> reports in, which
-    /// is what keeps this ViewModel constructible with no ASIO driver (and no Avalonia app) at all.
+    /// The ONE place the selector's projection reaches this view model's observables — the same
+    /// shape as <see cref="ApplyBroadcastStateProjection"/>: the module decided everything, this
+    /// only copies it across.
     /// </summary>
-    private void SyncAsioInputPairSelection(HostAudioCaptureOption? value)
+    private void ApplyAsioProjection(AsioPairProjection projection)
     {
-        if (_suppressAsioPairSync) return;
-
-        Guid clsid = value != null && value.IsAsio && value.AsioDriverClsid.HasValue
-            ? value.AsioDriverClsid.Value
-            : Guid.Empty;
-
-        if (clsid == Guid.Empty)
+        // This assignment is indistinguishable from an operator pick, so it has to be suppressed —
+        // but the flag belongs to the selector now, and a `using` scope cannot be forgotten the way
+        // a hand-paired set/reset can.
+        using (_asioSelector.SuppressUserChoice())
         {
-            ClearAsioInputPairState();
-            return;
+            IsAsioInputPairVisible = projection.IsVisible;
+            AsioInputPairOptions = projection.Options;
+            SelectedAsioInputPair = projection.SelectedPair;
+            AsioInputPairHint = projection.Hint;
         }
 
-        // Visible immediately so the control exists while the probe is still running; the hint below
-        // tells the user what is happening (a driver can take a second to answer).
-        IsAsioInputPairVisible = true;
-
-        if (_asioPairCache.TryGetValue(clsid, out AsioPairProbeResult? cached))
-        {
-            ApplyAsioPairProbe(value!, clsid, cached, announce: false);
-            return;
-        }
-
-        AsioInputPairHint = "Probing driver for its input channels…";
-        BeginAsioInputPairProbe(clsid);
+        if (projection.Announcement is { Length: > 0 } announcement) StatusText = announcement;
     }
 
-    /// <summary>Re-arms the probe when the user opens the pair picker after an earlier failure.</summary>
+    /// <summary>Re-arms the probe when the operator opens the pair picker after an earlier failure.</summary>
     partial void OnIsAsioInputPairDropDownOpenChanged(bool value)
     {
         if (!value) return;
-
-        if (SelectedCaptureAudioOption is { } option && option.IsAsio && option.AsioDriverClsid is Guid clsid)
-        {
-            bool usable = _asioPairCache.TryGetValue(clsid, out AsioPairProbeResult? cached) && cached.Channels.Count > 0;
-            if (!usable && !_asioProbeInFlight.Contains(clsid))
-            {
-                // A DAW may have released the driver since the last attempt, so allow one retry.
-                _asioPairCache.Remove(clsid);
-                AsioInputPairHint = "Re-probing driver for its input channels…";
-                BeginAsioInputPairProbe(clsid);
-            }
-        }
+        _asioSelector.RetryIfUnusable(SelectedCaptureAudioOption);
     }
 
     /// <summary>
-    /// Applies the user's pair choice to the selected option. Mutating the dropdown entry in place
-    /// (rather than just setting a derived value) keeps the new instance a member of
+    /// Applies the operator's pair choice to the selected audio option. Mutating the dropdown entry
+    /// in place (rather than just setting a derived value) keeps the new instance a member of
     /// <see cref="CaptureAudioOptions"/>, which is what the ComboBox's SelectedItem binding needs —
     /// and re-selecting it lets the existing handler hand the rebuilt option to a live broadcast.
     /// </summary>
     partial void OnSelectedAsioInputPairChanged(AsioInputPairOption? value)
     {
-        if (_suppressAsioPairSync || value == null) return;
+        if (value == null || _asioSelector.IsSuppressingUserChoice) return;
 
         HostAudioCaptureOption? current = SelectedCaptureAudioOption;
         if (current == null || !current.IsAsio || current.AsioDriverClsid is not Guid clsid) return;
@@ -1268,22 +1476,24 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         HostAudioCaptureOption updated = current with
         {
             AsioFirstInputChannelIndex = value.FirstChannelIndex,
-            DisplayName = $"ASIO · {DriverDisplayName(clsid)} ({value.DisplayName})"
+            DisplayName = $"ASIO · {_asioSelector.DriverDisplayName(clsid)} ({value.DisplayName})"
         };
 
-        _asioChosenPairIndex[clsid] = value.FirstChannelIndex;
+        _asioSelector.RememberChoice(clsid, value.FirstChannelIndex);
 
         try
         {
-            // Keep the dropdown entry in sync, then deliberately re-select without suppressing so a
-            // running broadcast switches to the new pair immediately.
+            // Keep the dropdown entry in sync, then deliberately re-select so a running broadcast
+            // switches to the new pair immediately.
             var list = new List<HostAudioCaptureOption>(CaptureAudioOptions ?? Array.Empty<HostAudioCaptureOption>());
             int index = list.FindIndex(o => o.Mode == HostAudioCaptureMode.Asio && o.AsioDriverClsid == clsid);
             if (index >= 0) list[index] = updated; else list.Add(updated);
             CaptureAudioOptions = list;
 
-            _suppressAsioPairSync = true;
-            try { SelectedAsioInputPair = value; } finally { _suppressAsioPairSync = false; }
+            using (_asioSelector.SuppressUserChoice())
+            {
+                SelectedAsioInputPair = value;
+            }
         }
         catch (Exception ex)
         {
@@ -1293,170 +1503,6 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
         SelectedCaptureAudioOption = updated;
         AppLogger.LogInfo($"ASIO input pair set to {value.DisplayName} for '{updated.DisplayName}'.");
-    }
-
-    /// <summary>
-    /// Reads the driver's real input channels on a worker thread (the probe itself spins up its own
-    /// STA thread and never throws), then publishes the result back on the UI thread.
-    /// </summary>
-    private void BeginAsioInputPairProbe(Guid clsid)
-    {
-        if (_asioProbeInFlight.Contains(clsid)) return;
-
-        if (!_asioDriversByClsid.TryGetValue(clsid, out AsioDriverInfo? driver))
-        {
-            try
-            {
-                driver = AsioDriverEnumerator.Enumerate().FirstOrDefault(d => d.Clsid == clsid);
-            }
-            catch (Exception ex)
-            {
-                AppLogger.LogInfo($"[ASIO] could not resolve driver {clsid:B} for probing: {ex.Message}");
-                driver = null;
-            }
-        }
-
-        if (driver == null)
-        {
-            AsioInputPairHint = "Driver is no longer registered on this machine; using input pair 1/2.";
-            return;
-        }
-
-        _asioProbeInFlight.Add(clsid);
-        AsioDriverInfo target = driver;
-
-        try
-        {
-            _ = Task.Run(() =>
-            {
-                IReadOnlyList<AsioInputChannel> channels = AsioInputChannelProbe.Probe(target, out string? reason);
-                PostToUIThreadSafely(() => CompleteAsioInputPairProbe(clsid, new AsioPairProbeResult(channels, reason)));
-            });
-        }
-        catch (Exception ex)
-        {
-            _asioProbeInFlight.Remove(clsid);
-            AppLogger.LogInfo($"[ASIO] input probe could not be scheduled: {ex.Message}");
-            AsioInputPairHint = "Input probe could not run; using input pair 1/2.";
-        }
-    }
-
-    private void CompleteAsioInputPairProbe(Guid clsid, AsioPairProbeResult result)
-    {
-        _asioProbeInFlight.Remove(clsid);
-        _asioPairCache[clsid] = result;
-
-        HostAudioCaptureOption? option = SelectedCaptureAudioOption;
-        if (option == null || !option.IsAsio || option.AsioDriverClsid != clsid)
-        {
-            return; // The user moved on to another device meanwhile; the cache serves them later.
-        }
-
-        ApplyAsioPairProbe(option, clsid, result, announce: true);
-    }
-
-    /// <summary>Populates the pair list from the probe result and degrades gracefully when it failed.</summary>
-    private void ApplyAsioPairProbe(HostAudioCaptureOption option, Guid clsid, AsioPairProbeResult result, bool announce)
-    {
-        try
-        {
-            var pairs = BuildAsioPairs(result.Channels);
-            try
-            {
-                _suppressAsioPairSync = true;
-                AsioInputPairOptions = pairs;
-                SelectedAsioInputPair =
-                    pairs.FirstOrDefault(p => p.FirstChannelIndex == option.AsioFirstInputChannelIndex)
-                    ?? pairs.FirstOrDefault();
-            }
-            finally
-            {
-                _suppressAsioPairSync = false;
-            }
-
-            if (pairs.Count == 0)
-            {
-                // Degrade exactly as before: the single "ASIO · name (In 1/2)" entry keeps working,
-                // the picker hides itself, and the reason is surfaced without breaking anything.
-                IsAsioInputPairVisible = false;
-                string reason = string.IsNullOrWhiteSpace(result.Reason)
-                    ? "the driver reported no input channels"
-                    : result.Reason!;
-                AsioInputPairHint = $"Input pairs unavailable: {reason}. Using input pair 1/2.";
-                AppLogger.LogInfo($"[ASIO] input channel probe failed for '{option.DisplayName}': {reason}");
-                if (announce) StatusText = $"ASIO input probe unavailable ({reason}); keeping input pair 1/2.";
-                return;
-            }
-
-            IsAsioInputPairVisible = true;
-            if (announce)
-            {
-                StatusText = $"ASIO driver exposes {result.Channels.Count} input channel(s): {pairs.Count} pair(s) available.";
-                AppLogger.LogInfo($"[ASIO] {DriverDisplayName(clsid)} exposes {result.Channels.Count} input channel(s).");
-            }
-        }
-        catch (Exception ex)
-        {
-            AppLogger.LogError($"Could not apply ASIO input pairs: {ex.Message}", ex);
-        }
-    }
-
-    /// <summary>
-    /// Derives the selectable stereo pairs from the driver's input channel count: channels 0+1, 2+3,
-    /// 4+5 … with a trailing odd channel offered on its own (the capture source duplicates it to L+R).
-    /// </summary>
-    private static IReadOnlyList<AsioInputPairOption> BuildAsioPairs(IReadOnlyList<AsioInputChannel> channels)
-    {
-        var pairs = new List<AsioInputPairOption>();
-        if (channels == null) return pairs;
-
-        int count = channels.Count;
-        for (int i = 0; i + 1 < count; i += 2)
-        {
-            pairs.Add(new AsioInputPairOption(i, $"In {i + 1}/{i + 2}"));
-        }
-
-        if (count % 2 == 1)
-        {
-            pairs.Add(new AsioInputPairOption(count - 1, $"In {count}"));
-        }
-
-        return pairs;
-    }
-
-    private string DriverDisplayName(Guid clsid) =>
-        _asioDriversByClsid.TryGetValue(clsid, out AsioDriverInfo? driver) ? driver.DisplayName : "ASIO driver";
-
-    /// <summary>Human label for a remembered pair index, used while rebuilding the audio dropdown.</summary>
-    private string AsioPairText(Guid clsid, int firstChannelIndex)
-    {
-        if (_asioPairCache.TryGetValue(clsid, out AsioPairProbeResult? result))
-        {
-            foreach (AsioInputPairOption pair in BuildAsioPairs(result.Channels))
-            {
-                if (pair.FirstChannelIndex == firstChannelIndex) return pair.DisplayName;
-            }
-        }
-
-        return firstChannelIndex % 2 == 0
-            ? $"In {firstChannelIndex + 1}/{firstChannelIndex + 2}"
-            : $"In {firstChannelIndex + 1}";
-    }
-
-    private void ClearAsioInputPairState()
-    {
-        try
-        {
-            _suppressAsioPairSync = true;
-            IsAsioInputPairVisible = false;
-            AsioInputPairOptions = Array.Empty<AsioInputPairOption>();
-            SelectedAsioInputPair = null;
-            AsioInputPairHint = null;
-        }
-        finally
-        {
-            _suppressAsioPairSync = false;
-        }
     }
 
     /// <summary>
@@ -1727,25 +1773,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
             DateTime nowUtc = DateTime.UtcNow;
 
-            var config = new RecordingConfig
-            {
-                ContainerFormat = SelectedContainerFormat,
-                EncoderChoice = SelectedEncoderChoice,
-                Quality = SelectedQualityPreset,
-                OutputDirectory = outDir,
-
-                // NET-011: a blank backup folder means a single destination, exactly as before.
-                BackupOutputDirectory = string.IsNullOrWhiteSpace(BackupOutputDirectory)
-                    ? null
-                    : BackupOutputDirectory.Trim(),
-
-                // NET-008: segmented / scheduled capture, read from the bound option selections so the
-                // config can never carry a value the operator cannot see in the UI.
-                SegmentRolloverMinutes = SelectedRolloverMinutes?.Value ?? 0,
-                SegmentRolloverGigabytes = SelectedRolloverGigabytes?.Value ?? 0,
-                MaxDurationMinutes = SelectedMaxDuration?.Value ?? 0,
-                ScheduledStartDelayMinutes = SelectedScheduleDelay?.Value ?? 0
-            };
+            // ADR-0006: built from the persisted operator defaults + the live UI selections. The
+            // segmented/scheduled values are read from the bound option selections, so the config can
+            // never carry a value the operator cannot see in the UI.
+            var config = BuildRecordingConfigFromUi();
 
             // A start delay is resolved to an absolute instant HERE, once, so what the arm evaluates is
             // a plain timestamp compare rather than a moving target.
@@ -1754,6 +1785,21 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                 config.ScheduledStartUtc = startUtc;
                 config.ScheduledStartDelayMinutes = 0;
             }
+
+            // NET-016: the stop-after delay is resolved to an absolute instant HERE, once, exactly as the
+            // start is above - so the arm evaluates a plain timestamp compare rather than a moving target.
+            if (RecordingSchedule.ResolveStopUtc(config, nowUtc) is { } stopUtc)
+            {
+                config.ScheduledStopUtc = stopUtc;
+            }
+
+            // The take clock for the remaining-time readout. Both start now; a rollover restarts only
+            // the segment clock.
+            _activeTakeConfig = config;
+            _activeTakeStartUtcTicks = nowUtc.Ticks;
+            _activeSegmentStartUtcTicks = nowUtc.Ticks;
+            _lastRemainingSeconds = -1;
+            _lastRemainingBoundary = RecordingBoundary.None;
 
             // A new take clears any rollover notice left over from the previous one.
             SegmentContinuationText = string.Empty;
@@ -1831,10 +1877,20 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// </summary>
     partial void OnSelectedRecordingPresetChanged(string value)
     {
-        if (_applyingRecordingPreset) return;
+        if (_applyingRecordingPreset)
+        {
+            // ADR-0006: still persist - the preset name itself is a persisted field, and the axis hooks
+            // that fired during application were suppressed by the guard.
+            PersistSettings();
+            return;
+        }
 
         RecordingPreset? preset = RecordingPresets.FindByName(value);
-        if (preset == null) return; // "Custom" - nothing to apply
+        if (preset == null)
+        {
+            PersistSettings(); // "Custom" - nothing to apply, but the name is still the operator's choice
+            return;
+        }
 
         _applyingRecordingPreset = true;
         try
@@ -1857,6 +1913,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             _applyingRecordingPreset = false;
         }
+
+        // ADR-0006: the preset choice and every axis it set are persisted together, after the guard is
+        // released, so the file records the post-apply state rather than an intermediate one.
+        PersistSettings();
     }
 
     /// <summary>
@@ -1878,11 +1938,44 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
-    partial void OnSelectedEncoderChoiceChanged(VideoEncoderChoice value) => MarkRecordingPresetCustom();
-    partial void OnSelectedQualityPresetChanged(QualityPreset value) => MarkRecordingPresetCustom();
-    partial void OnSelectedRolloverMinutesChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
-    partial void OnSelectedRolloverGigabytesChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
-    partial void OnSelectedMaxDurationChanged(RecordingChoiceOption value) => MarkRecordingPresetCustom();
+    partial void OnSelectedEncoderChoiceChanged(VideoEncoderChoice value)
+    {
+        MarkRecordingPresetCustom();
+        PersistSettings();   // ADR-0006
+    }
+
+    partial void OnSelectedQualityPresetChanged(QualityPreset value)
+    {
+        MarkRecordingPresetCustom();
+        PersistSettings();   // ADR-0006
+    }
+
+    partial void OnSelectedRolloverMinutesChanged(RecordingChoiceOption value)
+    {
+        MarkRecordingPresetCustom();
+        PersistSettings();   // ADR-0006
+    }
+
+    partial void OnSelectedRolloverGigabytesChanged(RecordingChoiceOption value)
+    {
+        MarkRecordingPresetCustom();
+        PersistSettings();   // ADR-0006
+    }
+
+    partial void OnSelectedMaxDurationChanged(RecordingChoiceOption value)
+    {
+        MarkRecordingPresetCustom();
+        PersistSettings();   // ADR-0006
+    }
+
+    // ADR-0006: the destination fields and the start delay had no hook before - persistence needs one.
+    partial void OnOutputDirectoryChanged(string value) => PersistSettings();
+
+    partial void OnBackupOutputDirectoryChanged(string value) => PersistSettings();
+
+    partial void OnSelectedScheduleDelayChanged(RecordingChoiceOption value) => PersistSettings();
+
+    partial void OnSelectedStopAfterChanged(RecordingChoiceOption value) => PersistSettings();
 
     /// <summary>
     /// Picks the optional second destination (NET-011). Reuses the same folder-picker hook as the
@@ -2130,6 +2223,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             StopSummaryText = string.Empty;
             _recordUiTimer?.Start();
             ProjectRecordingHealth(_session.GetRecordingHealthSnapshot());
+
+            // ADR-0011: "Change Mode" must disable the moment a take goes live. Re-derived here
+            // rather than in the command so every path into "recording" is covered.
+            NotifyModeGateChanged();
         });
     }
 
@@ -2140,6 +2237,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         // config re-unlock, no stop verdict, no "saved" copy. It gets its own quiet continuation line.
         if (RecordingHealth.IsSegmentBoundary(summary.Reason))
         {
+            // NET-016: the SEGMENT clock restarts; the TAKE clock does not (the same split ADR-0008's
+            // boundary arithmetic makes). Without this the next-segment countdown would be wrong.
+            _activeSegmentStartUtcTicks = DateTime.UtcNow.Ticks;
+            _lastRemainingSeconds = -1;
+
             string note = RecordingHealth.BuildSegmentContinuationText(summary);
             AppLogger.LogInfo(
                 $"Segment boundary (roller): {summary.Path} (media duration: {summary.MediaDuration}, " +
@@ -2179,6 +2281,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             double mb = summary.FileSizeBytes / (1024.0 * 1024.0);
             RecordDurationText = "00:00:00";
 
+            // NET-016: the take is over, so the countdown goes with it.
+            _activeTakeConfig = null;
+            ClearRemainingTime();
+
             // A genuine stop supersedes any rollover notice from earlier in the take.
             SegmentContinuationText = string.Empty;
             RecordStatsText = $"Saved: {Path.GetFileName(summary.Path)} ({mb:F1} MB, {summary.MediaDuration:mm\\:ss})";
@@ -2189,6 +2295,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             ProjectRecordingHealth(summary.ToHealthSnapshot());
 
             StatusText = $"Recording completed and saved to {summary.Path}";
+
+            // ADR-0011: the take is over, so "Change Mode" is allowed again.
+            NotifyModeGateChanged();
         });
     }
 
@@ -2207,6 +2316,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             RecordDurationText = "00:00:00";
             RecordStatsText = "Ready";
             StatusText = $"Recording Error: {error}";
+
+            // ADR-0011: the failed take released the session, so the mode gate must reopen.
+            NotifyModeGateChanged();
         });
     }
 
@@ -2255,7 +2367,75 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         // The panel stays up after a stop so the verdict remains readable, and hides once the verdict
         // is cleared by the next take.
         IsRecordingHealthVisible = snapshot.IsRecording || !string.IsNullOrEmpty(StopSummaryText);
+
+        UpdateRemainingTime();
     }
+
+    /// <summary>
+    /// NET-016: the remaining-time readout, projected on the EXISTING health tick - no new timer. The
+    /// arithmetic is the pure <see cref="RecordingBoundaries.NearestTimeBoundary"/>; nothing here reads a
+    /// file, touches the transport, or allocates on the hot path.
+    ///
+    /// <para>The string is rebuilt only when the rendered SECOND or the boundary itself changes, so a tick
+    /// that changes nothing allocates nothing.</para>
+    /// </summary>
+    private void UpdateRemainingTime()
+    {
+        RecordingConfig? config = _activeTakeConfig;
+
+        if (!_session.IsRecording || config is null)
+        {
+            ClearRemainingTime();
+            return;
+        }
+
+        RecordingBoundaryEta? eta = RecordingBoundaries.NearestTimeBoundary(
+            config, _activeTakeStartUtcTicks, _activeSegmentStartUtcTicks, DateTime.UtcNow.Ticks);
+
+        if (eta is not { } nearest)
+        {
+            // Nothing is bounded: no countdown, rather than a countdown to nothing.
+            ClearRemainingTime();
+            return;
+        }
+
+        int seconds = (int)nearest.Remaining.TotalSeconds;
+        if (seconds == _lastRemainingSeconds && nearest.Boundary == _lastRemainingBoundary)
+        {
+            IsRemainingTimeVisible = true;
+            return;
+        }
+
+        _lastRemainingSeconds = seconds;
+        _lastRemainingBoundary = nearest.Boundary;
+
+        // The COUNTDOWN LEADS, so a narrow column trims the label and never the number.
+        RemainingTimeText =
+            $"ends in {FormatRemaining(nearest.Remaining)} · {RemainingBoundaryLabel(nearest.Boundary)}";
+        IsRemainingTimeVisible = true;
+    }
+
+    private void ClearRemainingTime()
+    {
+        _lastRemainingSeconds = -1;
+        _lastRemainingBoundary = RecordingBoundary.None;
+        IsRemainingTimeVisible = false;
+        RemainingTimeText = string.Empty;
+    }
+
+    private static string FormatRemaining(TimeSpan remaining)
+        => remaining.TotalHours >= 1
+            ? $"{(int)remaining.TotalHours:00}:{remaining.Minutes:00}:{remaining.Seconds:00}"
+            : $"{remaining.Minutes:00}:{remaining.Seconds:00}";
+
+    /// <summary>Names WHAT is about to happen, not merely that something is.</summary>
+    private static string RemainingBoundaryLabel(RecordingBoundary boundary) => boundary switch
+    {
+        RecordingBoundary.MaxDuration => "max length",
+        RecordingBoundary.ScheduledStop => "scheduled stop",
+        RecordingBoundary.SegmentRollover => "rollover",
+        _ => string.Empty
+    };
 
     partial void OnStopSummaryTextChanged(string value)
     {
@@ -2267,10 +2447,156 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         IsSegmentContinuationVisible = !string.IsNullOrEmpty(value);
     }
 
+    // ---- ADR-0011: shell commands ------------------------------------------------------------
+
+    /// <summary>
+    /// ADR-0011: the picker's card action. Enters the chosen operating mode and remembers it as
+    /// <see cref="LastUsedAppMode"/> so the next open pre-highlights the same card. Persists immediately
+    /// — a mode choice is a committed operator intent, not a transient UI state.
+    /// </summary>
+    [RelayCommand]
+    private void SelectMode(AppMode mode)
+    {
+        if (mode == AppMode.ModeSelection)
+        {
+            return; // The picker is the destination of ChangeMode, not a card on it.
+        }
+
+        _lastUsedAppMode = mode;
+        _appModeState.SetMode(mode);
+        PersistSettings();
+        ApplyAppModeProjection();
+    }
+
+    /// <summary>
+    /// ADR-0011 decision 4: "Change Mode" returns to the picker. Refused while a take or a host
+    /// broadcast is live — the guard lives here as well as in the view, so a stale binding can never
+    /// tear a session down.
+    /// </summary>
+    [RelayCommand]
+    private void ChangeMode()
+    {
+        if (!IsModeChangeAllowed)
+        {
+            return;
+        }
+
+        _appModeState.SetMode(AppMode.ModeSelection);
+    }
+
     [RelayCommand]
     private void ToggleDiagnosticsDrawer()
     {
         IsDiagnosticsDrawerOpen = !IsDiagnosticsDrawerOpen;
+
+        // Re-count on open: the operator may have created a bundle since launch, and a stale "N dumps
+        // are waiting" would keep asking for something already sent.
+        if (IsDiagnosticsDrawerOpen) RefreshDiagnosticsOffer();
+    }
+
+    /// <summary>
+    /// NET-020: writes one support archive - the recent logs, any crash reports and minidumps from BOTH
+    /// forensics locations, plus the generated readout. Never throws; the outcome is reported in the
+    /// drawer and the status line either way.
+    /// </summary>
+    [RelayCommand]
+    private void CreateDiagnosticsBundle()
+    {
+        DiagnosticsSnapshot snapshot = BuildDiagnosticsSnapshot();
+        string directory = DiagnosticsBundle.DefaultBundleDirectory(snapshot);
+        string path = Path.Combine(directory, DiagnosticsBundle.DefaultFileName(snapshot.GeneratedUtc));
+
+        DiagnosticsBundleResult result = DiagnosticsBundle.Create(snapshot, path);
+
+        DiagnosticsBundleStatusText = result.Summary;
+        IsDiagnosticsBundleStatusVisible = true;
+
+        // Only claim the status line on success - a failure has its own line in the drawer, and
+        // clobbering the operator's current status with an export error would hide the real problem.
+        if (result.Success) StatusText = result.Summary;
+
+        RefreshDiagnosticsOffer();
+    }
+
+    /// <summary>Re-counts dumps and republishes the offer. Cheap; called at launch and on drawer open.</summary>
+    private void RefreshDiagnosticsOffer()
+    {
+        int count = 0;
+        try
+        {
+            count = CrashForensics.CountDumps();
+        }
+        catch
+        {
+            count = 0;
+        }
+
+        _pendingCrashDumpCount = count;
+        IsDiagnosticsBundleOffered = count > 0;
+        DiagnosticsBundleOfferText = count > 0
+            ? $"{count} crash dump(s) from a previous run are waiting - create a diagnostics bundle to attach to a bug report"
+            : string.Empty;
+    }
+
+    /// <summary>
+    /// Gathers the live facts the bundle reports. Read through the existing public surfaces only: the
+    /// version and preflight results the view model already holds, and the session's health snapshot.
+    /// </summary>
+    private DiagnosticsSnapshot BuildDiagnosticsSnapshot()
+    {
+        string[] logDirs = SafeDirectories(() => CrashForensics.LogDirectories());
+        string[] dumpDirs = SafeDirectories(() => CrashForensics.DumpDirectories());
+
+        return new DiagnosticsSnapshot
+        {
+            AppVersion = VersionText,
+            FfmpegVersion = FfmpegVersion,
+            IsRecordingUnavailable = IsRecordingUnavailable,
+            RecordingUnavailableText = RecordingUnavailableText,
+
+            // Stamped the same way ProjectRecordingHealth does it: the session knows nothing about the
+            // preflight, so the app-level fact is attached here (NET-010's pattern).
+            Health = _session.GetRecordingHealthSnapshot() with { FfmpegVersion = FfmpegVersion },
+
+            DetachedChildNames = DetachedDestinationNames(),
+
+            LogDirectory = logDirs[0],
+            PrimaryLogDirectory = logDirs[^1],
+            DumpDirectory = dumpDirs[0],
+            PrimaryDumpDirectory = dumpDirs[^1],
+
+            CrashReportPath = SafeNewestDumpPath(),
+            GeneratedUtc = DateTimeOffset.UtcNow,
+            OsDescription = RuntimeInformation.OSDescription
+        };
+    }
+
+    /// <summary>
+    /// Destinations the composite sink detached, for the bundle's fan-out section. Read through the
+    /// session's public surface; guarded because a diagnostics read must never be what breaks a run.
+    /// </summary>
+    private IReadOnlyList<string> DetachedDestinationNames()
+    {
+        try { return _session.DetachedDestinationNames; }
+        catch { return Array.Empty<string>(); }
+    }
+
+    private static string[] SafeDirectories(Func<string[]> read)
+    {
+        try
+        {
+            string[] dirs = read();
+            if (dirs is { Length: > 0 }) return dirs;
+        }
+        catch { }
+
+        return new[] { string.Empty };
+    }
+
+    private static string? SafeNewestDumpPath()
+    {
+        try { return CrashForensics.NewestDumpPath(); }
+        catch { return null; }
     }
 
     #endregion
@@ -2320,6 +2646,54 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         // NET-012: the collapsed broadcast row's summary is derived from the same projection, so it is
         // current the moment the row hides.
         OnPropertyChanged(nameof(LiveSettingSummary));
+
+        // ADR-0011: the "Change Mode" gate is a projection of "is anything live", so it re-derives
+        // whenever the broadcast axis moves — no separate bookkeeping in the commands.
+        NotifyModeGateChanged();
+    }
+
+    /// <summary>
+    /// ADR-0011: one projection for the shell. Called on construction and on every mode transition,
+    /// mirroring <see cref="ApplyBroadcastStateProjection"/> — the views read derived flags, never the
+    /// enum, so a new presentation concern is added here once rather than at each call site.
+    /// </summary>
+    private void ApplyAppModeProjection()
+    {
+        OnPropertyChanged(nameof(CurrentAppMode));
+        OnPropertyChanged(nameof(IsPickerVisible));
+        OnPropertyChanged(nameof(IsCaptureModeVisible));
+        OnPropertyChanged(nameof(IsBroadcastModeVisible));
+        OnPropertyChanged(nameof(LastUsedAppMode));
+        OnPropertyChanged(nameof(IsCaptureCardHighlighted));
+        OnPropertyChanged(nameof(IsBroadcastCardHighlighted));
+
+        // The mode now OWNS the broadcast row's visibility, so entering or leaving Broadcast mode must
+        // publish the whole dependent set. This is the notification the deleted OnIsBroadcastRevealedChanged
+        // hook used to raise - without it the row, the selection hint and the compact summary all keep
+        // stale bindings when the mode changes.
+        OnPropertyChanged(nameof(IsBroadcastRowVisible));
+        OnPropertyChanged(nameof(IsBroadcastSelecting));
+        OnPropertyChanged(nameof(IsLiveSettingSummaryVisible));
+        OnPropertyChanged(nameof(LiveSettingSummary));
+
+        NotifyModeGateChanged();
+    }
+
+    /// <summary>
+    /// ADR-0011: "Change Mode" is disabled while a take or a host broadcast is live. Both the gate and
+    /// its explanatory hint are published together so a view can never show an enabled-looking button
+    /// with a stale hint, or a disabled one with no reason.
+    /// </summary>
+    private void NotifyModeGateChanged()
+    {
+        OnPropertyChanged(nameof(IsModeChangeAllowed));
+        OnPropertyChanged(nameof(ModeChangeBlockedHint));
+    }
+
+    /// <summary>One module transition: re-project the shell, and refresh the mode gate.</summary>
+    private void OnAppModeChanged(object? sender, AppModeChangedEventArgs e)
+    {
+        ApplyAppModeProjection();
     }
 
     /// <summary>
@@ -2457,11 +2831,13 @@ public sealed record AsioInputPairOption(int FirstChannelIndex, string DisplayNa
 
 /// <summary>
 /// Outcome of one <see cref="OmtCaptureStudio.Services.AsioInputChannelProbe"/> run, cached per driver
-/// <see cref="Guid"/> in the view model so re-opening the dropdown never re-opens the driver.
+/// <see cref="Guid"/> by <see cref="AsioInputPairSelector"/> so re-opening the dropdown never
+/// re-opens the driver. Public because it is a parameter of the (public) selector ctor — an
+/// internal type there is a CS0051 accessibility error.
 /// </summary>
 /// <param name="Channels">Input channels the driver reported (empty when the probe failed).</param>
 /// <param name="Reason">Why the probe failed, or <c>null</c> on success.</param>
-internal sealed record AsioPairProbeResult(IReadOnlyList<AsioInputChannel> Channels, string? Reason);
+public sealed record AsioPairProbeResult(IReadOnlyList<AsioInputChannel> Channels, string? Reason);
 
 /// <summary>
 /// One labelled choice in a recording-settings dropdown (NET-008): the operator sees

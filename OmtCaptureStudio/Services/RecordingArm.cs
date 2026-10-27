@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services.Sinks;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.Services;
 
 /// <summary>

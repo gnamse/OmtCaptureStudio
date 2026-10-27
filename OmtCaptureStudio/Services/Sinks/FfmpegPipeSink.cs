@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Diagnostics;
 using OmtCaptureStudio.Models;
 
+using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.Services.Sinks;
 
 public class FfmpegPipeSink : IRecordingSink
