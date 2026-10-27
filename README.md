@@ -2,12 +2,13 @@
 
 A standalone broadcast-grade desktop GUI client for **Open Media Transport (OMT)** to discover, preview, capture, and record video and multi-channel audio directly to disk (`.mp4`, `.mkv`, `.mov`) without requiring OBS Studio or commercial switchers.
 
-![OMT Capture Studio User Interface](docs/images/omt_capture_studio_ui.jpg)
+![OMT Capture Studio mode picker](docs/images/mode_picker.png)
 
 ---
 
 ## Features
 
+- **Mode-based workspace**: The app opens on a **Capture** / **Broadcast** picker. Capture records an OMT source to a file; Broadcast streams screens or windows over OMT. **Change Mode** returns to the picker at any time unless a broadcast is live.
 - **Automatic Network Discovery**: Integrated mDNS/DNS-SD discovery via `OMTDiscovery` to automatically detect live OMT feeds across the local network with clean, deduplicated naming.
 - **Manual URL & Port Entry**: Direct connection support via `omt://<ip>:<port>`.
 - **High-Performance Video Viewport**: Zero-copy/low-overhead BGRA rendering via Avalonia Skia `WriteableBitmap` with aspect ratio preservation and live HUD telemetry (resolution, fps, bitrate).
@@ -17,6 +18,18 @@ A standalone broadcast-grade desktop GUI client for **Open Media Transport (OMT)
   - Hardware Encoders: Auto Hardware (NVIDIA NVENC, Intel QuickSync, AMD AMF) or CPU (`libx264`).
 - **Built-in Test Signal Generator**: Generates 1080p60 SMPTE color bars with motion tick and stereo sine wave tones (440 Hz / 880 Hz) using `OMTSend` for instant offline testing and calibration.
 - **Ahead-of-Time (AOT) Compiled**: Native machine code via .NET 8 Native AOT. Zero .NET runtime installation required on target systems.
+
+---
+
+## Screenshots
+
+![Capture mode](docs/images/capture_mode.png)
+
+*Capture mode — SMPTE bars preview, audio meters, and START RECORDING.*
+
+![Broadcast mode](docs/images/broadcast_mode.png)
+
+*Broadcast mode — host a screen or window over OMT (Screen, System Audio, network).*
 
 ---
 
@@ -84,8 +97,14 @@ Double-click `Launch-OmtCaptureStudio.bat` or run:
 dotnet run --project OmtCaptureStudio -c Release
 ```
 
+The app opens on the mode picker (*How do you want to use it today?*):
+- **Capture** — record an OMT source to a file.
+- **Broadcast** — stream screens/windows over OMT.
+
+Pick a card to load that mode. **Change Mode** returns to the picker at any time unless a broadcast is live.
+
 ### 3. Testing with the Built-in Signal Generator
-1. Click the **Test Signal** button in the top right.
+1. In **Capture** mode, click the **Test Signal** button in the toolbar.
 2. The client will start broadcasting an OMT feed locally and automatically connect to it.
 3. You will see the animated SMPTE color bars in the viewport, the audio VU meters bouncing, and stream specs showing `1920x1080 @ 60 fps, 2 ch 48 kHz`.
 4. Click **● START RECORDING** to capture to MP4.
