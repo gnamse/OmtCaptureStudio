@@ -367,24 +367,27 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         => IsAdvancedRecordingOptionsExpanded = !IsAdvancedRecordingOptionsExpanded;
 
     /// <summary>
-    /// NET-014: the broadcast row is REVEALED for selection before anything is sent. Revealing shows the
-    /// pickers ENABLED; the send only starts when the operator presses Start Broadcasting.
-    /// </summary>
-    [ObservableProperty]
-    private bool _isBroadcastRevealed;
-
-    /// <summary>
-    /// NET-012/NET-014: the broadcast configuration row's visibility.
+    /// NET-012/NET-014/ADR-0011: the broadcast configuration row's visibility.
     ///
-    /// <para>Driven by the REVEAL (so the pickers can be worked on before anything is live) and OR'd with
-    /// the live state, so a running broadcast can never be orphaned behind a hidden row.</para>
+    /// <para>Keyed to <see cref="IsBroadcastModeVisible"/>: under the mode-based shell the MODE is the
+    /// reveal (ADR-0011 decision 1), so the pickers are shown whenever the operator is in Broadcast mode
+    /// and stay ENABLED for selection before anything is live. OR'd with the live state, so a running
+    /// broadcast can never be orphaned behind a hidden row even if the mode moves underneath it.</para>
     ///
     /// <para>Deliberately keyed to broadcast state and NOT to recording state: hiding this row must never
     /// disturb a take.</para>
+    ///
+    /// <para>Replaced the old <c>IsBroadcastRevealed</c> flag. Once the reveal toggle left the UI nothing
+    /// could set it, so it stayed false forever: the row never showed, <see cref="IsBroadcastSelecting"/>
+    /// was never true (the selection hint was permanently invisible), and
+    /// <see cref="IsLiveSettingSummaryVisible"/> was inverted so the compact summary covered the hint.</para>
     /// </summary>
-    public bool IsBroadcastRowVisible => IsBroadcastRevealed || IsDesktopCaptureActive;
+    public bool IsBroadcastRowVisible => IsBroadcastModeVisible || IsDesktopCaptureActive;
 
-    /// <summary>True in the middle state: the row is open for selection and nothing is being sent yet.</summary>
+    /// <summary>
+    /// True in the middle state: the row is open for selection and nothing is being sent yet. Gates the
+    /// broadcast selection hint, which under the old reveal flag could never appear.
+    /// </summary>
     public bool IsBroadcastSelecting => IsBroadcastRowVisible && !IsDesktopCaptureActive;
 
     /// <summary>The in-row action: arm the live state, or stop it (NET-014).</summary>
@@ -402,6 +405,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// <summary>
     /// The compact broadcast summary substitutes for the row exactly when the row is hidden - the point
     /// is that hiding the pickers never hides WHICH devices are selected.
+    ///
+    /// <para>Because it is the complement of <see cref="IsBroadcastRowVisible"/>, and the row is now
+    /// visible throughout Broadcast mode, the summary stands down while the operator is selecting. That
+    /// is deliberate: it must never cover the selection hint.</para>
     /// </summary>
     public bool IsLiveSettingSummaryVisible => !IsBroadcastRowVisible;
 
@@ -1041,14 +1048,6 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(BroadcastActionBackground));
     }
 
-    partial void OnIsBroadcastRevealedChanged(bool value)
-    {
-        OnPropertyChanged(nameof(IsBroadcastRowVisible));
-        OnPropertyChanged(nameof(IsBroadcastSelecting));
-        OnPropertyChanged(nameof(IsLiveSettingSummaryVisible));
-        OnPropertyChanged(nameof(LiveSettingSummary));
-    }
-
     partial void OnIsAdvancedRecordingOptionsExpandedChanged(bool value)
     {
         OnPropertyChanged(nameof(AdvancedOptionsAutomationName));
@@ -1219,29 +1218,6 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             AppLogger.LogError($"Error toggling test signal: {ex.Message}", ex);
             StatusText = $"Test signal error: {ex.Message}";
             OnPropertyChanged(nameof(IsTestSignalActive));
-        }
-    }
-
-    [RelayCommand(AllowConcurrentExecutions = false)]
-    private async Task ToggleDesktopCaptureAsync()
-    {
-        if (IsRecordingCloseOverlayVisible) return;
-
-        // NET-014: while LIVE this button is the DISMISS - it stops the send and hides the panel. A live
-        // broadcast is never orphaned behind a hidden row: it is stopped, not hidden.
-        if (IsBroadcasting)
-        {
-            await SetDesktopCaptureActiveAsync(false);
-            IsBroadcastRevealed = false;
-            return;
-        }
-
-        // While OFF it is the reveal/hide entry only - revealing NEVER starts a send (that was the bug:
-        // the pickers the operator needed to touch appeared already locked).
-        IsBroadcastRevealed = !IsBroadcastRevealed;
-        if (IsBroadcastRevealed && CaptureTargets.Count == 0)
-        {
-            PopulateCaptureTargets();
         }
     }
 
@@ -2690,6 +2666,16 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(LastUsedAppMode));
         OnPropertyChanged(nameof(IsCaptureCardHighlighted));
         OnPropertyChanged(nameof(IsBroadcastCardHighlighted));
+
+        // The mode now OWNS the broadcast row's visibility, so entering or leaving Broadcast mode must
+        // publish the whole dependent set. This is the notification the deleted OnIsBroadcastRevealedChanged
+        // hook used to raise - without it the row, the selection hint and the compact summary all keep
+        // stale bindings when the mode changes.
+        OnPropertyChanged(nameof(IsBroadcastRowVisible));
+        OnPropertyChanged(nameof(IsBroadcastSelecting));
+        OnPropertyChanged(nameof(IsLiveSettingSummaryVisible));
+        OnPropertyChanged(nameof(LiveSettingSummary));
+
         NotifyModeGateChanged();
     }
 

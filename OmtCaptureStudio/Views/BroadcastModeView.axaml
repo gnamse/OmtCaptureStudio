@@ -59,7 +59,7 @@
                 <!-- Row 1: Host Broadcast Studio Bar (Screen/Window Target, Audio Device, Network
                      Interface). NET-012: revealed BY THE BROADCAST STATE only - never by recording state,
                      so collapsing it can never disturb a running take. -->
-                <Border BorderBrush="{DynamicResource StudioBorderSubtle}" BorderThickness="0,1,0,0" Margin="0,7,0,0" Padding="0,7,0,0"
+                <Border Grid.Row="1" BorderBrush="{DynamicResource StudioBorderSubtle}" BorderThickness="0,1,0,0" Margin="0,7,0,0" Padding="0,7,0,0"
                        >
                     <Grid VerticalAlignment="Center">
                         <Grid.ColumnDefinitions>

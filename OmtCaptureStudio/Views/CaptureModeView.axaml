@@ -226,7 +226,7 @@
                 </StackPanel>
 
                 <!-- 1: Output Folder Selection -->
-                <Grid Grid.Column="1" VerticalAlignment="Center">
+                <Grid Grid.Row="0" Grid.Column="1" VerticalAlignment="Center">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
@@ -284,10 +284,10 @@
                 </Grid>
 
                 <!-- 2: Divider -->
-                <Rectangle Grid.Column="2" Width="1" Height="36" Fill="{DynamicResource StudioBorderSubtle}" Margin="20,0" VerticalAlignment="Center"/>
+                <Rectangle Grid.Row="0" Grid.Column="2" Width="1" Height="36" Fill="{DynamicResource StudioBorderSubtle}" Margin="20,0" VerticalAlignment="Center"/>
 
                 <!-- 3: Recording Timer & Stats Readout -->
-                <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="0,0,12,0" HorizontalAlignment="Right">
+                <StackPanel Grid.Row="0" Grid.Column="3" VerticalAlignment="Center" Margin="0,0,12,0" HorizontalAlignment="Right">
                     <TextBlock x:Name="TxtRecordDuration" Text="{CompiledBinding RecordDurationText}" Foreground="{DynamicResource StudioTextPrimary}" FontSize="16" FontWeight="Bold" FontFamily="Consolas, monospace" HorizontalAlignment="Right"/>
                     <!-- NET-016: the countdown sits beside the elapsed time - same column, so it adds
                          NO new column and NO width (bounded by TxtRecordStats' existing MaxWidth of 130).
@@ -305,7 +305,7 @@
                 </StackPanel>
 
                 <!-- 4: Main Record Button -->
-                <Button x:Name="BtnRecord" Grid.Column="4"
+                <Button x:Name="BtnRecord" Grid.Row="0" Grid.Column="4"
                         Content="{CompiledBinding RecordButtonText}"
                         IsEnabled="{CompiledBinding IsRecordButtonEnabled}"
                         Background="{CompiledBinding RecordButtonBackground}"

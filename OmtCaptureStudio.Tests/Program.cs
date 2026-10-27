@@ -1111,9 +1111,10 @@ class Program
             "The Advanced tier must be COLLAPSED by default - the default path is preset -> folder -> record.");
         Expect(vm.IsAdvancedChevronDown, "A collapsed tier must show the down chevron.");
         Expect(!vm.IsBroadcastRowVisible,
-            "The broadcast configuration row must start hidden - it is revealed by Broadcast being ON.");
+            "The app opens on the picker, so the broadcast configuration row must not be shown at startup.");
         Expect(vm.IsLiveSettingSummaryVisible,
-            "While the broadcast row is hidden the compact summary must be the thing that is shown.");
+            "Away from Broadcast mode the broadcast row is not shown, so the compact summary is what carries " +
+            "the selection - it must never be suppressed by the row.");
 
         // ---- 2. THE DISCLOSURE observable + its accessible name ---------------------------------
         Expect(vm.AdvancedOptionsAutomationName.Contains("Show"),
@@ -1146,14 +1147,18 @@ class Program
         Expect(vm.SelectedRecordingPreset == RecordingPresets.CustomName,
             $"Editing a control inside the tier must switch the picker to Custom; got '{vm.SelectedRecordingPreset}'.");
 
-        // ---- 5. THE THREE-STATE BROADCAST FLOW (NET-014) ------------------------------------------
-        // State 1 - HIDDEN.
-        Expect(!vm.IsBroadcastRowVisible, "State 1 (Hidden): the row must be hidden.");
+        // ---- 5. THE THREE-STATE BROADCAST FLOW (NET-014, re-keyed to ADR-0011) ---------------------
+        // The old middle state was a REVEAL toggle. Under the mode-based shell the MODE is the reveal
+        // (ADR-0011 decision 1): "revealed" is now "the operator is in Broadcast mode". The three states
+        // and every assertion they carried survive - only the thing that opens the row changed.
+        // State 1 - not in Broadcast mode, so the row is not shown.
+        Expect(!vm.IsBroadcastRowVisible, "State 1 (not in Broadcast mode): the row must not be shown.");
         Expect(!vm.IsBroadcastSelecting, "State 1: nothing is being selected.");
 
-        // State 2 - REVEALED: the pickers are open and ENABLED. Nothing is live yet.
-        vm.IsBroadcastRevealed = true;
-        Expect(vm.IsBroadcastRowVisible, "State 2 (Revealed): the row must be visible.");
+        // State 2 - IN BROADCAST MODE: the pickers are open and ENABLED. Nothing is live yet.
+        vm.SelectModeCommand.Execute(AppMode.BroadcastMode);
+        Expect(vm.IsBroadcastModeVisible, "State 2: selecting the Broadcast card must enter Broadcast mode.");
+        Expect(vm.IsBroadcastRowVisible, "State 2 (Broadcast mode): the row must be visible - the mode IS the reveal.");
         Expect(vm.IsBroadcastSelecting, "State 2: the row is SELECTING, not live.");
         Expect(!vm.IsDesktopCaptureActive, "State 2: revealing must NOT start a broadcast.");
         Expect(vm.IsCaptureSelectorEnabled,
@@ -1188,25 +1193,29 @@ class Program
         Expect(lockProbe.IsCaptureSelectorEnabled, "Stopping must unlock the pickers again.");
 
         // THE NEVER-ORPHAN INVARIANT: a live broadcast cannot be hidden behind a collapsed row.
-        vm.IsBroadcastRevealed = false;
+        // Leaving Broadcast mode is the STRONGEST form of the old probe - it bypasses the Change-Mode gate
+        // entirely, so if the live state did not hold the row open this would orphan the send.
+        vm.SelectModeCommand.Execute(AppMode.CaptureMode);
         Expect(vm.IsBroadcastRowVisible,
-            "A LIVE broadcast must remain visible even with the reveal flag cleared - it can never be orphaned.");
-        vm.IsBroadcastRevealed = true;   // restore: the probe above cleared a flag the operator never cleared
+            "A LIVE broadcast must remain visible even after the mode moves away - it can never be orphaned.");
+        vm.SelectModeCommand.Execute(AppMode.BroadcastMode);   // restore the mode the operator was in
 
         // Stopping from the in-row action returns to REVEALED, with the pickers usable again. The unlock is
         // a projection of the state machine (proved on lockProbe above), so mirror it here.
         vm.IsDesktopCaptureActive = false;
         vm.IsCaptureSelectorEnabled = true;
-        Expect(vm.IsBroadcastRevealed, "The in-row stop leaves the panel revealed.");
+        Expect(vm.IsBroadcastModeVisible,
+            "The in-row stop leaves the operator in Broadcast mode, with the pickers usable again.");
         Expect(vm.IsCaptureSelectorEnabled, "After a stop the pickers must be usable again.");
         Expect(vm.BroadcastActionText == "Start Broadcasting", "After a stop the action returns to Start.");
 
-        // The row-0 dismiss returns to HIDDEN.
-        vm.IsBroadcastRevealed = false;
-        Expect(!vm.IsBroadcastRowVisible, "Dismissing returns to State 1 (Hidden).");
+        // Change Mode returns to the picker, where the row is not shown.
+        vm.ChangeModeCommand.Execute(null);
+        Expect(vm.IsPickerVisible, "Change Mode must return to the picker.");
+        Expect(!vm.IsBroadcastRowVisible, "On the picker the broadcast row is not shown.");
 
         // ---- 6. RECORDING IS STILL AN INDEPENDENT AXIS --------------------------------------------
-        vm.IsBroadcastRevealed = true;
+        vm.SelectModeCommand.Execute(AppMode.BroadcastMode);
         vm.IsDesktopCaptureActive = true;
 
         long frames = 0;
@@ -1225,10 +1234,10 @@ class Program
         {
             bool rowWasVisibleWhileRecording = vm.IsBroadcastRowVisible;
 
-            // Broadcast OFF mid-take: the row returns to Hidden (reveal cleared + no longer live) and the
-            // take must not notice.
+            // Broadcast OFF mid-take: the row stops being shown (mode left + no longer live) and the take
+            // must not notice.
             vm.IsDesktopCaptureActive = false;
-            vm.IsBroadcastRevealed = false;
+            vm.SelectModeCommand.Execute(AppMode.CaptureMode);
             Expect(!vm.IsBroadcastRowVisible,
                 "Broadcast OFF must hide the row even while a take is running - the row is not keyed to recording.");
             Expect(rowWasVisibleWhileRecording,
@@ -3241,6 +3250,19 @@ class Program
                 "Selecting Broadcast must swap the content region to the broadcast mode.");
             Expect(vm.LastUsedAppMode == AppMode.BroadcastMode, "The last-used mode must follow the new choice.");
 
+            // ---- 2a. THE BROADCAST ROW IS KEYED TO THE MODE (P2-01) -------------------------------
+            // The reveal toggle used to own this flag. Once it left the UI nothing could set it, so it
+            // stayed false forever: in Broadcast mode the row never showed, the selection hint was
+            // permanently invisible, and the compact summary inverted over it. The mode now drives all three.
+            Expect(vm.IsBroadcastRowVisible,
+                "In Broadcast mode the configuration row must be visible - the mode IS the reveal (ADR-0011 d.1).");
+            Expect(vm.IsBroadcastSelecting,
+                "In Broadcast mode with nothing live the row must report SELECTING, or the selection hint " +
+                "stays permanently invisible (P2-01).");
+            Expect(!vm.IsLiveSettingSummaryVisible,
+                "The compact summary must stand down while the row is up, so it can never cover the hint.");
+            Expect(!vm.IsDesktopCaptureActive, "Entering Broadcast mode must not start a send.");
+
             // Selecting the picker as a "mode" is not a card action and must be ignored.
             vm.SelectModeCommand.Execute(AppMode.ModeSelection);
             Expect(vm.IsBroadcastModeVisible, "SelectMode(ModeSelection) is a no-op - the picker is reached via ChangeMode.");
@@ -3356,63 +3378,94 @@ class Program
             try { Directory.Delete(root, recursive: true); } catch { }
         }
 
-        // ---- 4. STRUCTURAL GUARD: shell placement --------------------------------------------------
+        // ---- 4. STRUCTURAL GUARD: grid placement in EVERY multi-row grid ---------------------------
         // Headless tests cannot RENDER XAML, so a child that silently defaults to Grid.Row 0 - because a
         // move stripped its Grid.Row - is invisible to every other assertion in this suite. It is NOT
-        // invisible to the operator: the recording bar stacked behind the source picker and vanished, and
-        // the shared status bar floated over the content. Pixel verification is what caught it; this
-        // keeps it caught in CI. Rule: in the OUTER grid of a window/root view, every child states its row.
-        foreach (string rel in new[]
-                 {
-                     "OmtCaptureStudio/MainWindow.axaml",
-                     "OmtCaptureStudio/Views/CaptureModeView.axaml",
-                     "OmtCaptureStudio/Views/BroadcastModeView.axaml",
-                     "OmtCaptureStudio/Views/ModeSelectionView.axaml"
-                 })
+        // invisible to the operator: the recording bar stacked behind the source picker and vanished, the
+        // shared status bar floated over the content, and in BroadcastModeView the Start/Stop and
+        // Change-Mode buttons overlapped by 115x23px at the 950px floor. Pixel verification caught each;
+        // this keeps them caught in CI.
+        //
+        // The FIRST version of this guard checked only each file's OUTER grid, so every NESTED multi-row
+        // grid escaped it - which is exactly where the BroadcastModeView P1 lived. It now walks EVERY Grid
+        // descendant. Rule: in ANY Grid declaring more than one row, every child states its Grid.Row.
         {
-            string? axamlPath = FindRepoSource(rel);
-            if (axamlPath == null)
+            string[] axamlFiles =
             {
-                Console.WriteLine($"   [SKIP] {rel} is not reachable from this tree.");
-                continue;
-            }
-
-            var axaml = System.Xml.Linq.XDocument.Load(axamlPath);
-            var xns = axaml.Root!.Name.Namespace;
-            var outerGrid = axaml.Descendants(xns + "Grid").FirstOrDefault();
-            Expect(outerGrid != null, $"{rel} must contain an outer Grid.");
-            if (outerGrid == null) continue;
+                "OmtCaptureStudio/MainWindow.axaml",
+                "OmtCaptureStudio/Views/CaptureModeView.axaml",
+                "OmtCaptureStudio/Views/BroadcastModeView.axaml",
+                "OmtCaptureStudio/Views/ModeSelectionView.axaml",
+                "OmtCaptureStudio/Views/VideoSurface.axaml"
+            };
 
             // Rows can be declared EITHER as a <Grid.RowDefinitions> element or with the
-            // RowDefinitions="Auto,*,Auto" attribute shorthand. Counting only the element form made this
-            // guard silently skip every file that used the shorthand - i.e. all of them. The negative
-            // control is what exposed that; without it the guard was decorative.
-            int rowCount = outerGrid.Elements(xns + "Grid.RowDefinitions")
-                                    .SelectMany(r => r.Elements(xns + "RowDefinition")).Count();
-            if (rowCount == 0)
+            // RowDefinitions="Auto,*,Auto" attribute shorthand. Counting only the element form made the
+            // first version of this guard silently skip every file that used the shorthand - i.e. all of
+            // them - and pass with the bug deliberately reintroduced. Support both forms.
+            static int RowCount(System.Xml.Linq.XElement grid, System.Xml.Linq.XNamespace ns)
             {
-                string? shorthand = outerGrid.Attribute("RowDefinitions")?.Value;
-                if (!string.IsNullOrWhiteSpace(shorthand))
+                int n = grid.Elements(ns + "Grid.RowDefinitions")
+                            .SelectMany(r => r.Elements(ns + "RowDefinition")).Count();
+                if (n == 0)
                 {
-                    rowCount = shorthand!.Split(',').Length;
+                    string? shorthand = grid.Attribute("RowDefinitions")?.Value;
+                    if (!string.IsNullOrWhiteSpace(shorthand))
+                    {
+                        n = shorthand!.Split(',').Length;
+                    }
+                }
+
+                return n;
+            }
+
+            int multiRowGridsChecked = 0;
+
+            foreach (string rel in axamlFiles)
+            {
+                string? axamlPath = FindRepoSource(rel);
+                if (axamlPath == null)
+                {
+                    Console.WriteLine($"   [SKIP] {rel} is not reachable from this tree.");
+                    continue;
+                }
+
+                var axaml = System.Xml.Linq.XDocument.Load(axamlPath);
+                var xns = axaml.Root!.Name.Namespace;
+                var grids = axaml.Descendants(xns + "Grid").ToList();
+                Expect(grids.Count > 0, $"{rel} must contain a Grid.");
+                if (grids.Count == 0) continue;
+
+                foreach (var grid in grids)
+                {
+                    int rowCount = RowCount(grid, xns);
+                    if (rowCount <= 1) continue;
+
+                    multiRowGridsChecked++;
+
+                    var unplaced = grid.Elements()
+                        .Where(e => e.Name.LocalName is not ("Grid.RowDefinitions" or "Grid.ColumnDefinitions"))
+                        .Where(e => e.Attribute("Grid.Row") == null)
+                        .Select(e => e.Name.LocalName)
+                        .ToList();
+
+                    Expect(unplaced.Count == 0,
+                        $"{rel}: a child of a {rowCount}-row Grid omits Grid.Row, so it silently defaults to " +
+                        $"row 0 and overlaps its siblings. Offenders: {string.Join(", ", unplaced)}.");
                 }
             }
 
-            if (rowCount <= 1) continue;
-
-            var unplaced = outerGrid.Elements()
-                .Where(e => e.Name.LocalName is not ("Grid.RowDefinitions" or "Grid.ColumnDefinitions"))
-                .Where(e => e.Attribute("Grid.Row") == null)
-                .Select(e => e.Name.LocalName)
-                .ToList();
-
-            Expect(unplaced.Count == 0,
-                $"{rel}: a child of the outer {rowCount}-row Grid omits Grid.Row, so it silently defaults to " +
-                $"row 0 and overlaps its siblings. Offenders: {string.Join(", ", unplaced)}.");
+            // ANTI-VACUITY FLOOR. A guard that checks nothing passes for the wrong reason - exactly how the
+            // first version shipped broken. Seven multi-row grids exist across these five files; if row
+            // counting regresses or a file drops out of the walk, this fails loudly instead of silently
+            // certifying a layout it never examined.
+            Expect(multiRowGridsChecked >= 7,
+                $"The XAML row guard only reached {multiRowGridsChecked} multi-row Grid(s), expected at least 7 " +
+                "- it is not exercising the views, so it cannot certify them.");
         }
 
         Console.WriteLine(" -> Three states, one projection, the Change-Mode gate, LastAppMode persistence " +
-                          "and the XAML row-placement invariant all verified!");
+                          "and the XAML row-placement invariant (ALL multi-row grids) all verified!");
     }
 
     /// <summary>
