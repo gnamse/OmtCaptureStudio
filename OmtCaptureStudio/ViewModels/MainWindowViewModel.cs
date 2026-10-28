@@ -362,6 +362,147 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         ? "Hide advanced recording options"
         : "Show advanced recording options";
 
+    /// <summary>
+    /// NET-023: the manual "Check for updates" action, and the deferred startup check's workhorse.
+    /// Ask-first: this REPORTS an available release and stops. Nothing is downloaded, verified or started
+    /// here - that is <see cref="InstallUpdateAsync"/>, reached only by an explicit action or by the
+    /// opt-in toggle.
+    /// </summary>
+    [RelayCommand]
+    private async Task CheckForUpdatesAsync()
+    {
+        UpdateCheckResult? checkedResult = await RunUpdateCheckAsync().ConfigureAwait(false);
+        if (checkedResult is null) return;
+
+        // Narrowed into a non-null local before it is captured: a lambda capturing a nullable
+        // local re-widens the type and the compiler warns, which is correct - it cannot see that
+        // the closure only runs after this check.
+        UpdateCheckResult result = checkedResult;
+
+        PostToUIThread(() =>
+        {
+            _lastUpdateCheckUtc = DateTime.UtcNow;
+            ApplyUpdateCheckResult(result);
+            PersistSettings();
+        });
+    }
+
+    /// <summary>
+    /// Runs the once-per-launch check and returns its result, or null when no service is wired. Public so
+    /// the headless suite drives the real policy with a fake feed and no window.
+    /// </summary>
+    public async Task<UpdateCheckResult?> RunUpdateCheckAsync()
+    {
+        UpdateService? svc = _updateService;
+        if (svc is null)
+        {
+            StatusText = "Update checks are unavailable in this build.";
+            return null;
+        }
+
+        return await svc.CheckForUpdateAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Projects a check result onto the banner. A found release is REMEMBERED, not installed. Public and
+    /// synchronous so the projection is assertable headlessly.
+    /// </summary>
+    public void ApplyUpdateCheckResult(UpdateCheckResult result)
+    {
+        _pendingUpdate = result.Outcome == UpdateCheckOutcome.UpdateAvailable ? result.Release : null;
+        _verifiedInstallerPath = null;   // a new check invalidates any earlier download
+
+        if (_pendingUpdate is null)
+        {
+            IsUpdateBannerVisible = false;
+            UpdateBannerText = string.Empty;
+            if (result.Outcome == UpdateCheckOutcome.UpToDate) StatusText = result.Detail;
+            return;
+        }
+
+        UpdateBannerText = $"v{_pendingUpdate.Version} available";
+        IsUpdateBannerVisible = true;
+        StatusText = result.Detail;
+    }
+
+    /// <summary>
+    /// NET-023: the deferred startup check. With the toggle OFF (the default) it only reveals the banner.
+    /// With it ON it proceeds through download, SHA-256 verification and install - the opt-in path.
+    /// </summary>
+    public async Task RunDeferredUpdateCheckAsync()
+    {
+        if (_updateService is null) return;
+
+        UpdateCheckResult result = await _updateService.CheckForUpdateAsync().ConfigureAwait(false);
+        PostToUIThread(() =>
+        {
+            _lastUpdateCheckUtc = DateTime.UtcNow;
+            ApplyUpdateCheckResult(result);
+            PersistSettings();
+        });
+
+        if (result.Outcome != UpdateCheckOutcome.UpdateAvailable) return;
+        if (!UpdatesAutoInstall) return;   // ask-first: banner only
+
+        await InstallUpdateAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Downloads, verifies and starts the installer for the pending release. Refuses on the portable
+    /// channel - a portable copy must never overwrite itself while running.
+    /// </summary>
+    [RelayCommand]
+    private async Task InstallUpdateAsync()
+    {
+        UpdateService? svc = _updateService;
+        UpdateRelease? release = _pendingUpdate;
+        if (svc is null || release is null) return;
+
+        if (svc.Channel == InstallChannel.Portable)
+        {
+            // Portable installs are notify-only. The releases page is the whole interaction.
+            PostToUIThread(() => StatusText = "This is a portable copy - opening the releases page instead.");
+            ViewUpdateRelease();
+            return;
+        }
+
+        string? installer = _verifiedInstallerPath;
+        if (installer is null)
+        {
+            installer = await svc.DownloadAndVerifyAsync(release).ConfigureAwait(false);
+            if (installer is null)
+            {
+                PostToUIThread(() => StatusText = "The update could not be verified and was refused.");
+                return;
+            }
+            _verifiedInstallerPath = installer;
+        }
+
+        bool started = svc.TryStartInstall(installer, out string detail);
+        PostToUIThread(() => StatusText = detail);
+        if (started)
+        {
+            // Inno closes us, replaces the files and relaunches - there is deliberately no teardown here.
+            AppLogger.LogInfo($"Update installer started from '{installer}'. The app will close for replacement.");
+        }
+    }
+
+    /// <summary>Opens the releases page - the portable channel's only action.</summary>
+    [RelayCommand]
+    private void ViewUpdateRelease() => OpenReleasesPage();
+
+    private void OpenReleasesPage()
+    {
+        try
+        {
+            using var _ = System.Diagnostics.Process.Start(UpdateService.BuildReleasesPageStartInfo());
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Could not open the releases page: {ex.Message}";
+        }
+    }
+
     [RelayCommand]
     private void ToggleAdvancedRecordingOptions()
         => IsAdvancedRecordingOptionsExpanded = !IsAdvancedRecordingOptionsExpanded;
@@ -565,6 +706,13 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// <summary>While true, changes are APPLIED but not written back - restoring must be silent.</summary>
     private bool _isRestoringSettings;
 
+    // NET-023 auto-update. Ask-first: a check only ever REPORTS; downloading and installing are separate,
+    // operator-authorised steps.
+    private UpdateService? _updateService;
+    private UpdateRelease? _pendingUpdate;
+    private string? _verifiedInstallerPath;
+    private DateTime? _lastUpdateCheckUtc;
+
     // ------------------------------------------------------------------------------------------
     // NET-016: the remaining-time readout.
     //
@@ -619,6 +767,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             // the picker is always what opens (decision 1), and silently skipping it would hide the
             // choice the ADR says the operator must make.
             _lastUsedAppMode = restored.LastAppMode;
+
+            // NET-023: a missing value is NOT consent - ask-first is the default, so an older or
+            // hand-edited file restores to false rather than to whatever the enum-less bool defaults to.
+            UpdatesAutoInstall = restored.UpdatesAutoInstall ?? false;
+            _lastUpdateCheckUtc = restored.LastUpdateCheckUtc;
 
             SelectedContainerFormat = _operatorDefaults.ContainerFormat;
             SelectedEncoderChoice = _operatorDefaults.EncoderChoice;
@@ -683,7 +836,12 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         if (_settingsStore is null || _isRestoringSettings) return;
 
         _operatorDefaults = BuildRecordingConfigFromUi();
-        _settingsStore.Save(SettingsStore.FromConfig(_operatorDefaults, SelectedRecordingPreset, _lastUsedAppMode));
+        // FromConfig is a shared mapper whose signature other callers depend on, so the update fields are
+        // STAMPED onto the result rather than widening it.
+        OperatorSettings settings = SettingsStore.FromConfig(_operatorDefaults, SelectedRecordingPreset, _lastUsedAppMode);
+        settings.UpdatesAutoInstall = UpdatesAutoInstall;
+        settings.LastUpdateCheckUtc = _lastUpdateCheckUtc;
+        _settingsStore.Save(settings);
     }
 
     // 8. Status & Telemetry
@@ -698,6 +856,19 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private string _droppedFramesText = "Dropped: 0";
+
+    // 8b. Updates (NET-023)
+    /// <summary>Opt in to installing a found update automatically. Default OFF - ask-first.</summary>
+    [ObservableProperty]
+    private bool _updatesAutoInstall;
+
+    /// <summary>Whether the update banner is showing. A projection of a found release, never set ad hoc.</summary>
+    [ObservableProperty]
+    private bool _isUpdateBannerVisible;
+
+    /// <summary>The banner copy, e.g. "v1.0.0.23 available".</summary>
+    [ObservableProperty]
+    private string _updateBannerText = string.Empty;
 
     // 9. Close Protection Modal
     [ObservableProperty]
@@ -798,13 +969,15 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         CaptureSession session,
         OmtDiscoveryService discoveryService,
         AppModeState? appModeState = null,
-        bool ownsDependencies = false)
+        bool ownsDependencies = false,
+        UpdateService? updateService = null)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _discoveryService = discoveryService ?? throw new ArgumentNullException(nameof(discoveryService));
         // Optional so existing construction sites (tests, the parameterless ctor) keep compiling. A
         // standalone instance starts in ModeSelection, which is the ADR-0011 open state anyway.
         _appModeState = appModeState ?? new AppModeState();
+        _updateService = updateService;
         _ownsDependencies = ownsDependencies;
         _broadcastEffects = new SessionEffects(_session);
         _updateVideoHudDelegate = UpdateVideoHudOnUIThread;

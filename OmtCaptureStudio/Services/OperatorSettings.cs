@@ -71,6 +71,18 @@ public sealed class OperatorSettings
     /// absolute instant it resolves to is per-take and deliberately is NOT what the control reads back.
     /// </summary>
     public double? ScheduledStopAfterMinutes { get; set; }
+
+    /// <summary>
+    /// NET-023: opt in to installing an update automatically. Nullable, and therefore FALSE when absent -
+    /// ask-first is the safe default, and a hand-edited or older file must never be read as consent.
+    /// </summary>
+    public bool? UpdatesAutoInstall { get; set; }
+
+    /// <summary>
+    /// NET-023: when the last update check ran. Recorded so a later build can avoid checking too often;
+    /// it is a timestamp only, never an authorisation.
+    /// </summary>
+    public DateTime? LastUpdateCheckUtc { get; set; }
 }
 
 /// <summary>
