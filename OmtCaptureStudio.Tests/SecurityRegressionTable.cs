@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using OmtCaptureStudio.Controls;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
 using OmtCaptureStudio.Services.Audio;
@@ -146,6 +147,7 @@ static class SecurityRegressionTable
         // sits below a failing one never executes - that is how the R4/R5 section was masked before, and
         // the video contract must not inherit the same fate from an unrelated red audio row.
         RunVideoTable();
+        RunViewportAcceptance();
         RunHostileFrameTable();
         RunEnvelopeCeiling();
         RunPaddedSenderSemantics();
@@ -198,6 +200,69 @@ static class SecurityRegressionTable
 
         Expect(owed.Count == 0,
             $"{owed.Count} vector(s) are still OWED by the fix (red-by-design):\n  " + string.Join("\n  ", owed));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // R14 END-TO-END: the consumer that drops frames silently
+    // ---------------------------------------------------------------------------------------------
+    /// <summary>
+    /// R14 must hold at the VIEWPORT, not only in the guard, because <c>UpdateFrame</c> re-validates and
+    /// returns silently on refusal. That is exactly how the byte-cap regression survived a green suite: the
+    /// guard was re-shaped to a pixel cap while the control kept the old 10 MiB byte bound, so 1440p and 4K
+    /// passed the guard and were discarded here - measured, 4K staged 0 bytes and left the back-buffer at
+    /// its 1080p size. A guard-only assertion cannot see that.
+    ///
+    /// <para>Observation is via the private back-buffer, which is reflection in the TEST project only (the
+    /// no-reflection rule is a Native AOT constraint on product code). If the field is ever renamed this
+    /// fails loudly rather than going quietly blind.</para>
+    /// </summary>
+    static void RunViewportAcceptance()
+    {
+        Console.WriteLine(" -> Viewport acceptance (the consumer that DROPS frames silently - R14 end-to-end):");
+
+        var control = new VideoViewportControl();
+        var field = typeof(VideoViewportControl).GetField(
+            "_backBuffer", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+        Expect(field != null,
+            "[SEC-OMT-01 R14] VideoViewportControl._backBuffer was renamed, so this end-to-end assertion is " +
+            "BLIND. Re-point it - a guard-only test cannot see a frame dropped at the viewport.");
+
+        // The three resolutions whose payload EXCEEDS the old 10 MiB byte ceiling. 1080p is the control.
+        var cases = new (string Name, int W, int H)[]
+        {
+            ("1080p (below the old byte cap)", 1920, 1080),
+            ("1440p (14,745,600 B - above it)", 2560, 1440),
+            ("4K UHD (33,177,600 B - above it)", 3840, 2160),
+        };
+
+        foreach (var c in cases)
+        {
+            int stride = c.W * OmtVideoFrameGuard.BytesPerBgraPixel;
+            int len = stride * c.H;                     // the payload, declared IN FULL
+            byte[] payload = new byte[len];
+            var pin = GCHandle.Alloc(payload, GCHandleType.Pinned);
+            try
+            {
+                field.SetValue(control, null);          // reset, so "staged" is observable
+                control.UpdateFrame(pin.AddrOfPinnedObject(), len, c.W, c.H, stride);
+
+                var staged = (byte[])field.GetValue(control);
+                bool didStage = staged != null && staged.Length == len;
+
+                Console.WriteLine($"      [{(didStage ? " ok " : "FAIL")}] {c.Name} -> " +
+                                  (didStage ? "staged" : "DROPPED at the viewport"));
+
+                Expect(didStage,
+                    $"[SEC-OMT-01 R14] a conformant {c.Name} frame must reach the viewport's staging " +
+                    "buffer. It was DROPPED, which means the viewport's own bounds disagree with " +
+                    "OmtVideoFrameGuard - the guard accepted it and this method threw it away.");
+            }
+            finally
+            {
+                pin.Free();
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -379,12 +444,24 @@ static class SecurityRegressionTable
         var vectors = new (string Req, string Name, int Codec, int W, int H, int Stride, int Len, bool MustAccept)[]
         {
             ("R11", "benign 1920x1080 BGRA (the working population)", Bgra, 1920, 1080, 7680, 8294400, true),
+
+            // ---- R14 RE-SHAPED: byte ceiling -> PIXEL ceiling at 8K. These three are the regression guard
+            // for the defect the old 10 MiB BYTE cap caused, and they exist because every accepted video
+            // vector being 1080p is exactly why a cap that bricked 1440p+ stayed green. Each is CONFORMANT,
+            // each declares its payload in FULL (so R13 passes), and each is LARGER than 10,485,760 bytes -
+            // the byte ceiling refused all of them outright.
+            ("R14", "1440p, 14,745,600 bytes - ABOVE the old 10 MiB byte cap - must be ACCEPTED", Bgra, 2560, 1440, 10240, 14745600, true),
+            ("R14", "4K UHD, 33,177,600 bytes - 3x the old byte cap - must be ACCEPTED", Bgra, 3840, 2160, 15360, 33177600, true),
+            ("R14", "8K at exactly MaxPixels (33,177,600 px, INCLUSIVE) must be ACCEPTED", Bgra, 7680, 4320, 30720, 132710400, true),
+
             // R13 isolation: dimensions AND stride are all legal, so the only failing rule is the product
             // against the payload - 30720 x 4320 = 132 710 400 bytes against a 3 200-byte payload.
             ("R13", "8K announce over a 3200-byte payload (132 MB read, geometry legal)", Bgra, 7680, 4320, 30720, 3200, false),
-            // R14 isolation: geometry legal AND fully covered by the declared payload, so the only failing
-            // rule is the SDK frame-size envelope. 16384 x 16384 x 4 = 1 073 741 824 bytes, declared in full.
-            ("R14", "16K square with its payload declared in full still exceeds VIDEO_MAX_SIZE", Bgra, 16384, 16384, 65536, 1073741824, false),
+
+            // R14 isolation, refusal side: geometry legal and payload declared IN FULL, so the only failing
+            // rule is the 8K PIXEL ceiling. One row past 8K pins it from the other side of the boundary.
+            ("R14", "one row past 8K (7680x4321), payload in full, exceeds MaxPixels", Bgra, 7680, 4321, 30720, 132741120, false),
+            ("R14", "16K square with its payload in full exceeds MaxPixels (268 Mpx)", Bgra, 16384, 16384, 65536, 1073741824, false),
             // These two are the exact inputs whose int32 product wrapped in the PRE-FIX control (to 0 and
             // to negative), and they are kept for that provenance - but they are refused by the DIMENSION
             // ceiling (R12) before any product is formed, so they pin R12, NOT the wrap. The row name must
@@ -435,19 +512,35 @@ static class SecurityRegressionTable
         Expect(!OmtVideoFrameGuard.Validate(Bgra, 20000, 1080, 80000, 86400000).IsAccepted,
             "[SEC-OMT-01 R12] a dimension beyond the 16384 ceiling must be refused.");
 
-        // R12/R14 arithmetic-safety property, asserted rather than assumed. The two rows above prove the
-        // wrap is GATED; they do not prove the product is REPRESENTABLE, and the difference matters because
-        // the control does `int requiredBytes = (int)required` after validating. At the ceiling the product
-        // is 1 073 741 824, inside int32 - so no accepted frame can carry a wrapped value into that cast.
+        // R14 RE-SHAPED: pin the SHAPE of the bound, not just its value.
+        Expect((long)7680 * 4320 == OmtVideoFrameGuard.MaxPixels,
+            "[SEC-OMT-01 R14] MaxPixels must be exactly 8K (7680 x 4320 = 33,177,600 px) - the bound that " +
+            "accepts every conformant resolution up to 8K while still bounding allocation.");
+
+        // This is the assertion that would have caught the original regression. 1440p is 14,745,600 bytes,
+        // ABOVE VideoMaxSize, and must be ACCEPTED. If the byte ceiling is ever reinstated as the
+        // enforcement bound, every 1440p/4K source dies again - and nothing else in the suite would notice.
+        Expect(14_745_600L > OmtVideoFrameGuard.VideoMaxSize
+               && OmtVideoFrameGuard.Validate(Bgra, 2560, 1440, 10240, 14745600).IsAccepted,
+            "[SEC-OMT-01 R14] a conformant 1440p frame (larger than the old byte cap) must be ACCEPTED; " +
+            "VIDEO_MAX_SIZE must not be the enforcement bound.");
+
+        // The REACHABLE maximum allocation is MaxPixels * 4, because the pixel cap binds before
+        // MaxDimension ever does - and it must fit int32, since the control casts `(int)required` after
+        // validating. (The old assertion compared MaxDimension^2 * 4, which the pixel cap makes unreachable.)
+        long maxAcceptedBytes = (long)OmtVideoFrameGuard.MaxPixels * OmtVideoFrameGuard.BytesPerBgraPixel;
+        Expect(maxAcceptedBytes <= int.MaxValue,
+            $"[SEC-OMT-01 R12] the largest frame the guards can accept ({maxAcceptedBytes:N0} bytes) must " +
+            "fit int32, or the control's `(int)required` cast overflows.");
+
+        // And the geometry axis alone must still not wrap int32 - independent of which cap binds, the
+        // product stays in long, so a future ceiling change cannot silently reintroduce SEC-02/G.
         long ceilingProduct = (long)OmtVideoFrameGuard.MaxDimension
                               * OmtVideoFrameGuard.BytesPerBgraPixel
                               * OmtVideoFrameGuard.MaxDimension;
 
-        Expect(ceilingProduct > OmtVideoFrameGuard.VideoMaxSize,
-            "[SEC-OMT-01 R14] the ceiling geometry must exceed VIDEO_MAX_SIZE, or the cap is untestable.");
-
         Expect(ceilingProduct <= int.MaxValue,
-            $"[SEC-OMT-01 R12] a LEGAL geometry would wrap int32 at {ceilingProduct} if the ceiling ever rose " +
-            "past int32/4; the product must stay in long regardless of what MaxDimension becomes.");
+            $"[SEC-OMT-01 R12] a LEGAL dimension geometry would wrap int32 at {ceilingProduct} if the " +
+            "ceiling ever rose past int32/4; the product must stay in long regardless.");
     }
 }

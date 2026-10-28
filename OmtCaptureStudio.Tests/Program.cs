@@ -3971,7 +3971,9 @@ class Program
             // `new ChannelAudioLevel[channels]` ran first: 1e9 channels allocated a 7 GB array in ~5 ms.
             Expect(AudioLevelCalculator.ComputeLevels(probe, 1_000_000, 1).Channels.Length == 0,
                 "AudioLevelCalculator must refuse an out-of-range CHANNEL count the way AudioInterleaver does (R4).");
-            Expect(AudioLevelCalculator.ComputeLevels(probe, 1, 192_001).Channels.Length == 0,
+            // DERIVED, not restated: the "one past the ceiling" probe must follow the constant, or a
+            // retune silently leaves this asserting a number that is out of range for the wrong reason.
+            Expect(AudioLevelCalculator.ComputeLevels(probe, 1, OmtAudioFrameGuard.MaxSamplesPerChannel + 1).Channels.Length == 0,
                 "AudioLevelCalculator must refuse samples-per-channel above the shared ceiling (R4).");
             // The ceiling itself stays legal - unifying the policy must not narrow the accepted population.
             byte[] ceiling = new byte[64 * OmtAudioFrameGuard.MaxSamplesPerChannel * 4];

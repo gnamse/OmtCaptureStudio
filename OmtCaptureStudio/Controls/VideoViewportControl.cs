@@ -62,8 +62,17 @@ public class VideoViewportControl : Control
             return;
 
         long required = (long)stride * height;
-        if (required > dataLength               // R13: never read past the declared payload
-            || required > OmtVideoFrameGuard.VideoMaxSize)   // R14: the SDK's own envelope
+        if (required > dataLength)              // R13: never read past the declared payload
+        {
+            return;
+        }
+
+        // R14 RE-SHAPED: byte ceiling -> PIXEL ceiling. This MUST mirror OmtVideoFrameGuard exactly,
+        // because it is handed the same frames. Keeping the old 10 MiB BYTE bound here silently discarded
+        // what the guard had just accepted: 2560x1440 is 14,745,600 bytes and 3840x2160 is 33,177,600,
+        // both above the byte ceiling, so every conformant 1440p/4K frame was dropped AT THE VIEWPORT
+        // after passing the guard - and no guard-only test could observe it.
+        if ((long)width * height > OmtVideoFrameGuard.MaxPixels)
         {
             return;
         }
