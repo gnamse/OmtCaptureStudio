@@ -221,12 +221,14 @@ static class SecurityRegressionTable
         Console.WriteLine(" -> Viewport acceptance (the consumer that DROPS frames silently - R14 end-to-end):");
 
         var control = new VideoViewportControl();
-        var field = typeof(VideoViewportControl).GetField(
+        var found = typeof(VideoViewportControl).GetField(
             "_backBuffer", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
 
-        Expect(field != null,
+        Expect(found != null,
             "[SEC-OMT-01 R14] VideoViewportControl._backBuffer was renamed, so this end-to-end assertion is " +
             "BLIND. Re-point it - a guard-only test cannot see a frame dropped at the viewport.");
+
+        var field = found!;   // narrowed by the Expect above; `!` keeps the suite at 0 nullable warnings
 
         // The three resolutions whose payload EXCEEDS the old 10 MiB byte ceiling. 1080p is the control.
         var cases = new (string Name, int W, int H)[]
@@ -247,7 +249,7 @@ static class SecurityRegressionTable
                 field.SetValue(control, null);          // reset, so "staged" is observable
                 control.UpdateFrame(pin.AddrOfPinnedObject(), len, c.W, c.H, stride);
 
-                var staged = (byte[])field.GetValue(control);
+                var staged = field.GetValue(control) as byte[];
                 bool didStage = staged != null && staged.Length == len;
 
                 Console.WriteLine($"      [{(didStage ? " ok " : "FAIL")}] {c.Name} -> " +

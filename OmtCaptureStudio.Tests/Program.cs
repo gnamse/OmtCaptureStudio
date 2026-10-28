@@ -49,7 +49,10 @@ class Program
 
         if (args.Length >= 2 && args[0] == "--diag-audio")
         {
-            return RunDiagAudio(args[1], args.Length >= 3 && int.TryParse(args[2], out int secs) ? secs : 20);
+            return RunDiagAudio(
+                args[1],
+                args.Length >= 3 && int.TryParse(args[2], out int dsecs) ? dsecs : 20,
+                DiagVideoFormat(Environment.GetCommandLineArgs()));
         }
 
         if (args.Length >= 1 && args[0] == "--diag-pa16")
@@ -59,7 +62,10 @@ class Program
 
         if (args.Length >= 2 && args[0] == "--diag-record")
         {
-            return RunDiagRecord(args[1], args.Length >= 3 && int.TryParse(args[2], out int rsecs) ? rsecs : 20);
+            return RunDiagRecord(
+                args[1],
+                args.Length >= 3 && int.TryParse(args[2], out int rsecs) ? rsecs : 20,
+                DiagVideoFormat(Environment.GetCommandLineArgs()));
         }
 
         if (args.Length >= 2 && args[0] == "--diag-guard")
@@ -261,9 +267,10 @@ class Program
     /// the SDK's own statistics cannot see. The SDK reporting zero dropped audio says nothing about THIS
     /// app's own 512-chunk queue at a sender delivering 100 chunks/s.
     /// </summary>
-    static int RunDiagRecord(string address, int seconds)
+    static int RunDiagRecord(string address, int seconds, libomtnet.OMTPreferredVideoFormat preferred)
     {
-        Console.WriteLine("[diag] REAL receive+record -> [" + address + "] for " + seconds + " s ...");
+        Console.WriteLine("[diag] REAL receive+record -> [" + address + "] for " + seconds + " s " +
+                          "(requested video format: " + preferred + "=" + (int)preferred + ") ...");
         string outDir = Path.Combine(Path.GetTempPath(), "omt-diag-record");
         Directory.CreateDirectory(outDir);
 
@@ -393,13 +400,42 @@ class Program
     /// trace is the only evidence of whether an audio buffer is FPA1 (float32 planar) or PA16 (int16
     /// planar) - and whether the byte length agrees with the announced geometry.
     /// </summary>
-    static int RunDiagAudio(string address, int seconds)
+    /// <summary>
+    /// DIAG-VMIX phase 2 (BGRA negotiation hypothesis). The APP asks for `BGRA` only - never the
+    /// `UYVYorBGRA` fallback - so a sender that cannot produce BGRA may yield NO video at all rather than
+    /// degrading to another format. This maps an optional `--video-format &lt;name&gt;` onto the SDK's
+    /// enum so the trace can ask differently WITHOUT touching production's request.
+    /// Read the values off the SDK rather than trusting recall: UYVY=0, UYVYorBGRA=1, BGRA=2,
+    /// UYVYorUYVA=3, UYVYorUYVAorP216orPA16=4, P216=5.
+    /// </summary>
+    static libomtnet.OMTPreferredVideoFormat DiagVideoFormat(string[] argv)
     {
-        Console.WriteLine("[diag] connecting to [" + address + "] for " + seconds + " s ...");
+        for (int i = 0; i < argv.Length - 1; i++)
+        {
+            if (!string.Equals(argv[i], "--video-format", StringComparison.OrdinalIgnoreCase)) continue;
+            string v = argv[i + 1].Trim().ToLowerInvariant();
+            switch (v)
+            {
+                case "uyvy": return libomtnet.OMTPreferredVideoFormat.UYVY;
+                case "uyvyorbgra": return libomtnet.OMTPreferredVideoFormat.UYVYorBGRA;
+                case "uyvyoruyva": return libomtnet.OMTPreferredVideoFormat.UYVYorUYVA;
+                case "uyvyoruyvaorp216orpa16": return libomtnet.OMTPreferredVideoFormat.UYVYorUYVAorP216orPA16;
+                case "p216": return libomtnet.OMTPreferredVideoFormat.P216;
+                default: return libomtnet.OMTPreferredVideoFormat.BGRA;
+            }
+        }
+
+        return libomtnet.OMTPreferredVideoFormat.BGRA;   // production's request, unchanged
+    }
+
+    static int RunDiagAudio(string address, int seconds, libomtnet.OMTPreferredVideoFormat preferred)
+    {
+        Console.WriteLine("[diag] connecting to [" + address + "] for " + seconds + " s " +
+                          "(requested video format: " + preferred + "=" + (int)preferred + ") ...");
         using var receiver = new libomtnet.OMTReceive(
             address,
             libomtnet.OMTFrameType.Video | libomtnet.OMTFrameType.Audio,
-            libomtnet.OMTPreferredVideoFormat.BGRA,
+            preferred,
             libomtnet.OMTReceiveFlags.None);
 
         try
@@ -3741,8 +3777,9 @@ class Program
         Expect(ok.IsAccepted, $"A real FPA1 frame must be accepted; got {ok.Reason}: {ok.Detail}");
         Expect(ok.Detail.Length == 0, "An accepted frame must carry no detail text.");
 
-        // 64ch x 65536 is the ruled geometry ceiling: 64 * 65536 * 4 == 16,777,216 == AudioMaxSize exactly.
-        foreach (var (ch, smp) in new[] { (1, 480), (2, 1024), (8, 4096), (64, 65536) })
+        // 64ch x 16384 is the ruled FINAL geometry ceiling (4,194,304 bytes; the payload envelope of
+        // 16 MiB is a separate axis). Derived from the constant so a retune moves this with it.
+        foreach (var (ch, smp) in new[] { (1, 480), (2, 1024), (8, 4096), (64, OmtAudioFrameGuard.MaxSamplesPerChannel) })
         {
             int len = ch * smp * 4;
             Expect(OmtAudioFrameGuard.Validate(OmtAudioFrameGuard.Fpa1Codec, ch, smp, len).IsAccepted,
@@ -4026,8 +4063,13 @@ class Program
         // envelope at 16 MiB (4x that, for padding headroom). The worst frame is now 43x inside int32 and
         // 0.25x of the SDK's own AUDIO_MAX_SIZE, instead of 47x of it.
         long worstGeometry = (long)MaxCh * MaxSmp * OmtAudioFrameGuard.BytesPerFpa1Sample;
-        Expect(worstGeometry == OmtAudioFrameGuard.AudioMaxSize,
-            $"the ruled worst geometry must EQUAL the payload envelope by construction; got {worstGeometry:N0} vs {OmtAudioFrameGuard.AudioMaxSize:N0}.");
+        // The ruled shape is TWO ORDERED AXES, not one number: the geometry ceiling binds BELOW the
+        // payload envelope. (The 65536 make-them-equal variant was declined as churn with no functional
+        // benefit.) Asserted as an ordering, derived from the constants, so a retune of either fails loudly.
+        Expect(worstGeometry < OmtAudioFrameGuard.AudioMaxSize,
+            $"the geometry ceiling must sit BELOW the payload envelope; {worstGeometry:N0} vs {OmtAudioFrameGuard.AudioMaxSize:N0}.");
+        Console.WriteLine($"              worst GEOMETRY = {worstGeometry:N0}  (64ch x {MaxSmp} x 4, final)");
+        Console.WriteLine($"              PAYLOAD envelope = {OmtAudioFrameGuard.AudioMaxSize:N0}  (separate axis, padding headroom)");
         Console.WriteLine($"              worst GEOMETRY = {worstGeometry:N0}  (64ch x 65536 x 4)");
         Console.WriteLine($"              PAYLOAD envelope = {OmtAudioFrameGuard.AudioMaxSize:N0}  == the geometry ceiling, by construction");
 
