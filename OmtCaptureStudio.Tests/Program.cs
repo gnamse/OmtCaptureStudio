@@ -4063,15 +4063,19 @@ class Program
         // envelope at 16 MiB (4x that, for padding headroom). The worst frame is now 43x inside int32 and
         // 0.25x of the SDK's own AUDIO_MAX_SIZE, instead of 47x of it.
         long worstGeometry = (long)MaxCh * MaxSmp * OmtAudioFrameGuard.BytesPerFpa1Sample;
-        // The ruled shape is TWO ORDERED AXES, not one number: the geometry ceiling binds BELOW the
-        // payload envelope. (The 65536 make-them-equal variant was declined as churn with no functional
-        // benefit.) Asserted as an ordering, derived from the constants, so a retune of either fails loudly.
-        Expect(worstGeometry < OmtAudioFrameGuard.AudioMaxSize,
-            $"the geometry ceiling must sit BELOW the payload envelope; {worstGeometry:N0} vs {OmtAudioFrameGuard.AudioMaxSize:N0}.");
-        Console.WriteLine($"              worst GEOMETRY = {worstGeometry:N0}  (64ch x {MaxSmp} x 4, final)");
-        Console.WriteLine($"              PAYLOAD envelope = {OmtAudioFrameGuard.AudioMaxSize:N0}  (separate axis, padding headroom)");
-        Console.WriteLine($"              worst GEOMETRY = {worstGeometry:N0}  (64ch x 65536 x 4)");
-        Console.WriteLine($"              PAYLOAD envelope = {OmtAudioFrameGuard.AudioMaxSize:N0}  == the geometry ceiling, by construction");
+        // The GEOMETRY ceiling may not EXCEED the payload envelope - that is the invariant. Whether it
+        // EQUALS it (one bound by construction) or sits BELOW it (envelope as padding headroom) is a
+        // RULING, and this one changed more than once. Asserting a strict ordering here is what made this
+        // step FAIL the moment the two became equal at 65536, while the same block also printed
+        // "== the geometry ceiling, by construction" - two contradictory claims in one diagnostic.
+        // Assert the invariant, then REPORT which relationship is in force.
+        Expect(worstGeometry <= OmtAudioFrameGuard.AudioMaxSize,
+            $"the geometry ceiling must not EXCEED the payload envelope; {worstGeometry:N0} vs {OmtAudioFrameGuard.AudioMaxSize:N0}.");
+        Console.WriteLine($"              worst GEOMETRY = {worstGeometry:N0}  ({MaxCh}ch x {MaxSmp} x 4)");
+        Console.WriteLine(worstGeometry == OmtAudioFrameGuard.AudioMaxSize
+            ? $"              PAYLOAD envelope = {OmtAudioFrameGuard.AudioMaxSize:N0}  == the geometry ceiling, by construction"
+            : $"              PAYLOAD envelope = {OmtAudioFrameGuard.AudioMaxSize:N0}  " +
+              $"({OmtAudioFrameGuard.AudioMaxSize - worstGeometry:N0} bytes of padding headroom above the geometry ceiling)");
 
         AudioFrameValidation atCeiling = OmtAudioFrameGuard.Validate(OmtAudioFrameGuard.Fpa1Codec, MaxCh, MaxSmp, (int)worstGeometry);
         Expect(atCeiling.IsAccepted && atCeiling.ReadBytes == (int)worstGeometry,

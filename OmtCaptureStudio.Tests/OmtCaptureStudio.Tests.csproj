@@ -7,6 +7,9 @@
     <Nullable>enable</Nullable>
     <PlatformTarget>x64</PlatformTarget>
     <Platforms>x64</Platforms>
+    <!-- See OmtCaptureStudio.csproj: pin Platform so project-direct and solution builds
+         share the single canonical tree bin\x64\<Config>\net8.0-windows\. -->
+    <Platform>x64</Platform>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
