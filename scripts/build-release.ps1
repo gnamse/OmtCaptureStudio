@@ -146,6 +146,30 @@ $licensePath = Join-Path $repoRoot "LICENSE.txt"
 if (Test-Path $readmePath) { Copy-Item $readmePath "$publishDir\" -Force }
 if (Test-Path $licensePath) { Copy-Item $licensePath "$publishDir\" -Force }
 
+# Stage the screenshots the README embeds, so its relative links resolve in the shipped
+# payload (portable ZIP and the installed folder). Stage the FOLDER via a glob - never
+# filenames - so a screenshot added to docs/images is picked up automatically. The
+# staging cleanup above only strips root *.exe, so clear the target folder first or a
+# renamed/retired image would ride along into the next release. docs/images/icons/ is
+# deliberately NOT staged: nothing shipped references it (the installer takes the app
+# icon from the repo path, not the payload).
+$docsImagesDir = Join-Path $repoRoot "docs\images"
+$publishImagesDir = Join-Path $publishDir "docs\images"
+$stagedScreenshots = 0
+if (Test-Path $docsImagesDir) {
+    $screenshots = @(Get-ChildItem -Path $docsImagesDir -Filter "*.png" -File)
+    if ($screenshots.Count -gt 0) {
+        if (Test-Path $publishImagesDir) { Remove-Item $publishImagesDir -Recurse -Force }
+        New-Item -ItemType Directory -Path $publishImagesDir -Force | Out-Null
+        $screenshots | Copy-Item -Destination $publishImagesDir -Force
+        $stagedScreenshots = $screenshots.Count
+        Write-Host "   [OK] Staged $stagedScreenshots README screenshot(s) into docs\images\" -ForegroundColor Green
+    }
+}
+if ($stagedScreenshots -eq 0) {
+    Write-Host "   [WARNING] No *.png found in '$docsImagesDir' - the shipped README's image links will be broken." -ForegroundColor Yellow
+}
+
 # Stage FFmpeg for out-of-the-box recording (HARD REQUIREMENT - see below)
 $toolsFfmpeg = Join-Path $repoRoot "tools\ffmpeg.exe"
 $ffmpegSource = $null

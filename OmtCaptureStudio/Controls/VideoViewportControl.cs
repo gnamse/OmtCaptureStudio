@@ -8,6 +8,7 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Threading;
+using OmtCaptureStudio.Services;
 
 namespace OmtCaptureStudio.Controls;
 
@@ -40,17 +41,52 @@ public class VideoViewportControl : Control
 
     /// <summary>
     /// Thread-safe entry point called by CaptureSession when a new raw BGRA video frame is decoded.
+    ///
+    /// <para>SEC-OMT-01 SEC-02 (R12-R16). This runs on <c>OMT_ReceiveThread</c> via a DIRECT delegate
+    /// (no dispatcher marshal), and every field it is handed is chosen by the remote peer. It therefore
+    /// re-validates the geometry itself rather than trusting that the receiver did: the overflow below
+    /// used to be <c>int requiredBytes = stride * height</c>, which a peer could drive to ~126 MB out of a
+    /// ≤10 MB buffer, or wrap to 0 (copy silently skipped) or negative (allocation throws).</para>
     /// </summary>
     public unsafe void UpdateFrame(IntPtr pData, int dataLength, int width, int height, int stride)
     {
         if (pData == IntPtr.Zero || width <= 0 || height <= 0 || stride <= 0)
             return;
 
-        int requiredBytes = stride * height;
+        // R12/R13/R14, in long arithmetic so the product cannot wrap. This may look redundant with the
+        // receiver's OmtVideoFrameGuard, and it is deliberately so: this is a PUBLIC method on a control,
+        // and one caller bypassing the receiver must not be able to re-open the finding.
+        if (width > OmtVideoFrameGuard.MaxDimension || height > OmtVideoFrameGuard.MaxDimension)
+            return;
+        if (stride < (long)width * OmtVideoFrameGuard.BytesPerBgraPixel)
+            return;
+
+        long required = (long)stride * height;
+        if (required > dataLength)              // R13: never read past the declared payload
+        {
+            return;
+        }
+
+        // R14 RE-SHAPED: byte ceiling -> PIXEL ceiling. This MUST mirror OmtVideoFrameGuard exactly,
+        // because it is handed the same frames. Keeping the old 10 MiB BYTE bound here silently discarded
+        // what the guard had just accepted: 2560x1440 is 14,745,600 bytes and 3840x2160 is 33,177,600,
+        // both above the byte ceiling, so every conformant 1440p/4K frame was dropped AT THE VIEWPORT
+        // after passing the guard - and no guard-only test could observe it.
+        if ((long)width * height > OmtVideoFrameGuard.MaxPixels)
+        {
+            return;
+        }
+
+        int requiredBytes = (int)required;
 
         // Stage the incoming frame into the back buffer under lock
         lock (_stagingLock)
         {
+            // R16: grow when needed, but do NOT reallocate on every geometry change. `!= requiredBytes`
+            // (the first version) re-sized on every alternation, and at 60 fps a 1080p<->4K flip is
+            // ~600 MiB/s of Large-Object-Heap churn - a real cost, not a theoretical one. `< ` keeps the
+            // buffer bounded by whatever the largest ACCEPTED frame was (now capped by the 8K pixel
+            // bound, and only reachable by a frame that really delivered its bytes).
             if (_backBuffer == null || _backBuffer.Length < requiredBytes)
             {
                 _backBuffer = new byte[requiredBytes];

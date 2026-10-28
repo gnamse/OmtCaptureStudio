@@ -11,6 +11,16 @@ public class StreamTelemetry
     public int SampleRate { get; set; }
     public long VideoFramesReceived { get; set; }
     public long AudioFramesReceived { get; set; }
+
+    /// <summary>
+    /// SEC-OMT-01 R8: frames the receiver REFUSED because they failed the trust-boundary guards. These
+    /// never reach a consumer, so without surfacing them a peer that is refused every frame is
+    /// indistinguishable from a peer that is simply silent - the operator sees a dead source and no reason.
+    /// </summary>
+    public long AudioFramesRejected { get; set; }
+
+    /// <summary>SEC-OMT-01 R8: video frames refused by <see cref="OmtVideoFrameGuard"/>.</summary>
+    public long VideoFramesRejected { get; set; }
     public long FramesDropped { get; set; }
     public double BitrateMbps { get; set; }
 

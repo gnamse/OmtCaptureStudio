@@ -1,5 +1,6 @@
 using System;
 using OmtCaptureStudio.Models;
+using OmtCaptureStudio.Services.Audio;
 
 namespace OmtCaptureStudio.Services;
 
@@ -7,7 +8,17 @@ public static class AudioLevelCalculator
 {
     public static unsafe AudioLevelData ComputeLevels(IntPtr planarData, int channels, int samplesPerChannel)
     {
-        if (planarData == IntPtr.Zero || channels <= 0 || samplesPerChannel <= 0)
+        // SEC-OMT-01 R4 (defence in depth): this is a public API reached both directly and through
+        // AudioEngine.ComputeLevels, so a future caller that bypasses OmtAudioFrameGuard must not be able
+        // to re-open the finding. The bounds are OmtAudioFrameGuard's OWN constants, so the two consumers
+        // of one frame can never again disagree about what a legal frame is (they did: 65 vs 64 channels).
+        //
+        // The check runs BEFORE `new ChannelAudioLevel[channels]` below. That ordering is the whole
+        // point: an unclamped channel count allocated a 7 GB reference array in ~5 ms before any other
+        // validation could run - a remote allocation DoS, not merely an over-read.
+        if (planarData == IntPtr.Zero ||
+            channels < 1 || channels > OmtAudioFrameGuard.MaxChannels ||
+            samplesPerChannel < 1 || samplesPerChannel > OmtAudioFrameGuard.MaxSamplesPerChannel)
         {
             return new AudioLevelData();
         }
@@ -21,7 +32,9 @@ public static class AudioLevelCalculator
 
         for (int ch = 0; ch < channels; ch++)
         {
-            float* channelBuffer = pData + (ch * samplesPerChannel);
+            // SEC-OMT-01 R5: `ch * samplesPerChannel` in int32 wrapped BACKWARDS for reachable pairs
+            // (samples=800000 at ch=2999 gave -7 583 069 184), which walks the pointer BEFORE the buffer.
+            float* channelBuffer = pData + (long)ch * samplesPerChannel;
             float maxSample = 0f;
             double sumSquares = 0.0;
 

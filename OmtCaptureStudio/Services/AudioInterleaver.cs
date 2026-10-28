@@ -1,4 +1,5 @@
 using System;
+using OmtCaptureStudio.Services.Audio;
 
 namespace OmtCaptureStudio.Services;
 
@@ -9,7 +10,13 @@ public class AudioInterleaver
 
     public unsafe byte[] Interleave(IntPtr planarData, int channels, int samplesPerChannel, out int totalBytes)
     {
-        if (planarData == IntPtr.Zero || channels <= 0 || samplesPerChannel <= 0 || channels > 64 || samplesPerChannel > 192000)
+        // SEC-OMT-01 R4: one policy for both consumers. These were local literals (64 / 192000) while
+        // AudioLevelCalculator enforced nothing at all; they are now OmtAudioFrameGuard's constants, so the
+        // two consumers of a single frame cannot disagree (measured pre-fix: 65 channels produced 65
+        // channel results from the calculator and 0 bytes from here).
+        if (planarData == IntPtr.Zero ||
+            channels < 1 || channels > OmtAudioFrameGuard.MaxChannels ||
+            samplesPerChannel < 1 || samplesPerChannel > OmtAudioFrameGuard.MaxSamplesPerChannel)
         {
             totalBytes = 0;
             return Array.Empty<byte>();
@@ -35,7 +42,7 @@ public class AudioInterleaver
                 {
                     for (int ch = 0; ch < channels; ch++)
                     {
-                        pDst[s * channels + ch] = pSrc[ch * samplesPerChannel + s];
+                        pDst[s * channels + ch] = (pSrc + (long)ch * samplesPerChannel)[s];
                     }
                 }
             }
@@ -45,7 +52,13 @@ public class AudioInterleaver
 
     public unsafe byte[] InterleaveNew(IntPtr planarData, int channels, int samplesPerChannel)
     {
-        if (planarData == IntPtr.Zero || channels <= 0 || samplesPerChannel <= 0 || channels > 64 || samplesPerChannel > 192000)
+        // SEC-OMT-01 R4: one policy for both consumers. These were local literals (64 / 192000) while
+        // AudioLevelCalculator enforced nothing at all; they are now OmtAudioFrameGuard's constants, so the
+        // two consumers of a single frame cannot disagree (measured pre-fix: 65 channels produced 65
+        // channel results from the calculator and 0 bytes from here).
+        if (planarData == IntPtr.Zero ||
+            channels < 1 || channels > OmtAudioFrameGuard.MaxChannels ||
+            samplesPerChannel < 1 || samplesPerChannel > OmtAudioFrameGuard.MaxSamplesPerChannel)
         {
             return Array.Empty<byte>();
         }
@@ -62,7 +75,7 @@ public class AudioInterleaver
             {
                 for (int ch = 0; ch < channels; ch++)
                 {
-                    pDst[s * channels + ch] = pSrc[ch * samplesPerChannel + s];
+                    pDst[s * channels + ch] = (pSrc + (long)ch * samplesPerChannel)[s];
                 }
             }
         }
