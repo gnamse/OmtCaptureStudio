@@ -1,4 +1,14 @@
 <Solution>
-  <Project Path="OmtCaptureStudio.Tests/OmtCaptureStudio.Tests.csproj" />
-  <Project Path="OmtCaptureStudio/OmtCaptureStudio.csproj" />
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Release" />
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="OmtCaptureStudio.Tests/OmtCaptureStudio.Tests.csproj">
+    <Platform Project="x64" />
+  </Project>
+  <Project Path="OmtCaptureStudio/OmtCaptureStudio.csproj">
+    <Platform Project="x64" />
+  </Project>
 </Solution>

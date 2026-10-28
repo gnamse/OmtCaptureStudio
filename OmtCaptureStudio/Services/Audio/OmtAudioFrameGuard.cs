@@ -73,20 +73,26 @@ public static class OmtAudioFrameGuard
     public const int MaxChannels = 64;
 
     /// <summary>
-    /// Upper bound on samples per channel, ruled at 65536 so that the worst geometry is EXACTLY the
-    /// payload envelope:
+    /// Upper bound on samples per channel. <b>FINAL at 16384 - two axes, deliberately separate.</b>
     ///
-    /// <para><c>MaxChannels * MaxSamplesPerChannel * BytesPerFpa1Sample == AudioMaxSize</c>
-    /// (<c>64 x 65536 x 4 == 16,777,216</c>). One self-documenting number, instead of two bounds that
-    /// merely happen to be ordered and invite drift later. It was 192000, which made the worst geometry
-    /// 49,152,000 bytes — 47x the SDK's own AUDIO_MAX_SIZE, a bound far looser than the envelope it was
-    /// supposed to respect.</para>
+    /// <para>This GEOMETRY ceiling binds at <c>64 x 16384 x 4 == 4,194,304</c> bytes.
+    /// <see cref="AudioMaxSize"/> is the PAYLOAD envelope (16 MiB) on a different axis, so it is padding
+    /// headroom rather than a second geometry ceiling. The two are ORDERED (4 MiB &lt; 16 MiB).</para>
     ///
-    /// <para>65536 samples/ch is 1.37 s at 48 kHz: enormously generous against the largest frame any real
-    /// sender has been measured delivering (vMix's 5760-sample priming chunk), while the int32 safety
-    /// proofs are recomputed at 16 MiB rather than 49 MB — strictly safer on every axis.</para>
+    /// <para><b>History, kept because this value was ruled four times and the record matters:</b> 192000
+    /// (worst geometry 49,152,000 bytes - 47x the SDK's own AUDIO_MAX_SIZE, far looser than the envelope it
+    /// was supposed to respect), then 16384, then a 65536 "make the two the same number by construction"
+    /// variant was proposed and implemented, and that variant was then <b>DECLINED</b> in favour of the two
+    /// ordered axes. Do not re-litigate it. A regression row asserts the ORDERING invariant
+    /// (<c>geometry &lt;= envelope</c>) and REPORTS which relationship is in force, so a future retune
+    /// cannot silently invalidate the tests - the previous strict-ordering assertion is exactly what made
+    /// the suite red the moment the two became equal.</para>
+    ///
+    /// <para>16384 samples/ch is 2.8x the largest frame any real sender has been measured delivering
+    /// (vMix's 5760-sample priming chunk, 120 ms), so the headroom is real and the narrowing is
+    /// deliberate defence-in-depth.</para>
     /// </summary>
-    public const int MaxSamplesPerChannel = 65536;
+    public const int MaxSamplesPerChannel = 16384;
 
     /// <summary>
     /// SEC-OMT-01 R9: the declared-payload envelope, ruled at 16 MiB. The SDK's own
