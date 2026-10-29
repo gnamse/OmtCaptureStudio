@@ -1,78 +1,116 @@
-# Checking whether screen capture is working (OMT Capture Studio)
+# Blank broadcast: how to capture the evidence we need
 
-**What this answers:** when you broadcast your screen and the other PC shows a blank
-picture, there are two possible causes — the video never left your PC, or it left but
-something else dropped it. This one command tells you which, in about 15 seconds.
+**The problem:** you broadcast your screen, the other PC sees the source in its list, you
+select it - and the picture stays black.
+
+**What we need from you:** one log file from the **broadcasting PC**. It will now tell us
+whether that PC is failing to capture the screen at all, or whether the video is leaving it
+and being lost on the way. Those are completely different problems, and the log
+distinguishes them.
 
 ---
 
-## How to run it
+## Step 1 - update the app first (about 2 minutes)
 
-1. On the **broadcasting PC** (the one whose screen is blank on the other end), open a
-   **Command Prompt** or **PowerShell** window.
-2. Copy and paste this line, then press Enter — **change the path if the app is installed
-   somewhere else** (the usual location is shown):
+The logging we need was added in **v1.0.0.23**. If your broadcasting PC is on an older
+version, the app will offer it to you:
+
+1. Open **OMT Capture Studio** and leave it open for a minute.
+2. Within about 30 seconds a small banner appears in the status bar:
+   **`v1.0.0.23 available`** with an **Install** button.
+3. Click **Install**. The app downloads it, checks it, closes, installs itself and reopens.
+
+> **Check first:** the version number is shown in the bottom-right of the app window. If it
+> already says `v1.0.0.23`, skip straight to Step 2.
+>
+> You can also install manually from
+> https://github.com/gnamse/OmtCaptureStudio/releases/latest - download the **Setup** file
+> and run it.
+
+---
+
+## Step 2 - reproduce the problem, then send us the log
+
+1. On the **broadcasting PC**, open **OMT Capture Studio**.
+2. Go to **Broadcast** mode and start broadcasting **Screen 1** - your normal setup.
+3. Now do what makes the picture go blank on the other PC: connect from the second PC and
+   watch it stay black.
+4. **Leave it running for at least 30 seconds**, exactly as it is. Do not close the app yet.
+5. Now close the app normally.
+
+Then find the log file:
+
+- Press **Windows key + R**, paste the line below into the box, and press Enter:
+
+```
+%LOCALAPPDATA%\Programs\OMT Capture Studio\logs
+```
+
+- If that folder does not exist or is empty, try the other install location:
+
+```
+C:\Program Files\OMT Capture Studio\logs
+```
+
+6. Open the newest file in that folder - it is named after today's date, for example
+   `2026-10-29.log`.
+7. **Send us that whole file.** Copying its contents into an email is fine.
+
+---
+
+## Step 3 - three things to tell us alongside it
+
+1. **The version number** from the bottom-right of the app window (e.g. `v1.0.0.23`).
+2. **How many monitors** the PC has, and which one you picked as "Screen 1".
+3. **The screen resolution** - Windows **Settings -> System -> Display**, look for
+   "Display resolution".
+
+---
+
+## What the log will tell us (you can check it yourself)
+
+Open the log and search for this sentence:
+
+```
+Broadcast is running but no frames are being captured (screen capture unavailable).
+```
+
+**If you find it** - that PC is capturing nothing at all, which fully explains the blank
+picture. The same line also says *why*; it may end like this:
+
+```
+... has not produced a single frame in 10 s (DXGI Desktop Duplication unavailable, using GDI fallback).
+```
+
+That means Windows would not give the app its fast screen-capture path and it fell back to
+the slow one - a graphics-driver or desktop-session issue on that PC. Send us that line and
+we will know where to look.
+
+**If you do NOT find it** during a blank broadcast - that is useful news too. It means the
+PC *is* capturing and sending the picture, and the video is being lost between the two
+machines or at the receiving end. Tell us that as well; it rules out half the possibilities.
+
+---
+
+## If the log folder is missing entirely
+
+Tell us and we will take it from there - it may mean the app is installed somewhere
+unusual, and the version number from Step 3 will help us work out where to look.
+
+---
+
+## Advanced option - only if we send you an extra file
+
+If we send you the test executable that ships with a development build, it can measure
+screen capture directly in about 15 seconds, without broadcasting at all. On the
+broadcasting PC, open **Command Prompt** and run:
 
 ```
 "%LOCALAPPDATA%\Programs\OMT Capture Studio\OmtCaptureStudio.Tests.exe" --diag-capture 8
 ```
 
-If you get *"is not recognized"* or *"cannot find the path"*, the app is installed
-somewhere else. Find the folder that contains `OmtCaptureStudio.exe`, and use that folder
-for the line above instead, for example:
+- `captured=` **greater than 0** - capture is working; the problem is elsewhere.
+- `captured=0` - capture is broken, and that explains everything.
 
-```
-"C:\Program Files\OMT Capture Studio\OmtCaptureStudio.Tests.exe" --diag-capture 8
-```
-
-> The number `8` at the end is just how many seconds to measure. Any number from 5 to 30
-> is fine.
-
-3. **Wait about 15 seconds.** The window stays still for a moment, then prints a result.
-4. Copy everything it printed and send it back.
-
----
-
-## What the output means
-
-### If it looks like this — capture is FINE:
-
-```
-RESULT: TryCaptureFrame -> captured=305  noNewFrame=0 over 8s
-   => the capture provider DELIVERS frames; a blank broadcast is NOT a capture failure.
-```
-
-Your PC **is** capturing the screen (305 pictures in 8 seconds in this example — the exact
-number will differ). The problem is somewhere else, and the numbers in the first line
-(`1920x1080 stride=7680`) tell us the resolution being captured.
-
-### If it looks like this — capture is BROKEN:
-
-```
-RESULT: TryCaptureFrame -> captured=0  noNewFrame=<something> over 8s
-   => the capture provider delivered ZERO frames ...
-```
-
-Your PC is capturing **nothing at all**. That fully explains the blank picture: the
-broadcast is advertised on the network, but no video (and no audio) is ever sent.
-
-### If it shows an error
-
-Copy the whole error message — it names what Windows refused to give us (graphics driver,
-screen-lock, a full-screen game, etc.).
-
----
-
-## Please also send these two things
-
-1. **The first line**, which shows the resolution:
-   `geometry : 1920x1080  stride=7680  buffer=pinned OK`
-2. **How many monitors you have**, and which one you selected as "Screen 1".
-
----
-
-## If the file is missing
-
-If `OmtCaptureStudio.Tests.exe` isn't in the folder at all, that's fine — just tell us, and
-we'll get you a build that includes it. (It ships alongside the app for exactly this kind
-of check.)
+Send us the whole output. (The `8` is just how many seconds to measure; anything from 5
+to 30 works.)
