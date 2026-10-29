@@ -1450,6 +1450,10 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
                         fps: 30,
                         audioSource: audioSource,
                         bindIpAddress: bindIp);
+                    // DIAG-BROADCAST: the generator has no error funnel of its own (no event existed at
+                    // all before this pass), so the stall report is subscribed here and marshalled to the
+                    // UI thread - the event is raised on the SEND thread.
+                    generator.CaptureStalled += m => PostToUIThread(() => StatusText = m);
                     generator.Start();
                     _desktopCapture = generator;
                 }

@@ -21,4 +21,17 @@ public interface IFrameSource : IDisposable
     /// is available (the buffer still holds the previous frame).
     /// </summary>
     bool TryCaptureFrame();
+
+    /// <summary>
+    /// DIAG-BROADCAST: whether this provider is running on a DEGRADED fallback path - specifically DXGI
+    /// Desktop Duplication being unavailable so GDI capture is in use.
+    ///
+    /// <para>A default interface member defaulting to FALSE, following the
+    /// <c>IRecordingSink.HasSurvivingDestination</c> precedent: default to the OLD behaviour rather than
+    /// the optimistic one, and force no implementation outside this repo to change. Here the old
+    /// behaviour is "no degradation known", which is also the honest answer for a synthetic provider that
+    /// has no such concept. This exists so the stall message can tell the operator WHY capture failed,
+    /// not merely that it did - the single most diagnostic sentence for a GPU/session-specific failure.</para>
+    /// </summary>
+    bool IsUsingFallbackCapture => false;
 }

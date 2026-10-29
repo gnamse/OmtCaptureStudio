@@ -31,6 +31,14 @@ public sealed class DesktopFrameCapturer : IFrameSource
     public int Stride => Width * 4;
     public IntPtr BufferPtr => _bufferHandle.IsAllocated ? _bufferHandle.AddrOfPinnedObject() : IntPtr.Zero;
 
+    /// <summary>
+    /// DIAG-BROADCAST: true when Desktop Duplication is not in use, so every frame comes from the GDI
+    /// path. Set both when DXGI init throws (HRESULT or otherwise) AND when the display has no DXGI
+    /// output at all - in every one of those states this capturer is degraded, and the operator needs to
+    /// know that rather than just "no frames".
+    /// </summary>
+    public bool IsUsingFallbackCapture => _duplication == null;
+
     public DesktopFrameCapturer(int monitorIndex = 0)
     {
         _monitorIndex = monitorIndex;

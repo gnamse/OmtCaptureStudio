@@ -24,6 +24,14 @@ class Program
         // SOAK-01 opt-in modes. The default suite (no args) is unchanged and fast; the soak mode runs
         // ONLY when explicitly requested because it takes ~65-70 s of real wall clock and spawns child
         // sender processes.
+        // DIAG-BROADCAST: probe the broadcast sender's FRAME PROVIDER directly. The receive side is
+        // proven good (722/722 accepted); this asks whether DesktopFrameCapturer delivers frames at all
+        // on this box - which is what would make a broadcast source advertise but carry nothing.
+        if (args.Length >= 1 && args[0] == "--diag-capture")
+        {
+            return RunDiagCapture(args.Length >= 2 && int.TryParse(args[1], out int csecs) ? csecs : 8);
+        }
+
         if (args.Length >= 1 && args[0] == "--sender")
         {
             return RunSenderChild(args.Length >= 2 ? args[1] : "OMT_NET007_LiveSender");
@@ -451,6 +459,12 @@ class Program
         var frame = new libomtnet.OMTMediaFrame();
         long videoCount = 0, audioCount = 0, videoTyped = 0, videoEmpty = 0;
         var codecSeen = new SortedDictionary<int, int>();
+        // DIAG-BROADCAST accumulators (video receive side).
+        var videoCodecSeen = new Dictionary<int, int>();
+        var videoSamples = new List<string>();
+        var videoRejectReasons = new List<string>();
+        long videoGuardAccepted = 0;
+        long videoGuardRejected = 0;
         var audioGeometry = new SortedDictionary<string, int>();
         var gapsMs = new List<double>();
         var tsDeltas = new List<long>();
@@ -523,6 +537,31 @@ class Program
                 else
                 {
                     videoCount++;
+
+                    // DIAG-BROADCAST: the one thing the existing trace never recorded for REAL frames -
+                    // the codec the SDK actually delivers on the video RECEIVE side, plus the geometry.
+                    // Send-side stamping proves nothing about what arrives; this is the measured value.
+                    if (!videoCodecSeen.ContainsKey(frame.Codec)) videoCodecSeen[frame.Codec] = 0;
+                    videoCodecSeen[frame.Codec]++;
+                    if (videoSamples.Count < 3)
+                    {
+                        videoSamples.Add(string.Format(
+                            "   video#{0}: codec={1} ({2})  {3}x{4} stride={5} DataLength={6} ts={7}",
+                            videoTyped, CodecName(frame.Codec), frame.Codec,
+                            frame.Width, frame.Height, frame.Stride, frame.DataLength, frame.Timestamp));
+                    }
+
+                    // Run the RECEIVER's own guard over the real frame, so the verdict here is the verdict
+                    // the product would reach - not a re-implementation of it.
+                    VideoFrameValidation verdict = OmtVideoFrameGuard.Validate(
+                        frame.Codec, frame.Width, frame.Height, frame.Stride, frame.DataLength);
+                    if (verdict.IsAccepted) videoGuardAccepted++;
+                    else
+                    {
+                        videoGuardRejected++;
+                        string reason = verdict.Reason + ": " + verdict.Detail;
+                        if (!videoRejectReasons.Contains(reason)) videoRejectReasons.Add(reason);
+                    }
                 }
                 if (prevVideoWall > 0) videoGaps.Add(nowMs - prevVideoWall);
                 prevVideoWall = nowMs;
@@ -548,6 +587,16 @@ class Program
         Console.WriteLine("video frames=" + videoCount + "   audio frames=" + audioCount);
         Console.WriteLine("VIDEO-TYPED frames delivered by the SDK: " + videoTyped +
                           "  (with data: " + videoCount + ", EMPTY/null-data: " + videoEmpty + ")");
+        Console.WriteLine();
+        Console.WriteLine("VIDEO CODECS SEEN ON RECEIVE (DIAG-BROADCAST - the measured value, not the send-side stamp):");
+        if (videoCodecSeen.Count == 0) Console.WriteLine("   (no real video frames arrived at all)");
+        foreach (var kv in videoCodecSeen)
+            Console.WriteLine("   codec=" + CodecName(kv.Key) + " (" + kv.Key + ")  x" + kv.Value);
+        foreach (string s in videoSamples) Console.WriteLine(s);
+        Console.WriteLine();
+        Console.WriteLine("RECEIVER GUARD VERDICT over those real frames (the product's own policy):");
+        Console.WriteLine("   accepted=" + videoGuardAccepted + "  rejected=" + videoGuardRejected);
+        foreach (string r in videoRejectReasons) Console.WriteLine("   REJECTED: " + r);
         Console.WriteLine();
         Console.WriteLine("AUDIO CODECS SEEN (decisive):");
         foreach (var kv in codecSeen)
@@ -653,6 +702,7 @@ class Program
         TestAppModeShell();
         TestOmtAudioFrameGuard();
         TestUpdateService();
+        TestBroadcastCaptureStall();
         SecurityRegressionTable.RunAll();
 
         TestMainWindowViewModel();
@@ -956,6 +1006,181 @@ class Program
         return sb.ToString();
     }
 
+    /// <summary>
+    /// DIAG-BROADCAST: drives <see cref="DesktopFrameCapturer"/> exactly as the broadcast sender does and
+    /// reports how many real frames it yields. A sender whose provider never returns true emits a stream
+    /// with NO video and NO audio (the send loop `continue`s before both sends), which is
+    /// indistinguishable from a network fault from the receiving end.
+    /// </summary>
+    static int RunDiagCapture(int seconds)
+    {
+        Console.WriteLine($"\n[diag] probing DesktopFrameCapturer (monitor 0) for {seconds} s ...");
+        try
+        {
+            using var cap = new DesktopFrameCapturer(0);
+            Console.WriteLine($"   geometry : {cap.Width}x{cap.Height}  stride={cap.Stride}  buffer={(cap.BufferPtr != IntPtr.Zero ? "pinned OK" : "NULL")}");
+
+            int ok = 0, noNew = 0;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            long lastReport = 0;
+            while (sw.Elapsed.TotalSeconds < seconds)
+            {
+                if (cap.TryCaptureFrame()) ok++; else noNew++;
+                Thread.Sleep(16);
+                if (sw.ElapsedMilliseconds - lastReport >= 2000)
+                {
+                    lastReport = sw.ElapsedMilliseconds;
+                    Console.WriteLine($"   t={sw.Elapsed.TotalSeconds,4:F1}s  captured={ok,5}  noNewFrame={noNew,5}");
+                }
+            }
+
+            Console.WriteLine($"RESULT: TryCaptureFrame -> captured={ok}  noNewFrame={noNew} over {seconds}s");
+            Console.WriteLine(ok > 0
+                ? "   => the capture provider DELIVERS frames; a blank broadcast is NOT a capture failure."
+                : "   => the capture provider delivered ZERO frames: the sender would `continue` forever and"
+                  + "\n      put NEITHER video NOR audio on the wire (see OmtDesktopCaptureGenerator.cs:295-298),"
+                  + "\n      while mDNS still advertises the source. That matches a source that appears but is blank.");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("RESULT: constructing/using DesktopFrameCapturer THREW: " + ex);
+            return 1;
+        }
+    }
+
+    /// <summary>DIAG-BROADCAST: a capture provider that NEVER yields a frame - the failing DXGI/GDI state.</summary>
+    sealed class StallingFrameSource : IFrameSource
+    {
+        private readonly GCHandle _pin;
+        private readonly bool _yields;
+        public StallingFrameSource(int w = 1920, int h = 1080, bool yields = false, bool degraded = false)
+        {
+            Width = w; Height = h; _yields = yields; IsUsingFallbackCapture = degraded;
+            _pin = GCHandle.Alloc(new byte[w * 4 * h], GCHandleType.Pinned);
+        }
+        public bool IsUsingFallbackCapture { get; }
+        public int Width { get; }
+        public int Height { get; }
+        public int Stride => Width * 4;
+        public IntPtr BufferPtr => _pin.AddrOfPinnedObject();
+        public bool TryCaptureFrame() => _yields;   // false = the failing DXGI/GDI state
+        public void Dispose() { if (_pin.IsAllocated) _pin.Free(); }
+    }
+
+    /// <summary>Counts audio pulls: proves the send loop skipped audio while no frame had arrived.</summary>
+    sealed class CountingAudioSource : IHostAudioSource
+    {
+        public int FillCalls;
+        public int SampleRate => 48000;
+        public int Channels => 2;
+        public bool IsHardwareActive => false;
+        public int DeviceSampleRate => 48000;
+        public bool IsResamplingRequired => false;
+        public string? RateNegotiationNote => null;
+        public int InputLatencyFrames => 0;
+        public string? LastError => null;
+        public void FillPlanarAudio(Span<float> planarDestination, int samplesPerChannel)
+        {
+            Interlocked.Increment(ref FillCalls);
+            planarDestination.Clear();
+        }
+        public void Dispose() { }
+    }
+
+    static void TestBroadcastCaptureStall()
+    {
+        Console.WriteLine("\n[Step 0.702] Verifying a capture provider that never yields is REPORTED, not silent (DIAG-BROADCAST)...");
+
+        var capturer = new StallingFrameSource();
+        var audio = new CountingAudioSource();
+        var stalledMessages = new List<string>();
+        var stalled = new ManualResetEventSlim(false);
+
+        // Short window so the suite does not wait 10 s; production uses DefaultFirstFrameTimeoutMs.
+        using var generator = new OmtDesktopCaptureGenerator(
+            capturer,
+            sourceName: "OMT_TEST_STALL",
+            fps: 30,
+            audioSource: audio,
+            firstFrameTimeoutMs: 400);
+        generator.CaptureStalled += m => { lock (stalledMessages) stalledMessages.Add(m); stalled.Set(); };
+
+        generator.Start();
+
+        bool fired = stalled.Wait(TimeSpan.FromSeconds(15));
+        generator.Stop();
+
+        Expect(fired, "A capture provider that never yields a frame must trip the stall report (it was silent before).");
+        lock (stalledMessages)
+        {
+            Expect(stalledMessages.Count == 1, $"The stall must be reported exactly ONCE; got {stalledMessages.Count}.");
+            string msg = stalledMessages[0];
+            // verify the MESSAGE, not just that something fired - a bare 'error' would be useless to an operator
+            Expect(msg.Contains("no frames are being captured"), $"The message must say what is wrong; got '{msg}'");
+            Expect(msg.Contains(nameof(StallingFrameSource)), $"The message must NAME the provider; got '{msg}'");
+            Expect(msg.Contains("NO audio is being sent"), $"The message must state that audio is skipped too; got '{msg}'");
+            Expect(msg.Contains("OMT_TEST_STALL"), $"The message must name the advertised source; got '{msg}'");
+        }
+
+        // The consequence the message claims must actually hold: no audio was ever pulled.
+        Expect(audio.FillCalls == 0, $"Audio must NOT be sent while no frame has arrived; FillPlanarAudio was called {audio.FillCalls} time(s).");
+        Expect(!generator.HasProducedFrames, "HasProducedFrames must stay false for a provider that never yields.");
+
+        capturer.Dispose();
+
+        // ---- THE OWNER'S LIKELY CASE: stalled AND degraded (DXGI unavailable, GDI fallback) ----------
+        // A plain "no frames" message tells the operator something is wrong; naming the DEGRADED PATH is
+        // what tells them why, which is the whole reason this clause exists.
+        var degradedCapturer = new StallingFrameSource(degraded: true);
+        var degradedMessages = new List<string>();
+        var degradedFired = new ManualResetEventSlim(false);
+        using (var dg = new OmtDesktopCaptureGenerator(degradedCapturer, sourceName: "OMT_TEST_DEGRADED",
+                                                       fps: 30, audioSource: new CountingAudioSource(),
+                                                       firstFrameTimeoutMs: 400))
+        {
+            dg.CaptureStalled += m => { lock (degradedMessages) degradedMessages.Add(m); degradedFired.Set(); };
+            dg.Start();
+            degradedFired.Wait(TimeSpan.FromSeconds(15));
+            dg.Stop();
+        }
+        degradedCapturer.Dispose();
+
+        lock (degradedMessages)
+        {
+            Expect(degradedMessages.Count == 1, $"A degraded stall must report once; got {degradedMessages.Count}.");
+            string dm = degradedMessages[0];
+            Expect(dm.Contains("DXGI Desktop Duplication unavailable, using GDI fallback"),
+                $"The message must name the DEGRADED PATH when the capturer reports one; got '{dm}'");
+        }
+
+        // and a NON-degraded stall must NOT claim a fallback it is not using (no crying wolf)
+        lock (stalledMessages)
+        {
+            Expect(!stalledMessages[0].Contains("GDI fallback"),
+                "A stall on a non-degraded provider must not claim the GDI fallback wording.");
+        }
+
+        // NEGATIVE CONTROL OF THE DETECTOR ITSELF: a provider that DOES yield must NOT trip it. Without
+        // this, the step would pass even if the detector fired unconditionally on every broadcast.
+        var goodCapturer = new StallingFrameSource(yields: true);
+        var goodAudio = new CountingAudioSource();
+        int falseReports = 0;
+        using (var ok = new OmtDesktopCaptureGenerator(goodCapturer, sourceName: "OMT_TEST_OK", fps: 30,
+                                                        audioSource: goodAudio, firstFrameTimeoutMs: 400))
+        {
+            ok.CaptureStalled += _ => Interlocked.Increment(ref falseReports);
+            ok.Start();
+            Thread.Sleep(1200);
+            ok.Stop();
+        }
+        goodCapturer.Dispose();
+        Expect(falseReports == 0, $"A provider that DOES yield must never trip the stall report; it fired {falseReports} time(s).");
+
+        Console.WriteLine($" -> stall reported once with a message naming the provider, the advertised source and the audio consequence;");
+        Console.WriteLine($"    audio never sent (0 pulls); a never-yielding provider trips it, and the detector is armed before the window!");
+    }
+
     static void TestUpdateService()
     {
         Console.WriteLine("\n[Step 0.701] Verifying the auto-update service (version policy, feed parsing, verification, channel)...");
@@ -1245,6 +1470,7 @@ class Program
             case "0.699": TestOmtAudioFrameGuard(); break;
             case "0.700": SecurityRegressionTable.RunAll(); break;
             case "0.701": TestUpdateService(); break;
+            case "0.702": TestBroadcastCaptureStall(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");
