@@ -10,6 +10,7 @@ using OmtCaptureStudio.Services.Sources;
 using OmtCaptureStudio.ViewModels;
 
 using OmtCaptureStudio.Services.Forensics;
+using System.Reflection;
 namespace OmtCaptureStudio.Tests;
 
 class Program
@@ -661,6 +662,7 @@ class Program
         // before any step that starts a take, because the sink no longer falls back to a bare "ffmpeg"
         // resolved through PATH. Without this the recording steps fail by design, not by accident.
         FfmpegPreflight.Run(AppContext.BaseDirectory);
+        Console.WriteLine($"   [ffmpeg] head-of-suite resolution -> {FfmpegPreflight.ResolvedPath ?? "<NULL>"}");
         Console.WriteLine("====================================================");
         Console.WriteLine("  OMT Capture Studio - End-to-End Automated Test");
         Console.WriteLine("====================================================");
@@ -702,10 +704,15 @@ class Program
         // the time a take is started, and the sink now refuses to search PATH. Production never clears it
         // (nothing re-runs the preflight), so the faithful mirror is to re-resolve after the step that
         // deliberately breaks it, immediately before the steps that start real takes.
+        Console.WriteLine($"   [ffmpeg] after the preflight STEP -> {FfmpegPreflight.ResolvedPath ?? "<NULL>"}"
+                          + "  (NULL here is the STEP's own failure scenarios clearing it, by R26 design)");
         FfmpegPreflight.Run(AppContext.BaseDirectory);
+        Console.WriteLine($"   [ffmpeg] after re-resolve, SAME process + SAME redirect -> {FfmpegPreflight.ResolvedPath ?? "<NULL>"}"
+                          + "  (non-null REFUTES the redirected-stdio hypothesis)");
         TestCompositeRecordingSink();
         TestCompositeRecordingWiring();
         TestFfmpegSinkPathDiscipline();
+        TestNativePayloadVerification();
         TestProgressiveDisclosure();
         TestOperatorSettings();
         TestScheduledStopAndRemainingTime();
@@ -1108,6 +1115,73 @@ class Program
     /// the current directory and PATH (CWE-427). The positive direction is covered by the composite tests,
     /// which start a real take and would fail here if the sink could not reach a resolved binary.
     /// </summary>
+    /// <summary>
+    /// SEC-04 (R18/R20/R23). The bootstrapper used to trust an extracted file whose BYTE LENGTH matched the
+    /// embedded one, so a same-size planted DLL was never re-extracted and was then loaded. These cases pin
+    /// the replacement rule by consequence: the exact shape the old check accepted must no longer verify.
+    /// </summary>
+    static void TestNativePayloadVerification()
+    {
+        Console.WriteLine("\n[Step 0.704] Verifying native payloads by CONTENT, not length (SEC-04, R18/R20/R23)...");
+
+        Assembly product = typeof(NativePayloadBootstrapper).Assembly;
+        string root = Path.Combine(Path.GetTempPath(), "omt-native-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        const string lib = "libvmx.dll";
+        string expectedHash = NativePayloadBootstrapper.HashOfResource(product, lib);
+        Expect(expectedHash.Length == 64,
+            $"R18: the payload identity must be a SHA-256 over CONTENT; got '{expectedHash}'.");
+
+        long payloadLength;
+        using (Stream? res = product.GetManifestResourceStream("NativePayload." + lib))
+        {
+            Expect(res is not null, "The native payload must be embedded in the product assembly.");
+            payloadLength = res!.Length;
+        }
+
+        // ---- THE HEADLINE CASE: same LENGTH, wrong CONTENT ------------------------------------------
+        // This is precisely the file the OLD check accepted without looking: equal byte count, different
+        // bytes. It must not verify, and extraction must overwrite it.
+        string planted = Path.Combine(root, lib);
+        File.WriteAllBytes(planted, new byte[payloadLength]);   // all zeros: identical size, wrong content
+        Expect(new FileInfo(planted).Length == payloadLength,
+            "The planted file must be the same SIZE as the real payload for this case to mean anything.");
+        Expect(!NativePayloadBootstrapper.FileMatches(planted, expectedHash),
+            "R18/R23: a same-size, wrong-content file must NOT be treated as already extracted.");
+
+        NativePayloadBootstrapper.ExtractVerified(root, product);
+        Expect(NativePayloadBootstrapper.FileMatches(planted, expectedHash),
+            "R18/R23: verified extraction must REPLACE a same-size planted file with the real content.");
+        Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(root, product),
+            "R23: after verified extraction the whole directory must pass the content check.");
+
+        // ---- R23: ONE wrong-content library makes the WHOLE directory unusable ----------------------
+        // This is what stops an unverified directory being used as the fast path.
+        string victim = Path.Combine(root, "libSkiaSharp.dll");
+        byte[] correct = File.ReadAllBytes(victim);
+        File.WriteAllBytes(victim, new byte[correct.Length]);   // same size again, wrong content
+        Expect(!NativePayloadBootstrapper.AllLibrariesPresentAndValid(root, product),
+            "R23: a directory with ONE wrong-content library must be rejected, so the verified extraction runs instead.");
+
+        // ---- and the check is not a blanket refusal -------------------------------------------------
+        File.WriteAllBytes(victim, correct);
+        Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(root, product),
+            "R23: restoring the correct content must pass - the check discriminates, it does not just always say no.");
+
+        // ---- an empty directory is not usable (no library is trusted into existence) -----------------
+        string emptyDir = Path.Combine(Path.GetTempPath(), "omt-native-empty-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(emptyDir);
+        Expect(!NativePayloadBootstrapper.AllLibrariesPresentAndValid(emptyDir, product),
+            "R23: a directory with no libraries must not pass the fast-path check.");
+
+        Directory.Delete(root, recursive: true);
+        Directory.Delete(emptyDir, recursive: true);
+
+        Console.WriteLine(" -> payload identity is a content SHA-256; a same-SIZE wrong-content file is no longer trusted,");
+        Console.WriteLine("    extraction replaces it, one bad file invalidates the directory, and the check discriminates!");
+    }
+
     static void TestFfmpegSinkPathDiscipline()
     {
         Console.WriteLine("\n[Step 0.703] Verifying the ffmpeg execution sink never searches PATH (R25/R26, SEC-04b)...");
@@ -1673,6 +1747,7 @@ class Program
             case "0.701": TestUpdateService(); break;
             case "0.702": TestBroadcastCaptureStall(); break;
             case "0.703": TestFfmpegSinkPathDiscipline(); break;
+            case "0.704": TestNativePayloadVerification(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");

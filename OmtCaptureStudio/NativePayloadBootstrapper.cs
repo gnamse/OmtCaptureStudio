@@ -84,7 +84,9 @@ public static class NativePayloadBootstrapper
     /// R18/R23: the identity of the payload is its CONTENT. Streamed so an embedded 40 MB library is not
     /// materialised as a byte array just to be hashed.
     /// </summary>
-    private static string HashOfResource(Assembly assembly, string lib)
+    /// <summary>SEC-04 (R18): the content identity of one embedded payload. Public so the suite can build a
+    /// deliberately same-length-but-wrong file - the exact shape the old length check accepted.</summary>
+    public static string HashOfResource(Assembly assembly, string lib)
     {
         using Stream? stream = assembly.GetManifestResourceStream($"NativePayload.{lib}");
         if (stream is null)
@@ -239,7 +241,12 @@ public static class NativePayloadBootstrapper
 
     // ------------------------------------------------------------------ extraction (R18/R20/R23)
 
-    private static void ExtractVerified(string targetDir, Assembly assembly)
+    /// <summary>
+    /// SEC-04 (R18/R20/R23): extract every payload into <paramref name="targetDir"/> and prove each one by
+    /// content. Public so the headless suite can drive this against a TEMP directory with a deliberately
+    /// planted file - the only way to prove the length-match defence without touching %LOCALAPPDATA%.
+    /// </summary>
+    public static void ExtractVerified(string targetDir, Assembly assembly)
     {
         if (!Directory.Exists(targetDir))
         {
@@ -261,7 +268,9 @@ public static class NativePayloadBootstrapper
         }
     }
 
-    private static bool FileMatches(string path, string expectedHash)
+    /// <summary>SEC-04 (R23): does the file at this path hash to the expected value? Public because the
+    /// suite asserts both directions of it directly.</summary>
+    public static bool FileMatches(string path, string expectedHash)
     {
         try
         {
@@ -392,7 +401,12 @@ public static class NativePayloadBootstrapper
     /// R23: the loose-directory fast path is no longer taken merely because files exist - every file must
     /// match the embedded content. A directory that fails is not used; the verified extraction runs instead.
     /// </summary>
-    private static bool AllLibrariesPresentAndValid(string baseDir, Assembly assembly)
+    /// <summary>
+    /// SEC-04 (R23): the loose-directory fast path, judged by CONTENT. Public for the same reason as
+    /// <see cref="ExtractVerified"/>: the suite must be able to show that a directory holding a WRONG-CONTENT
+    /// file is rejected, because that is what stops the unverified directory being used.
+    /// </summary>
+    public static bool AllLibrariesPresentAndValid(string baseDir, Assembly assembly)
     {
         foreach (string lib in NativeLibraries)
         {
