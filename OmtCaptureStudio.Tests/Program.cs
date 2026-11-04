@@ -24,6 +24,14 @@ class Program
         // SOAK-01 opt-in modes. The default suite (no args) is unchanged and fast; the soak mode runs
         // ONLY when explicitly requested because it takes ~65-70 s of real wall clock and spawns child
         // sender processes.
+        // DIAG-BROADCAST: probe the broadcast sender's FRAME PROVIDER directly. The receive side is
+        // proven good (722/722 accepted); this asks whether DesktopFrameCapturer delivers frames at all
+        // on this box - which is what would make a broadcast source advertise but carry nothing.
+        if (args.Length >= 1 && args[0] == "--diag-capture")
+        {
+            return RunDiagCapture(args.Length >= 2 && int.TryParse(args[1], out int csecs) ? csecs : 8);
+        }
+
         if (args.Length >= 1 && args[0] == "--sender")
         {
             return RunSenderChild(args.Length >= 2 ? args[1] : "OMT_NET007_LiveSender");
@@ -451,6 +459,12 @@ class Program
         var frame = new libomtnet.OMTMediaFrame();
         long videoCount = 0, audioCount = 0, videoTyped = 0, videoEmpty = 0;
         var codecSeen = new SortedDictionary<int, int>();
+        // DIAG-BROADCAST accumulators (video receive side).
+        var videoCodecSeen = new Dictionary<int, int>();
+        var videoSamples = new List<string>();
+        var videoRejectReasons = new List<string>();
+        long videoGuardAccepted = 0;
+        long videoGuardRejected = 0;
         var audioGeometry = new SortedDictionary<string, int>();
         var gapsMs = new List<double>();
         var tsDeltas = new List<long>();
@@ -523,6 +537,31 @@ class Program
                 else
                 {
                     videoCount++;
+
+                    // DIAG-BROADCAST: the one thing the existing trace never recorded for REAL frames -
+                    // the codec the SDK actually delivers on the video RECEIVE side, plus the geometry.
+                    // Send-side stamping proves nothing about what arrives; this is the measured value.
+                    if (!videoCodecSeen.ContainsKey(frame.Codec)) videoCodecSeen[frame.Codec] = 0;
+                    videoCodecSeen[frame.Codec]++;
+                    if (videoSamples.Count < 3)
+                    {
+                        videoSamples.Add(string.Format(
+                            "   video#{0}: codec={1} ({2})  {3}x{4} stride={5} DataLength={6} ts={7}",
+                            videoTyped, CodecName(frame.Codec), frame.Codec,
+                            frame.Width, frame.Height, frame.Stride, frame.DataLength, frame.Timestamp));
+                    }
+
+                    // Run the RECEIVER's own guard over the real frame, so the verdict here is the verdict
+                    // the product would reach - not a re-implementation of it.
+                    VideoFrameValidation verdict = OmtVideoFrameGuard.Validate(
+                        frame.Codec, frame.Width, frame.Height, frame.Stride, frame.DataLength);
+                    if (verdict.IsAccepted) videoGuardAccepted++;
+                    else
+                    {
+                        videoGuardRejected++;
+                        string reason = verdict.Reason + ": " + verdict.Detail;
+                        if (!videoRejectReasons.Contains(reason)) videoRejectReasons.Add(reason);
+                    }
                 }
                 if (prevVideoWall > 0) videoGaps.Add(nowMs - prevVideoWall);
                 prevVideoWall = nowMs;
@@ -548,6 +587,16 @@ class Program
         Console.WriteLine("video frames=" + videoCount + "   audio frames=" + audioCount);
         Console.WriteLine("VIDEO-TYPED frames delivered by the SDK: " + videoTyped +
                           "  (with data: " + videoCount + ", EMPTY/null-data: " + videoEmpty + ")");
+        Console.WriteLine();
+        Console.WriteLine("VIDEO CODECS SEEN ON RECEIVE (DIAG-BROADCAST - the measured value, not the send-side stamp):");
+        if (videoCodecSeen.Count == 0) Console.WriteLine("   (no real video frames arrived at all)");
+        foreach (var kv in videoCodecSeen)
+            Console.WriteLine("   codec=" + CodecName(kv.Key) + " (" + kv.Key + ")  x" + kv.Value);
+        foreach (string s in videoSamples) Console.WriteLine(s);
+        Console.WriteLine();
+        Console.WriteLine("RECEIVER GUARD VERDICT over those real frames (the product's own policy):");
+        Console.WriteLine("   accepted=" + videoGuardAccepted + "  rejected=" + videoGuardRejected);
+        foreach (string r in videoRejectReasons) Console.WriteLine("   REJECTED: " + r);
         Console.WriteLine();
         Console.WriteLine("AUDIO CODECS SEEN (decisive):");
         foreach (var kv in codecSeen)
@@ -652,6 +701,8 @@ class Program
         TestDiagnosticsBundle();
         TestAppModeShell();
         TestOmtAudioFrameGuard();
+        TestUpdateService();
+        TestBroadcastCaptureStall();
         SecurityRegressionTable.RunAll();
 
         TestMainWindowViewModel();
@@ -917,6 +968,408 @@ class Program
     /// blocks that dominated the presentation step — the message is the FACT, and it may interpolate the
     /// actual value when the value is the interesting part of the failure.
     /// </summary>
+    /// <summary>NET-023: a release feed with no network. Counts calls so the once-per-launch cache is provable.</summary>
+    sealed class FakeUpdateTransport : IUpdateTransport
+    {
+        public readonly Dictionary<string, string> Strings = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, byte[]> Bytes = new(StringComparer.Ordinal);
+        public int StringCalls;
+        public int ByteCalls;
+        public bool Offline;
+
+        public Task<string?> GetStringAsync(string url, CancellationToken cancellationToken)
+        {
+            StringCalls++;
+            if (Offline) return Task.FromResult<string?>(null);
+            return Task.FromResult(Strings.TryGetValue(url, out string? v) ? v : null);
+        }
+
+        public Task<byte[]?> GetBytesAsync(string url, CancellationToken cancellationToken)
+        {
+            ByteCalls++;
+            if (Offline) return Task.FromResult<byte[]?>(null);
+            return Task.FromResult(Bytes.TryGetValue(url, out byte[]? v) ? v : null);
+        }
+    }
+
+    static string FakeReleaseJson(string tag, string setupName, long size, string shaName)
+    {
+        // Plain concatenation on purpose: a raw interpolated string here would need brace escaping, and
+        // a transport layer that eats braces is exactly how a generated test silently stops testing JSON.
+        var sb = new System.Text.StringBuilder();
+        sb.Append("{\"tag_name\":\"").Append(tag).Append("\",");
+        sb.Append("\"html_url\":\"https://github.com/gnamse/OmtCaptureStudio/releases/tag/").Append(tag).Append("\",");
+        sb.Append("\"assets\":[");
+        sb.Append("{\"name\":\"").Append(setupName).Append("\",\"browser_download_url\":\"https://dl.example/").Append(setupName).Append("\",\"size\":").Append(size).Append("},");
+        sb.Append("{\"name\":\"").Append(shaName).Append("\",\"browser_download_url\":\"https://dl.example/").Append(shaName).Append("\",\"size\":102}");
+        sb.Append("]}");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// DIAG-BROADCAST: drives <see cref="DesktopFrameCapturer"/> exactly as the broadcast sender does and
+    /// reports how many real frames it yields. A sender whose provider never returns true emits a stream
+    /// with NO video and NO audio (the send loop `continue`s before both sends), which is
+    /// indistinguishable from a network fault from the receiving end.
+    /// </summary>
+    static int RunDiagCapture(int seconds)
+    {
+        Console.WriteLine($"\n[diag] probing DesktopFrameCapturer (monitor 0) for {seconds} s ...");
+        try
+        {
+            using var cap = new DesktopFrameCapturer(0);
+            Console.WriteLine($"   geometry : {cap.Width}x{cap.Height}  stride={cap.Stride}  buffer={(cap.BufferPtr != IntPtr.Zero ? "pinned OK" : "NULL")}");
+
+            int ok = 0, noNew = 0;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            long lastReport = 0;
+            while (sw.Elapsed.TotalSeconds < seconds)
+            {
+                if (cap.TryCaptureFrame()) ok++; else noNew++;
+                Thread.Sleep(16);
+                if (sw.ElapsedMilliseconds - lastReport >= 2000)
+                {
+                    lastReport = sw.ElapsedMilliseconds;
+                    Console.WriteLine($"   t={sw.Elapsed.TotalSeconds,4:F1}s  captured={ok,5}  noNewFrame={noNew,5}");
+                }
+            }
+
+            Console.WriteLine($"RESULT: TryCaptureFrame -> captured={ok}  noNewFrame={noNew} over {seconds}s");
+            Console.WriteLine(ok > 0
+                ? "   => the capture provider DELIVERS frames; a blank broadcast is NOT a capture failure."
+                : "   => the capture provider delivered ZERO frames: the sender would `continue` forever and"
+                  + "\n      put NEITHER video NOR audio on the wire (see OmtDesktopCaptureGenerator.cs:295-298),"
+                  + "\n      while mDNS still advertises the source. That matches a source that appears but is blank.");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("RESULT: constructing/using DesktopFrameCapturer THREW: " + ex);
+            return 1;
+        }
+    }
+
+    /// <summary>DIAG-BROADCAST: a capture provider that NEVER yields a frame - the failing DXGI/GDI state.</summary>
+    sealed class StallingFrameSource : IFrameSource
+    {
+        private readonly GCHandle _pin;
+        private readonly bool _yields;
+        public StallingFrameSource(int w = 1920, int h = 1080, bool yields = false, bool degraded = false)
+        {
+            Width = w; Height = h; _yields = yields; IsUsingFallbackCapture = degraded;
+            _pin = GCHandle.Alloc(new byte[w * 4 * h], GCHandleType.Pinned);
+        }
+        public bool IsUsingFallbackCapture { get; }
+        public int Width { get; }
+        public int Height { get; }
+        public int Stride => Width * 4;
+        public IntPtr BufferPtr => _pin.AddrOfPinnedObject();
+        public bool TryCaptureFrame() => _yields;   // false = the failing DXGI/GDI state
+        public void Dispose() { if (_pin.IsAllocated) _pin.Free(); }
+    }
+
+    /// <summary>Counts audio pulls: proves the send loop skipped audio while no frame had arrived.</summary>
+    sealed class CountingAudioSource : IHostAudioSource
+    {
+        public int FillCalls;
+        public int SampleRate => 48000;
+        public int Channels => 2;
+        public bool IsHardwareActive => false;
+        public int DeviceSampleRate => 48000;
+        public bool IsResamplingRequired => false;
+        public string? RateNegotiationNote => null;
+        public int InputLatencyFrames => 0;
+        public string? LastError => null;
+        public void FillPlanarAudio(Span<float> planarDestination, int samplesPerChannel)
+        {
+            Interlocked.Increment(ref FillCalls);
+            planarDestination.Clear();
+        }
+        public void Dispose() { }
+    }
+
+    static void TestBroadcastCaptureStall()
+    {
+        Console.WriteLine("\n[Step 0.702] Verifying a capture provider that never yields is REPORTED, not silent (DIAG-BROADCAST)...");
+
+        var capturer = new StallingFrameSource();
+        var audio = new CountingAudioSource();
+        var stalledMessages = new List<string>();
+        var stalled = new ManualResetEventSlim(false);
+
+        // Short window so the suite does not wait 10 s; production uses DefaultFirstFrameTimeoutMs.
+        using var generator = new OmtDesktopCaptureGenerator(
+            capturer,
+            sourceName: "OMT_TEST_STALL",
+            fps: 30,
+            audioSource: audio,
+            firstFrameTimeoutMs: 400);
+        generator.CaptureStalled += m => { lock (stalledMessages) stalledMessages.Add(m); stalled.Set(); };
+
+        generator.Start();
+
+        bool fired = stalled.Wait(TimeSpan.FromSeconds(15));
+        generator.Stop();
+
+        Expect(fired, "A capture provider that never yields a frame must trip the stall report (it was silent before).");
+        lock (stalledMessages)
+        {
+            Expect(stalledMessages.Count == 1, $"The stall must be reported exactly ONCE; got {stalledMessages.Count}.");
+            string msg = stalledMessages[0];
+            // verify the MESSAGE, not just that something fired - a bare 'error' would be useless to an operator
+            Expect(msg.Contains("no frames are being captured"), $"The message must say what is wrong; got '{msg}'");
+            Expect(msg.Contains(nameof(StallingFrameSource)), $"The message must NAME the provider; got '{msg}'");
+            Expect(msg.Contains("NO audio is being sent"), $"The message must state that audio is skipped too; got '{msg}'");
+            Expect(msg.Contains("OMT_TEST_STALL"), $"The message must name the advertised source; got '{msg}'");
+        }
+
+        // The consequence the message claims must actually hold: no audio was ever pulled.
+        Expect(audio.FillCalls == 0, $"Audio must NOT be sent while no frame has arrived; FillPlanarAudio was called {audio.FillCalls} time(s).");
+        Expect(!generator.HasProducedFrames, "HasProducedFrames must stay false for a provider that never yields.");
+
+        capturer.Dispose();
+
+        // ---- THE OWNER'S LIKELY CASE: stalled AND degraded (DXGI unavailable, GDI fallback) ----------
+        // A plain "no frames" message tells the operator something is wrong; naming the DEGRADED PATH is
+        // what tells them why, which is the whole reason this clause exists.
+        var degradedCapturer = new StallingFrameSource(degraded: true);
+        var degradedMessages = new List<string>();
+        var degradedFired = new ManualResetEventSlim(false);
+        using (var dg = new OmtDesktopCaptureGenerator(degradedCapturer, sourceName: "OMT_TEST_DEGRADED",
+                                                       fps: 30, audioSource: new CountingAudioSource(),
+                                                       firstFrameTimeoutMs: 400))
+        {
+            dg.CaptureStalled += m => { lock (degradedMessages) degradedMessages.Add(m); degradedFired.Set(); };
+            dg.Start();
+            degradedFired.Wait(TimeSpan.FromSeconds(15));
+            dg.Stop();
+        }
+        degradedCapturer.Dispose();
+
+        lock (degradedMessages)
+        {
+            Expect(degradedMessages.Count == 1, $"A degraded stall must report once; got {degradedMessages.Count}.");
+            string dm = degradedMessages[0];
+            Expect(dm.Contains("DXGI Desktop Duplication unavailable, using GDI fallback"),
+                $"The message must name the DEGRADED PATH when the capturer reports one; got '{dm}'");
+        }
+
+        // and a NON-degraded stall must NOT claim a fallback it is not using (no crying wolf)
+        lock (stalledMessages)
+        {
+            Expect(!stalledMessages[0].Contains("GDI fallback"),
+                "A stall on a non-degraded provider must not claim the GDI fallback wording.");
+        }
+
+        // NEGATIVE CONTROL OF THE DETECTOR ITSELF: a provider that DOES yield must NOT trip it. Without
+        // this, the step would pass even if the detector fired unconditionally on every broadcast.
+        var goodCapturer = new StallingFrameSource(yields: true);
+        var goodAudio = new CountingAudioSource();
+        int falseReports = 0;
+        using (var ok = new OmtDesktopCaptureGenerator(goodCapturer, sourceName: "OMT_TEST_OK", fps: 30,
+                                                        audioSource: goodAudio, firstFrameTimeoutMs: 400))
+        {
+            ok.CaptureStalled += _ => Interlocked.Increment(ref falseReports);
+            ok.Start();
+            Thread.Sleep(1200);
+            ok.Stop();
+        }
+        goodCapturer.Dispose();
+        Expect(falseReports == 0, $"A provider that DOES yield must never trip the stall report; it fired {falseReports} time(s).");
+
+        Console.WriteLine($" -> stall reported once with a message naming the provider, the advertised source and the audio consequence;");
+        Console.WriteLine($"    audio never sent (0 pulls); a never-yielding provider trips it, and the detector is armed before the window!");
+    }
+
+    static void TestUpdateService()
+    {
+        Console.WriteLine("\n[Step 0.701] Verifying the auto-update service (version policy, feed parsing, verification, channel)...");
+
+        // ---- 1. VERSION PARSING (pure policy, no I/O) ----------------------------------------------
+        Expect(UpdateService.TryParseVersion("v1.0.0.22", out Version? vTag) && vTag!.ToString() == "1.0.0.22",
+            "A leading v on a release tag must be stripped.");
+        Expect(UpdateService.TryParseVersion("1.0.0.22+10c78ce", out Version? vSha) && vSha!.ToString() == "1.0.0.22",
+            "A +<sha> build suffix must be ignored, not parsed as a segment.");
+        Expect(!UpdateService.TryParseVersion("1.0.0-beta", out _), "A non-numeric tag must not be coerced into a version.");
+        Expect(!UpdateService.TryParseVersion("", out _) && !UpdateService.TryParseVersion(null, out _),
+            "An empty or null version must be rejected.");
+        Expect(!UpdateService.TryParseVersion("1..0", out _), "A malformed dotted version must be rejected.");
+
+        // ---- 2. THE COMPARISON PREDICATE, EACH SEGMENT ---------------------------------------------
+        Expect(!UpdateService.IsNewerVersion(new Version(1, 0, 0, 22), new Version(1, 0, 0, 22)), "An equal version is not an update.");
+        Expect(UpdateService.IsNewerVersion(new Version(1, 0, 0, 23), new Version(1, 0, 0, 22)), "A newer build segment is an update.");
+        Expect(UpdateService.IsNewerVersion(new Version(1, 1, 0, 0), new Version(1, 0, 0, 22)), "A newer minor is an update.");
+        Expect(UpdateService.IsNewerVersion(new Version(2, 0, 0, 0), new Version(1, 0, 0, 22)), "A newer major is an update.");
+        Expect(!UpdateService.IsNewerVersion(new Version(1, 0, 0, 21), new Version(1, 0, 0, 22)), "An older build segment is not an update.");
+        // THE ONE THAT WOULD HAVE SHIPPED A PERMANENT NAG: a three-part ProductVersion (what the entry
+        // assembly actually reports today) is ALWAYS 'older' than a four-part tag, so using it as the
+        // version source would offer an update on every single launch forever.
+        Expect(UpdateService.IsNewerVersion(new Version(1, 0, 0, 22), new Version(1, 0, 0)),
+            "This is why the version source must be four-part: 1.0.0 is ordered below 1.0.0.22.");
+
+        // ---- 3. THE VERSION SOURCE: version.txt wins, the assembly value is the fallback -------------
+        string vdir = Path.Combine(Path.GetTempPath(), "omt-update-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(vdir);
+        string vfile = Path.Combine(vdir, UpdateService.VersionFileName);
+        File.WriteAllText(vfile, "1.0.0.22");
+        string stamped = UpdateService.ResolveInstalledVersion(vdir, () => "1.0.0+deadbeef");
+        Expect(stamped == "1.0.0.22", $"The stamped version file must win over the assembly value; got {stamped}.");
+        File.Delete(vfile);
+        string fellBack = UpdateService.ResolveInstalledVersion(vdir, () => "1.0.0+deadbeef");
+        Expect(fellBack == "1.0.0+deadbeef", $"With no version file the assembly value is the fallback; got {fellBack}.");
+        Directory.Delete(vdir, recursive: true);
+
+        // ---- 4. CHANNEL DETECTION --------------------------------------------------------------------
+        var env = new Func<string, string?>(k => k switch
+        {
+            "LOCALAPPDATA" => @"C:\Users\op\AppData\Local",
+            "ProgramFiles" => @"C:\Program Files",
+            "ProgramFiles(x86)" => @"C:\Program Files (x86)",
+            _ => null
+        });
+        Expect(UpdateService.DetectChannel(@"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe", env) == InstallChannel.Installer,
+            "A per-user installer placement is the Installer channel.");
+        // DEVIATION FROM THE BRIEF, asserted deliberately: the SAME .iss installs machine-wide into
+        // Program Files when the operator picks the admin option (PrivilegesRequiredOverridesAllowed=dialog,
+        // DefaultDirName={autopf}). Treating that as portable would deny those users updates forever.
+        Expect(UpdateService.DetectChannel(@"C:\Program Files\OMT Capture Studio\OmtCaptureStudio.exe", env) == InstallChannel.Installer,
+            "A machine-wide installer placement must ALSO be the Installer channel, not portable.");
+        Expect(UpdateService.DetectChannel(@"C:\Apps\OMT\OmtCaptureStudio.exe", env) == InstallChannel.Portable,
+            "A copy outside both install roots is portable.");
+        // the INSTANCE property must use the same seam - asserting only the static would leave a wiring
+        // bug invisible (this is exactly how the machine-dependent channel slipped in once already)
+        var probe = new UpdateService(new FakeUpdateTransport(),
+            executablePath: () => @"C:\Program Files\OMT Capture Studio\OmtCaptureStudio.exe",
+            environment: env);
+        Expect(probe.Channel == InstallChannel.Installer, "The instance Channel property must honour the injected environment.");
+        Expect(UpdateService.DetectChannel(null, env) == InstallChannel.Portable, "An unknown executable path is portable.");
+
+        // ---- 5. THE FEED: newer, equal, offline ------------------------------------------------------
+        const string shaAsset = "OmtCaptureStudio-v1.0.0.23-Setup.exe.sha256";
+        string feed = FakeReleaseJson("v1.0.0.23", "OmtCaptureStudio-v1.0.0.23-Setup.exe", 73017804, shaAsset);
+
+        var transport = new FakeUpdateTransport();
+        transport.Strings[UpdateService.ReleasesApiUrl] = feed;
+        var svc = new UpdateService(transport, currentVersion: () => "1.0.0.22",
+            executablePath: () => @"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe",
+            launchProcess: _ => throw new InvalidOperationException("A check must never launch anything."),
+            tempDirectory: () => Path.GetTempPath());
+
+        UpdateCheckResult newer = svc.CheckForUpdateAsync().GetAwaiter().GetResult();
+        Expect(newer.Outcome == UpdateCheckOutcome.UpdateAvailable, $"A newer tag must be an available update; got {newer.Outcome}.");
+        Expect(newer.Release is { Version: "1.0.0.23" }, $"The release version must be normalised without the v; got {newer.Release?.Version}.");
+        Expect(newer.Release!.SetupAssetName == "OmtCaptureStudio-v1.0.0.23-Setup.exe", "The Setup asset must be matched by name.");
+        Expect(newer.Release.SetupSha256Url is not null, "The matching .sha256 sidecar must be located alongside the Setup asset.");
+
+        // once per launch: a second check is refused WITHOUT touching the network
+        int callsAfterFirst = transport.StringCalls;
+        UpdateCheckResult second = svc.CheckForUpdateAsync().GetAwaiter().GetResult();
+        Expect(second.Outcome == UpdateCheckOutcome.AlreadyCheckedThisLaunch, $"A second check in one launch must be refused; got {second.Outcome}.");
+        Expect(transport.StringCalls == callsAfterFirst, $"A refused second check must make NO network call; saw {transport.StringCalls} total.");
+
+        var equalTransport = new FakeUpdateTransport();
+        equalTransport.Strings[UpdateService.ReleasesApiUrl] = FakeReleaseJson("v1.0.0.22", "OmtCaptureStudio-v1.0.0.22-Setup.exe", 1, "x.sha256");
+        var equalSvc = new UpdateService(equalTransport, currentVersion: () => "1.0.0.22");
+        Expect(equalSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Outcome == UpdateCheckOutcome.UpToDate,
+            "An equal tag must report up to date, not an update.");
+
+        var offlineTransport = new FakeUpdateTransport { Offline = true };
+        var offlineSvc = new UpdateService(offlineTransport, currentVersion: () => "1.0.0.22");
+        UpdateCheckResult offline = offlineSvc.CheckForUpdateAsync().GetAwaiter().GetResult();
+        Expect(offline.Outcome == UpdateCheckOutcome.Unreachable, $"An unreachable API must be an ordinary skip; got {offline.Outcome}.");
+
+        var junkTransport = new FakeUpdateTransport();
+        junkTransport.Strings[UpdateService.ReleasesApiUrl] = "{\"not\":\"a release\"}";
+        var junkSvc = new UpdateService(junkTransport, currentVersion: () => "1.0.0.22");
+        Expect(junkSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Outcome == UpdateCheckOutcome.Unreachable,
+            "A Github shape change must degrade to no-update, never to a crash.");
+
+        // ---- 6. DOWNLOAD + SHA-256 VERIFICATION ------------------------------------------------------
+        byte[] payload = System.Text.Encoding.UTF8.GetBytes("pretend-installer-payload");
+        string goodHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payload)).ToLowerInvariant();
+
+        var dl = new FakeUpdateTransport();
+        dl.Strings[UpdateService.ReleasesApiUrl] = feed;
+        dl.Strings["https://dl.example/" + shaAsset] = goodHash + "  OmtCaptureStudio-v1.0.0.23-Setup.exe";
+        dl.Bytes["https://dl.example/OmtCaptureStudio-v1.0.0.23-Setup.exe"] = payload;
+        string dlDir = Path.Combine(Path.GetTempPath(), "omt-dl-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dlDir);
+        var dlSvc = new UpdateService(dl, currentVersion: () => "1.0.0.22", tempDirectory: () => dlDir);
+        UpdateRelease rel = dlSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!;
+        string? verified = dlSvc.DownloadAndVerifyAsync(rel).GetAwaiter().GetResult();
+        Expect(verified is not null && File.Exists(verified), $"A matching hash must yield a verified installer path; got {verified}.");
+        Expect(File.ReadAllBytes(verified!).SequenceEqual(payload), "The verified file must be byte-identical to the downloaded payload.");
+
+        // the sidecar must be a real sha256sum line, not a bare word or a short hex
+        Expect(UpdateService.ParseSha256Sidecar(goodHash + "  name.exe") == goodHash, "A sha256sum sidecar must parse.");
+        Expect(UpdateService.ParseSha256Sidecar("deadbeef") is null, "A short hex string must be refused as a sidecar.");
+        Expect(UpdateService.ParseSha256Sidecar("zz".PadRight(64, 'z')) is null, "A non-hex 64-char string must be refused as a sidecar.");
+
+        // MISMATCH: refused, and nothing is left on disk for a later accident to run
+        var bad = new FakeUpdateTransport();
+        bad.Strings[UpdateService.ReleasesApiUrl] = feed;
+        bad.Strings["https://dl.example/" + shaAsset] = new string('a', 64);
+        bad.Bytes["https://dl.example/OmtCaptureStudio-v1.0.0.23-Setup.exe"] = payload;
+        // Its OWN directory: the success case above legitimately wrote the same file name into dlDir, so
+        // asserting "nothing is on disk" there would test the previous step, not this one.
+        string badDir = Path.Combine(Path.GetTempPath(), "omt-dl-bad-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(badDir);
+        var badSvc = new UpdateService(bad, currentVersion: () => "1.0.0.22", tempDirectory: () => badDir);
+        string? refused = badSvc.DownloadAndVerifyAsync(badSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!).GetAwaiter().GetResult();
+        Expect(refused is null, "A hash mismatch must refuse the download.");
+        Expect(!File.Exists(Path.Combine(badDir, "OmtCaptureStudio-v1.0.0.23-Setup.exe")),
+            "A failed verification must leave NO installer on disk - verification happens before the write.");
+        Expect(!Directory.EnumerateFiles(badDir).Any(), "A refused verification must leave its temp directory empty.");
+
+        // a release with no sidecar is refused outright rather than run unverified
+        var noSha = new FakeUpdateTransport();
+        noSha.Strings[UpdateService.ReleasesApiUrl] = FakeReleaseJson("v1.0.0.23", "OmtCaptureStudio-v1.0.0.23-Setup.exe", 1, "unused.sha256");
+        var noShaSvc = new UpdateService(noSha, currentVersion: () => "1.0.0.22", tempDirectory: () => dlDir);
+        Expect(noShaSvc.DownloadAndVerifyAsync(noShaSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!).GetAwaiter().GetResult() is null,
+            "A release that publishes no .sha256 must be refused, never installed unverified.");
+
+        // ---- 7. INSTALL: THE ARGUMENT SHAPE IS ASSERTED, NOTHING IS EVER LAUNCHED ---------------------
+        var psi = UpdateService.BuildInstallStartInfo(@"C:\Temp\OmtCaptureStudio-v1.0.0.23-Setup.exe");
+        Expect(psi.Arguments == "/VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS",
+            $"The silent-install switch set must be exact; got '{psi.Arguments}'.");
+        Expect(psi.UseShellExecute, "The installer is launched through the shell.");
+
+        string fakeInstaller = Path.Combine(dlDir, "OmtCaptureStudio-v1.0.0.23-Setup.exe");
+        File.WriteAllBytes(fakeInstaller, payload);
+
+        // installer channel + verified path + auto-install ON -> launched exactly once, with that path
+        string? launchedPath = null;
+        var onSvc = new UpdateService(transport, currentVersion: () => "1.0.0.22",
+            executablePath: () => @"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe",
+            launchProcess: p => { launchedPath = p; return true; },
+            tempDirectory: () => dlDir,
+            environment: env);
+        Expect(onSvc.TryStartInstall(fakeInstaller, out string onDetail), $"Auto-install ON must start the installer; got '{onDetail}'.");
+        Expect(launchedPath == fakeInstaller, $"The launcher must receive the VERIFIED path; got {launchedPath}.");
+
+        // PORTABLE: notify-only. The launcher must not even be called.
+        bool portableLaunched = false;
+        var portableSvc = new UpdateService(transport, currentVersion: () => "1.0.0.22",
+            executablePath: () => @"C:\Apps\OMT\OmtCaptureStudio.exe",
+            launchProcess: _ => { portableLaunched = true; return true; },
+            tempDirectory: () => dlDir,
+            environment: env);
+        Expect(!portableSvc.TryStartInstall(fakeInstaller, out string portableDetail),
+            "A portable copy must never self-replace.");
+        Expect(!portableLaunched, "The portable path must not launch the installer at all.");
+        Expect(portableDetail.Contains("portable", StringComparison.OrdinalIgnoreCase),
+            $"The portable refusal must say so plainly; got '{portableDetail}'.");
+
+        // no verified installer -> refused
+        Expect(!onSvc.TryStartInstall(null, out _), "An install with no verified installer must be refused.");
+
+        Directory.Delete(dlDir, recursive: true);
+        Directory.Delete(badDir, recursive: true);
+
+        Console.WriteLine(" -> version policy pure and four-part, feed parsed without a JSON dependency, once-per-launch cache honoured,");
+        Console.WriteLine("    SHA-256 verified BEFORE any write, install refused on portable and without a sidecar, arguments exact!");
+    }
+
     static void Expect(bool condition, string what)
     {
         if (!condition) throw new Exception(what);
@@ -1016,6 +1469,8 @@ class Program
             case "0.698": TestAppModeShell(); break;
             case "0.699": TestOmtAudioFrameGuard(); break;
             case "0.700": SecurityRegressionTable.RunAll(); break;
+            case "0.701": TestUpdateService(); break;
+            case "0.702": TestBroadcastCaptureStall(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");

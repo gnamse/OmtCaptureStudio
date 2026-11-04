@@ -41,6 +41,29 @@
 
                 <!-- Telemetry Readouts -->
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <!-- NET-023 update banner. Ask-first: it offers, it never installs on its own.
+                         Modelled on the input-loss banner's visual language but with the INFO accent,
+                         because an available update is not a fault. -->
+                    <Border x:Name="UpdateBanner" VerticalAlignment="Center" Margin="0,0,12,0"
+                            Background="{DynamicResource StudioAccent}" CornerRadius="{DynamicResource RadiusSm}" Padding="8,3"
+                            IsVisible="{CompiledBinding IsUpdateBannerVisible}">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Text="{CompiledBinding UpdateBannerText}" Foreground="{DynamicResource StudioTextOnAccent}"
+                                       FontSize="11" FontWeight="Bold" VerticalAlignment="Center"
+                                       AutomationProperties.LiveSetting="Polite"/>
+                            <Button x:Name="BtnInstallUpdate" Content="Install" FontSize="10" MinHeight="20" Padding="6,0" Margin="8,0,0,0"
+                                    VerticalAlignment="Center"
+                                    AutomationProperties.Name="Install the available update"
+                                    ToolTip.Tip="Download, verify and install the available update"
+                                    Command="{CompiledBinding InstallUpdateCommand}"/>
+                            <Button x:Name="BtnViewRelease" Content="Release notes" FontSize="10" MinHeight="20" Padding="6,0" Margin="6,0,0,0"
+                                    VerticalAlignment="Center"
+                                    AutomationProperties.Name="Open the release page for the available update"
+                                    ToolTip.Tip="Open the release page in your browser"
+                                    Command="{CompiledBinding ViewUpdateReleaseCommand}"/>
+                        </StackPanel>
+                    </Border>
+
                     <TextBlock x:Name="TxtAudioTelemetry" Text="{CompiledBinding AudioTelemetryText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0" AutomationProperties.LiveSetting="Polite"/>
                     <TextBlock Text="·" Foreground="{DynamicResource StudioBorderSubtle}" FontSize="11" VerticalAlignment="Center"/>
                     <TextBlock x:Name="TxtBitrate" Text="{CompiledBinding BitrateText}" Foreground="{DynamicResource StudioTextSecondary}" FontSize="11" Margin="12,0" AutomationProperties.LiveSetting="Polite"/>
@@ -70,6 +93,14 @@
                                 AutomationProperties.Name="Toggle FFmpeg diagnostics drawer"
                                 ToolTip.Tip="Show the FFmpeg diagnostic output and the last stop verdict"
                                 Command="{CompiledBinding ToggleDiagnosticsDrawerCommand}"/>
+                        <Button x:Name="BtnCheckForUpdates" Content="Check for updates" FontSize="10" MinHeight="22" Padding="6,0" Margin="8,0,0,0" VerticalAlignment="Center"
+                                AutomationProperties.Name="Check for updates"
+                                ToolTip.Tip="Ask GitHub for the latest release"
+                                Command="{CompiledBinding CheckForUpdatesCommand}"/>
+                        <CheckBox x:Name="ChkAutoInstallUpdates" Content="Auto-install updates" FontSize="10" MinHeight="22" Margin="8,0,0,0" VerticalAlignment="Center"
+                                  IsChecked="{CompiledBinding UpdatesAutoInstall}"
+                                  AutomationProperties.Name="Install updates automatically"
+                                  ToolTip.Tip="Off by default. When on, a found update is downloaded, verified and installed."/>
                     </StackPanel>
 
                     <TextBlock x:Name="TxtVersion" Text="{CompiledBinding VersionText}" Foreground="{DynamicResource StudioTextMuted}" FontSize="11" Margin="12,0,0,0"/>

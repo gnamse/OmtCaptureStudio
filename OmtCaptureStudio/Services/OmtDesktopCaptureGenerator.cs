@@ -8,6 +8,7 @@ using System.Threading;
 using libomtnet;
 
 using OmtCaptureStudio.Services.Audio;
+using OmtCaptureStudio.Services.Forensics;
 
 namespace OmtCaptureStudio.Services;
 
@@ -19,6 +20,13 @@ namespace OmtCaptureStudio.Services;
 public sealed class OmtDesktopCaptureGenerator : IDisposable
 {
     private const int StopJoinTimeoutMs = 1000;
+
+    /// <summary>
+    /// DIAG-BROADCAST: how long the send loop waits for the FIRST captured frame before reporting that
+    /// the broadcast is carrying nothing. Deliberately generous - a session lock or a DXGI mode change can
+    /// take seconds to settle, and a false "capture unavailable" alarm would be worse than a late one.
+    /// </summary>
+    public const int DefaultFirstFrameTimeoutMs = 10_000;
 
     private readonly string _sourceName;
     private readonly int _fps;
@@ -34,8 +42,23 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
     private volatile bool _isRunning;
     private bool _started;
     private bool _disposed;
+    private int _hasProducedFrames;
+
+    /// <summary>The first-frame window; injectable so a headless test does not have to wait 10 s.</summary>
+    private readonly int _firstFrameTimeoutMs;
 
     public bool IsRunning => _isRunning;
+
+    /// <summary>
+    /// DIAG-BROADCAST: raised ONCE per run when no frame has been captured within the first-frame window.
+    /// Carries the operator-facing message verbatim, so a presenter can put it on the status line without
+    /// re-writing it. Raised on the SEND thread - a subscriber that touches the UI must marshal.
+    /// </summary>
+    public event Action<string>? CaptureStalled;
+
+    /// <summary>True once at least one real frame has been captured (observability, and testable).</summary>
+    public bool HasProducedFrames => Volatile.Read(ref _hasProducedFrames) == 1;
+
     public string SourceName => _sourceName;
     public string? Url => _sender?.URL;
     public string? Address => _sender?.Address;
@@ -65,13 +88,15 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         string sourceName = "OmtCaptureStudio_DesktopCapture",
         int fps = 30,
         IHostAudioSource? audioSource = null,
-        string? bindIpAddress = null)
+        string? bindIpAddress = null,
+        int firstFrameTimeoutMs = DefaultFirstFrameTimeoutMs)
     {
         _frameSource = frameSource ?? throw new ArgumentNullException(nameof(frameSource));
         _sourceName = sourceName;
         _fps = fps > 0 ? fps : 30;
         _audioSource = audioSource ?? new SilentHostAudioSource();
         _bindIpAddress = string.IsNullOrWhiteSpace(bindIpAddress) ? null : bindIpAddress;
+        _firstFrameTimeoutMs = firstFrameTimeoutMs > 0 ? firstFrameTimeoutMs : DefaultFirstFrameTimeoutMs;
     }
 
     /// <summary>
@@ -193,6 +218,29 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         }
     }
 
+    /// <summary>
+    /// DIAG-BROADCAST: the operator-facing text for a capture that never starts. Names the provider and
+    /// states the CONSEQUENCE, because "no video" is only half of it - audio is skipped too.
+    /// </summary>
+    public string BuildNoFramesMessage(IFrameSource capturer)
+    {
+        string provider;
+        try { provider = capturer.GetType().Name; }
+        catch (Exception) { provider = "the capture provider"; }
+
+        // The most diagnostic sentence available for this symptom class: not just that capture failed,
+        // but whether it is running on the degraded GDI path. Read through the interface (the DIM keeps
+        // this working for a provider with no such concept).
+        string degradation = capturer.IsUsingFallbackCapture
+            ? " (DXGI Desktop Duplication unavailable, using GDI fallback)"
+            : string.Empty;
+
+        return $"Broadcast is running but no frames are being captured (screen capture unavailable). " +
+               $"'{provider}' has not produced a single frame in {_firstFrameTimeoutMs / 1000} s{degradation}. " +
+               $"Receivers will see this source advertised as '{_sourceName}' but blank, and NO audio is being " +
+               "sent either, because the send loop skips both streams until the first frame arrives.";
+    }
+
     private void ApplyInterfaceBlockerSocketsLocked(int port, string? allowedIp)
     {
         ReleaseInterfaceBlockerSocketsLocked();
@@ -269,6 +317,10 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         IntPtr pAudio = audioHandle.AddrOfPinnedObject();
 
         Stopwatch sw = Stopwatch.StartNew();
+        // Separate from `sw` on purpose: `sw` is the PACING clock, so reusing it for a diagnostic would
+        // change when frames go out.
+        Stopwatch firstFrameWatch = Stopwatch.StartNew();
+        bool stallReported = false;
         long frameIndex = 0;
         bool hasFrame = false;
 
@@ -291,9 +343,23 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
                 if (capturer.TryCaptureFrame())
                 {
                     hasFrame = true;
+                    Volatile.Write(ref _hasProducedFrames, 1);
                 }
                 else if (!hasFrame)
                 {
+                    // DIAG-BROADCAST: this branch used to fail COMPLETELY SILENTLY. Sitting before BOTH
+                    // sends, it means a provider that never yields a frame puts neither video NOR audio on
+                    // the wire while mDNS still advertises the source - the operator sees a source that is
+                    // listed, selectable and blank, with nothing in any log to explain it. Report once.
+                    if (!stallReported && firstFrameWatch.ElapsedMilliseconds >= _firstFrameTimeoutMs)
+                    {
+                        stallReported = true;
+                        string stalled = BuildNoFramesMessage(capturer);
+                        AppLogger.LogError(stalled);
+                        try { CaptureStalled?.Invoke(stalled); }
+                        catch (Exception ex) { AppLogger.LogError("A CaptureStalled subscriber threw.", ex); }
+                    }
+
                     continue; // no frame captured yet
                 }
 
