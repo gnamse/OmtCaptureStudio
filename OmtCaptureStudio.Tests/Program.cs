@@ -656,6 +656,11 @@ class Program
     /// </summary>
     static void RunDefaultSuite()
     {
+        // SEC-04 (R25/R26): PRODUCTION resolves ffmpeg once at startup - App.axaml.cs calls
+        // FfmpegPreflight.Run and the execution sink consumes that proven path. The suite must do the same
+        // before any step that starts a take, because the sink no longer falls back to a bare "ffmpeg"
+        // resolved through PATH. Without this the recording steps fail by design, not by accident.
+        FfmpegPreflight.Run(AppContext.BaseDirectory);
         Console.WriteLine("====================================================");
         Console.WriteLine("  OMT Capture Studio - End-to-End Automated Test");
         Console.WriteLine("====================================================");
@@ -690,8 +695,17 @@ class Program
         TestScheduledSegmentedCapture();
         TestCrashForensics();
         TestFfmpegPreflightAndForensicsFallback();
+
+        // SEC-04 (R26): re-resolve here, deliberately. The preflight STEP above exercises the failure
+        // scenarios (missing, broken, throwing, empty PATH) and each one legitimately CLEARS
+        // FfmpegPreflight.ResolvedPath - so the proven path established at the head of this suite is gone by
+        // the time a take is started, and the sink now refuses to search PATH. Production never clears it
+        // (nothing re-runs the preflight), so the faithful mirror is to re-resolve after the step that
+        // deliberately breaks it, immediately before the steps that start real takes.
+        FfmpegPreflight.Run(AppContext.BaseDirectory);
         TestCompositeRecordingSink();
         TestCompositeRecordingWiring();
+        TestFfmpegSinkPathDiscipline();
         TestProgressiveDisclosure();
         TestOperatorSettings();
         TestScheduledStopAndRemainingTime();
@@ -1088,6 +1102,61 @@ class Program
         public void Dispose() { }
     }
 
+    /// <summary>
+    /// SEC-04 (R25/R26). Verified BY CONSEQUENCE, as security's re-audit requires: with no proven ffmpeg,
+    /// the REAL recording path must refuse - and must never fall back to a bare "ffmpeg" resolved through
+    /// the current directory and PATH (CWE-427). The positive direction is covered by the composite tests,
+    /// which start a real take and would fail here if the sink could not reach a resolved binary.
+    /// </summary>
+    static void TestFfmpegSinkPathDiscipline()
+    {
+        Console.WriteLine("\n[Step 0.703] Verifying the ffmpeg execution sink never searches PATH (R25/R26, SEC-04b)...");
+
+        // --- source shape: the fallback must not EXIST, and the two rules must be present -------------
+        // NOTE: this step deliberately verifies BY CONSEQUENCE rather than by inspecting source text.
+        // Security's re-audit asked for the sink's path selection to be driven end-to-end, and a
+        // text-shape assertion is the weaker check anyway - it can pass on a file that merely MENTIONS the
+        // right identifiers (this file's own comments do). The source is reported for the reader, not
+        // asserted on.
+        string? hostSource = FindRepoSource("OmtCaptureStudio/Services/Sinks/FfmpegProcessHost.cs");
+        Console.WriteLine(hostSource is null
+            ? "   [note] repo source not reachable (installed-binary run) - consequence checks below still run."
+            : "   [note] sink source located; the bare-name fallback's absence is asserted by CONSEQUENCE below.");
+
+        // --- the consequence, through the real recording path -----------------------------------------
+        FfmpegPreflightResult none = FfmpegPreflight.Run(
+            AppContext.BaseDirectory, fileExists: _ => false, versionProbe: _ => null, pathVariable: string.Empty);
+        Expect(!none.IsAvailable, "A probe with no candidates must report ffmpeg unavailable.");
+        Expect(FfmpegPreflight.ResolvedPath is null,
+            "R26: a failed preflight must CLEAR the resolved path so a stale path can never be executed.");
+
+        using (var session = new CaptureSession())
+        {
+            session.Connect(new SyntheticPatternSource());
+
+            int ticks = 0;
+            while (session.RecordingFramesWritten == 0 && ticks < 60) { Thread.Sleep(50); ticks++; }
+
+            var cfg = new RecordingConfig
+            {
+                OutputDirectory = Path.Combine(Path.GetTempPath(), "omt-r25-probe"),
+                FilenamePrefix = "R25"
+            };
+
+            Expect(!session.StartRecording(cfg),
+                "R25/R26: with no PROVEN ffmpeg the take must NOT start - and must never fall back to a " +
+                "PATH-resolved 'ffmpeg'. A take that starts here means the sink searched.");
+        }
+
+        // --- restore, so every step AFTER this one still has a proven binary ---------------------------
+        FfmpegPreflight.Run(AppContext.BaseDirectory);
+        Expect(FfmpegPreflight.ResolvedPath is not null,
+            "The preflight must be re-established for the steps that follow.");
+
+        Console.WriteLine(" -> no bare-name fallback in the sink, the preflight is the single resolution authority,");
+        Console.WriteLine("    a failed preflight clears the path, and a real take is REFUSED rather than PATH-searched!");
+    }
+
     static void TestBroadcastCaptureStall()
     {
         Console.WriteLine("\n[Step 0.702] Verifying a capture provider that never yields is REPORTED, not silent (DIAG-BROADCAST)...");
@@ -1332,20 +1401,152 @@ class Program
         var psi = UpdateService.BuildInstallStartInfo(@"C:\Temp\OmtCaptureStudio-v1.0.0.23-Setup.exe");
         Expect(psi.Arguments == "/VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS",
             $"The silent-install switch set must be exact; got '{psi.Arguments}'.");
-        Expect(psi.UseShellExecute, "The installer is launched through the shell.");
+        // Brief amendment 2: CreateProcess, NOT the shell. UseShellExecute=true honours Mark-of-the-Web,
+        // so it would turn our own deliberate MotW mark into a SmartScreen prompt on every update.
+        Expect(!psi.UseShellExecute,
+            "The installer must be launched via CreateProcess - UseShellExecute=true would honour the MotW mark we apply.");
+        Expect(psi.WorkingDirectory == Path.GetDirectoryName(@"C:\Temp\OmtCaptureStudio-v1.0.0.23-Setup.exe"),
+            $"The working directory must be the staged file's folder; got '{psi.WorkingDirectory}'.");
+        Expect(psi.Arguments == "/VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS",
+            "The silent switch set must survive the launch-mode change unchanged.");
 
         string fakeInstaller = Path.Combine(dlDir, "OmtCaptureStudio-v1.0.0.23-Setup.exe");
         File.WriteAllBytes(fakeInstaller, payload);
 
-        // installer channel + verified path + auto-install ON -> launched exactly once, with that path
+        // installer channel + auto-install ON -> download, verify, re-verify ON DISK, then launch
+        var onTransport = new FakeUpdateTransport();
+        onTransport.Strings[UpdateService.ReleasesApiUrl] = feed;
+        onTransport.Strings["https://dl.example/" + shaAsset] = goodHash + "  OmtCaptureStudio-v1.0.0.23-Setup.exe";
+        onTransport.Bytes["https://dl.example/OmtCaptureStudio-v1.0.0.23-Setup.exe"] = payload;
+
         string? launchedPath = null;
-        var onSvc = new UpdateService(transport, currentVersion: () => "1.0.0.22",
+        var onSvc = new UpdateService(onTransport, currentVersion: () => "1.0.0.22",
             executablePath: () => @"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe",
             launchProcess: p => { launchedPath = p; return true; },
             tempDirectory: () => dlDir,
+            stagingDirectory: () => dlDir,
             environment: env);
-        Expect(onSvc.TryStartInstall(fakeInstaller, out string onDetail), $"Auto-install ON must start the installer; got '{onDetail}'.");
-        Expect(launchedPath == fakeInstaller, $"The launcher must receive the VERIFIED path; got {launchedPath}.");
+
+        UpdateRelease onRel = onSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!;
+        string? staged = onSvc.DownloadAndVerifyAsync(onRel).GetAwaiter().GetResult();
+        Expect(staged is not null, "The install path requires a download that verified first.");
+
+        // R27: the staged name carries a nonce, so it cannot be pre-created or predicted
+        Expect(Path.GetFileName(staged!).EndsWith("-OmtCaptureStudio-v1.0.0.23-Setup.exe", StringComparison.Ordinal),
+            $"The staged file must keep the asset name behind a nonce; got '{Path.GetFileName(staged)}'.");
+        Expect(Path.GetFileName(staged!) != "OmtCaptureStudio-v1.0.0.23-Setup.exe",
+            "The staged name must be non-predictable, not the bare asset name.");
+
+        // R27/R19: an installer this session never verified must not be launched at all
+        Expect(!onSvc.TryStartInstall(fakeInstaller, out _),
+            "R27: an installer this session did not verify must be refused, even though it exists.");
+
+        Expect(onSvc.TryStartInstall(staged, out string onDetail), $"Auto-install ON must start the verified installer; got '{onDetail}'.");
+        Expect(launchedPath == staged, $"The launcher must receive the VERIFIED staged path; got {launchedPath}.");
+
+        // R27 TOCTOU: swap the staged file AFTER verification -> the launch must be refused
+        File.WriteAllBytes(staged!, System.Text.Encoding.UTF8.GetBytes("swapped-after-verification"));
+        Expect(!onSvc.TryStartInstall(staged, out string swapDetail),
+            "R27: a staged installer swapped after verification must be refused (the verify->launch TOCTOU).");
+        Expect(swapDetail.Contains("changed on disk"), $"The refusal must say why; got '{swapDetail}'.");
+
+        // ---- R28/amendment 3: the ERROR_ELEVATION_REQUIRED (740) path --------------------------------
+        // If PrivilegesRequired ever moves from 'lowest' to 'admin', the compiled manifest becomes
+        // requireAdministrator, CreateProcess fails with 740, and auto-update would die for machine-wide
+        // installs while every per-user test still passed. These two cases pin that it does not go silent.
+        var psiElevated = UpdateService.BuildElevatedInstallStartInfo(@"C:\Temp\OmtCaptureStudio-v1.0.0.23-Setup.exe");
+        Expect(psiElevated.UseShellExecute && psiElevated.Verb == "runas",
+            $"The elevated relaunch must use the runas verb through the shell; got verb='{psiElevated.Verb}'.");
+        Expect(psiElevated.Arguments == "/VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS",
+            "The elevated relaunch must carry the same silent switch set.");
+
+        int normalLaunches740 = 0;
+        int elevatedLaunches = 0;
+        var elevationTransport = new FakeUpdateTransport();
+        elevationTransport.Strings[UpdateService.ReleasesApiUrl] = feed;
+        elevationTransport.Strings["https://dl.example/" + shaAsset] = goodHash + "  OmtCaptureStudio-v1.0.0.23-Setup.exe";
+        elevationTransport.Bytes["https://dl.example/OmtCaptureStudio-v1.0.0.23-Setup.exe"] = payload;
+
+        var elevDir = Path.Combine(Path.GetTempPath(), "omt-elev-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(elevDir);
+        var elevSvc = new UpdateService(elevationTransport, currentVersion: () => "1.0.0.22",
+            executablePath: () => @"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe",
+            launchProcess: _ =>
+            {
+                normalLaunches740++;
+                // exactly what CreateProcess does when the manifest requires elevation
+                throw new System.ComponentModel.Win32Exception(740);
+            },
+            launchElevated: _ => { elevatedLaunches++; return true; },
+            tempDirectory: () => elevDir,
+            stagingDirectory: () => elevDir,
+            environment: env);
+
+        UpdateRelease elevRel = elevSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!;
+        string? elevStaged = elevSvc.DownloadAndVerifyAsync(elevRel).GetAwaiter().GetResult();
+        Expect(elevStaged is not null, "The 740 case needs a verified staged installer.");
+
+        Expect(elevSvc.TryStartInstall(elevStaged, out string elevDetail),
+            $"A 740 must trigger the runas relaunch and report success; got '{elevDetail}'.");
+        Expect(elevatedLaunches == 1, $"The runas relaunch must be attempted exactly ONCE; got {elevatedLaunches}.");
+        Expect(normalLaunches740 == 1, $"The normal launch must be attempted once and not retried; got {normalLaunches740}.");
+        Expect(elevDetail.Contains("elevation"), $"The detail must say elevation was involved; got '{elevDetail}'.");
+
+        // and when the runas relaunch ALSO fails: report loudly, never loop
+        int normalLaunchesFail = 0;
+        int elevatedFailures = 0;
+        var failSvc = new UpdateService(elevationTransport, currentVersion: () => "1.0.0.22",
+            executablePath: () => @"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe",
+            launchProcess: _ => { normalLaunchesFail++; throw new System.ComponentModel.Win32Exception(740); },
+            launchElevated: _ => { elevatedFailures++; return false; },
+            tempDirectory: () => elevDir,
+            stagingDirectory: () => elevDir,
+            environment: env);
+
+        UpdateRelease failRel = failSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!;
+        string? failStaged = failSvc.DownloadAndVerifyAsync(failRel).GetAwaiter().GetResult();
+        Expect(!failSvc.TryStartInstall(failStaged, out string failDetail),
+            "A failed runas relaunch must be reported as a failure, not swallowed.");
+        Expect(normalLaunchesFail == 1 && elevatedFailures == 1,
+            $"Neither launcher may be retried; got normal={normalLaunchesFail}, elevated={elevatedFailures}.");
+        Expect(failDetail.Contains("administrator") && failDetail.Contains("manually"),
+            $"The operator must be told to install it manually; got '{failDetail}'.");
+        Directory.Delete(elevDir, recursive: true);
+
+        // R27 traversal: a release-supplied name with separators or '..' must never reach a path
+        // R27: the REAL asset name, spelled as build-release.ps1 and the .iss actually write it
+        // (lowercase 'mt'). This is the shape that must never fail closed - a case-SENSITIVE prefix check
+        // against a misspelled literal would reject every update forever, silently reporting "up to date".
+        Expect(UpdateService.IsSafeAssetName("OmtCaptureStudio-v1.0.0.23-Setup.exe"),
+            "The REAL release asset name must be accepted.");
+        // CANARY: the misspelling the brief carried. The contract is suffix+version based, not a fixed
+        // prefix, so this is ALSO accepted - deliberately. Pinning that here documents the decision: a
+        // rename upstream degrades to 'still works', never to 'fails closed with no error surface'.
+        Expect(UpdateService.IsSafeAssetName("OMTCaptureStudio-v1.0.0.23-Setup.exe"),
+            "A differently-cased name must not be rejected - matching is OrdinalIgnoreCase by contract.");
+        Expect(!UpdateService.IsSafeAssetName(@"..\..\evil\OmtCaptureStudio-v1.0.0.23-Setup.exe"), "A traversing name is refused.");
+        Expect(!UpdateService.IsSafeAssetName("sub/dir/OmtCaptureStudio-v1.0.0.23-Setup.exe"), "A slashed name is refused.");
+        Expect(!UpdateService.IsSafeAssetName(".."), "A bare '..' is refused.");
+        Expect(!UpdateService.IsSafeAssetName(null), "A null name is refused.");
+
+        // the same, through the whole feed: the real name must yield an installer asset
+        var realFeed = new FakeUpdateTransport();
+        realFeed.Strings[UpdateService.ReleasesApiUrl] = FakeReleaseJson(
+            "v1.0.0.23", "OmtCaptureStudio-v1.0.0.23-Setup.exe", 73017804,
+            "OmtCaptureStudio-v1.0.0.23-Setup.exe.sha256");
+        var realSvc = new UpdateService(realFeed, currentVersion: () => "1.0.0.22");
+        UpdateRelease realRel = realSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!;
+        Expect(realRel.SetupAssetName == "OmtCaptureStudio-v1.0.0.23-Setup.exe",
+            $"The real release shape must resolve to an installer; got '{realRel.SetupAssetName}'.");
+        Expect(realRel.SetupSha256Url is not null, "and its sidecar must be located.");
+
+        var trav = new FakeUpdateTransport();
+        trav.Strings[UpdateService.ReleasesApiUrl] = FakeReleaseJson(
+            "v1.0.0.23", @"..\..\evil\OmtCaptureStudio-v1.0.0.23-Setup.exe", 1, "x.sha256");
+        var travSvc = new UpdateService(trav, currentVersion: () => "1.0.0.22");
+        UpdateRelease? travRel = travSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release;
+        Expect(travRel is null || travRel.SetupAssetName is null,
+            $"A release naming a traversing asset must yield no installer at all; got '{travRel?.SetupAssetName}'.");
 
         // PORTABLE: notify-only. The launcher must not even be called.
         bool portableLaunched = false;
@@ -1354,7 +1555,7 @@ class Program
             launchProcess: _ => { portableLaunched = true; return true; },
             tempDirectory: () => dlDir,
             environment: env);
-        Expect(!portableSvc.TryStartInstall(fakeInstaller, out string portableDetail),
+        Expect(!portableSvc.TryStartInstall(staged, out string portableDetail),
             "A portable copy must never self-replace.");
         Expect(!portableLaunched, "The portable path must not launch the installer at all.");
         Expect(portableDetail.Contains("portable", StringComparison.OrdinalIgnoreCase),
@@ -1471,6 +1672,7 @@ class Program
             case "0.700": SecurityRegressionTable.RunAll(); break;
             case "0.701": TestUpdateService(); break;
             case "0.702": TestBroadcastCaptureStall(); break;
+            case "0.703": TestFfmpegSinkPathDiscipline(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");

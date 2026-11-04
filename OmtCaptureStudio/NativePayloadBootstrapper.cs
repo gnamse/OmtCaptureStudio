@@ -1,25 +1,41 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
+using OmtCaptureStudio.Services.Forensics;
 
 namespace OmtCaptureStudio;
 
 /// <summary>
 /// Ensures all native C++ runtimes and codecs are available locally.
-/// Follows the official .NET single-file extraction model:
-/// If running as a standalone single-file binary, extracts embedded native DLLs to %TEMP%\.net\OmtCaptureStudio\{hash}\
-/// and configures the DLL search directory before any native P/Invoke or Avalonia rendering occurs.
+///
+/// <para><b>SEC-04 (R18-R24).</b> This used to trust an extracted file whose <i>byte length</i> matched
+/// the embedded one, and it extracted into a user-writable <c>%TEMP%</c> directory that it then handed to
+/// a process-wide <c>SetDllDirectory</c>. Both halves were exploitable: a same-size planted file was
+/// never re-extracted, and a planted file of any size survived a failed write because the extraction
+/// failure was swallowed. Every input to the old directory name (version string, library names, library
+/// lengths) is public, so the path was computable offline.</para>
+///
+/// <para>The rules now: content decides, not length (R18); the directory name is derived from the
+/// payload CONTENT (R23); extraction goes to a per-user protected directory, never a shared temp path
+/// (R22); a file in a pre-existing directory is validated by content before it is used (R23); an
+/// extraction failure is a hard, reported failure rather than a silent skip (R20); the load is verified
+/// at load time with the file held open across the check and the load, closing the verify-then-load race
+/// (R19); <c>LoadLibrary</c>'s result is checked and reported (R21); and the process-wide DLL search path
+/// is never pointed at a writable directory (R24) - every library is loaded by ABSOLUTE PATH.</para>
 /// </summary>
 public static class NativePayloadBootstrapper
 {
-    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern bool SetDllDirectory(string lpPathName);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
-    private static extern IntPtr LoadLibrary(string lpLibFileName);
+    // R24: no SetDllDirectory at all. Loading by absolute path makes the process search path irrelevant
+    // for these libraries, so widening it - especially to a writable location - buys nothing and is the
+    // documented CWE-427 sink this pass exists to remove.
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibraryW(string lpLibFileName);
 
     private static readonly string[] NativeLibraries = new[]
     {
@@ -31,110 +47,360 @@ public static class NativePayloadBootstrapper
         "av_libglesv2.dll"
     };
 
+    /// <summary>Handles held open for the process lifetime so a verified file cannot be swapped (R19).</summary>
+    private static readonly List<FileStream> VerifiedHandles = new();
+
+    private static readonly object Gate = new();
+
+    private static bool _initialized;
+
     public static void Initialize()
     {
+        lock (Gate)
+        {
+            if (_initialized) return;
+            _initialized = true;
+        }
+
         string baseDir = AppContext.BaseDirectory;
-        
-        // If all libraries already exist in the base directory (e.g. dev/loose directory), use them directly
-        bool allExistInBase = true;
-        foreach (var lib in NativeLibraries)
+        Assembly assembly = Assembly.GetExecutingAssembly();
+
+        // Fast path unchanged in spirit: a loose directory that already carries the payload is used in
+        // place. It is no longer TRUSTED on existence alone - each file is content-verified (R23) and the
+        // whole set must verify, or we fall through to the verified extraction path.
+        if (AllLibrariesPresentAndValid(baseDir, assembly))
         {
-            if (!File.Exists(Path.Combine(baseDir, lib)))
-            {
-                allExistInBase = false;
-                break;
-            }
+            LoadAll(baseDir);
+            return;
         }
 
-        string nativeDir = baseDir;
+        string nativeDir = EnsureExtractedDirectory(assembly);
+        LoadAll(nativeDir);
+    }
 
-        if (!allExistInBase)
-        {
-            // Official .NET Single-File convention: %TEMP%\.net\OmtCaptureStudio\{hash}\
-            string payloadHash = ComputePayloadHash();
-            nativeDir = Path.Combine(Path.GetTempPath(), ".net", "OmtCaptureStudio", payloadHash);
-            EnsureExtracted(nativeDir);
-        }
+    // ------------------------------------------------------------------ verification primitives
 
-        SetDllDirectory(nativeDir);
+    /// <summary>
+    /// R18/R23: the identity of the payload is its CONTENT. Streamed so an embedded 40 MB library is not
+    /// materialised as a byte array just to be hashed.
+    /// </summary>
+    private static string HashOfResource(Assembly assembly, string lib)
+    {
+        using Stream? stream = assembly.GetManifestResourceStream($"NativePayload.{lib}");
+        if (stream is null)
+            throw new InvalidOperationException($"Native payload '{lib}' is not embedded in this build.");
 
-        // Pre-load libraries in dependency order to ensure immediate resolution
-        foreach (var lib in NativeLibraries)
-        {
-            string fullPath = Path.Combine(nativeDir, lib);
-            if (File.Exists(fullPath))
-            {
-                LoadLibrary(fullPath);
-            }
-        }
+        using var sha = SHA256.Create();
+        return Convert.ToHexString(sha.ComputeHash(stream)).ToLowerInvariant();
     }
 
     /// <summary>
-    /// Computes a deterministic SHA-256 hash from the assembly version and embedded resource sizes.
-    /// Changes automatically whenever code or embedded native binaries change, with zero hardcoded version strings.
+    /// R19: hashes an OPEN handle, not a path. The caller keeps the handle for the process lifetime, so
+    /// the bytes that were verified are the bytes that stay on disk - a verify-then-load pair with no gap.
     /// </summary>
-    private static string ComputePayloadHash()
+    private static string HashOfHandle(FileStream handle)
     {
-        var assembly = Assembly.GetExecutingAssembly();
+        long position = handle.Position;
+        handle.Position = 0;
         using var sha = SHA256.Create();
-        using var ms = new MemoryStream();
-        using var writer = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true);
-
-        // Include assembly version
-        string versionStr = assembly.GetName().Version?.ToString() ?? "1.0.0.0";
-        writer.Write(versionStr);
-
-        // Include metadata for each embedded native library
-        foreach (var lib in NativeLibraries)
-        {
-            string resourceName = $"NativePayload.{lib}";
-            using var stream = assembly.GetManifestResourceStream(resourceName);
-            writer.Write(lib);
-            writer.Write(stream?.Length ?? 0L);
-        }
-
-        writer.Flush();
-        ms.Position = 0;
-
-        byte[] hashBytes = sha.ComputeHash(ms);
-        return Convert.ToHexString(hashBytes)[..16].ToLowerInvariant();
+        string hash = Convert.ToHexString(sha.ComputeHash(handle)).ToLowerInvariant();
+        handle.Position = position;
+        return hash;
     }
 
-    private static void EnsureExtracted(string targetDir)
+    /// <summary>
+    /// R23: the DIRECTORY name is content-addressed, so a directory can only be reused by a build whose
+    /// payload is byte-identical. The old name mixed the version string and the libraries' LENGTHS -
+    /// every one of which is public, so the location was predictable without touching the machine.
+    /// </summary>
+    private static string ComputeContentHash(Assembly assembly)
+    {
+        using var sha = SHA256.Create();
+        using var ms = new MemoryStream();
+        using (var writer = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true))
+        {
+            foreach (string lib in NativeLibraries)
+            {
+                writer.Write(lib);
+                writer.Write(HashOfResource(assembly, lib));   // content, never length
+            }
+        }
+
+        ms.Position = 0;
+        return Convert.ToHexString(sha.ComputeHash(ms))[..16].ToLowerInvariant();
+    }
+
+    // ------------------------------------------------------------------ target directory (R22/R23)
+
+    /// <summary>
+    /// R22: a per-user protected directory, never a shared temp path. Returns a directory whose files are
+    /// all content-verified; throws rather than returning one that is not (R20).
+    /// </summary>
+    private static string EnsureExtractedDirectory(Assembly assembly)
+    {
+        string root = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "OmtCaptureStudio",
+            "native");
+
+        Directory.CreateDirectory(root);
+
+        string contentHash = ComputeContentHash(assembly);
+        string target = Path.Combine(root, contentHash);
+
+        if (Directory.Exists(target) && !DirectoryIsTrusted(target))
+        {
+            // R22's "do not use it". Rather than load from a directory whose owner or ACL we cannot stand
+            // behind - and rather than brick the app by refusing outright, which would hand an attacker a
+            // trivial denial of service - fall back to a fresh unpredictable sibling directory that the
+            // attacker cannot pre-create. The verified extraction below still has to pass.
+            target = Path.Combine(root, contentHash + "-" + Guid.NewGuid().ToString("N")[..12]);
+        }
+
+        ExtractVerified(target, assembly);
+        return target;
+    }
+
+    /// <summary>
+    /// R22: is this directory ours and closed? A directory owned by someone else, or granting write access
+    /// to a broad principal, is not a place to load executable code from.
+    /// </summary>
+    private static bool DirectoryIsTrusted(string path)
+    {
+        try
+        {
+            var info = new DirectoryInfo(path);
+            DirectorySecurity security = info.GetAccessControl();
+
+            string currentUser = WindowsIdentity.GetCurrent().User?.Value ?? string.Empty;
+            string owner = info.GetAccessControl().GetOwner(typeof(SecurityIdentifier))?.Value ?? string.Empty;
+            if (owner.Length > 0 && owner != currentUser) return false;
+
+            // Any allow-rule that grants write/append to a principal which is not the current user, SYSTEM
+            // or Administrators is a reason to walk away.
+            foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+            {
+                if (rule.AccessControlType != AccessControlType.Allow) continue;
+                if ((rule.FileSystemRights & (FileSystemRights.Write | FileSystemRights.AppendData
+                                              | FileSystemRights.Delete | FileSystemRights.TakeOwnership)) == 0)
+                    continue;
+
+                string id = rule.IdentityReference.Value;
+                if (id == currentUser) continue;
+                if (id == "S-1-5-18") continue;   // SYSTEM
+                if (id == "S-1-5-32-544") continue;   // Administrators
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception)
+        {
+            // If we cannot read the ACL we cannot vouch for the directory - do not use it.
+            return false;
+        }
+    }
+
+    /// <summary>R22: current user, SYSTEM and Administrators only - no inherited broad grants.</summary>
+    private static void ApplyRestrictiveAcl(string path)
+    {
+        try
+        {
+            var info = new DirectoryInfo(path);
+            DirectorySecurity security = info.GetAccessControl();
+
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+            var currentUser = WindowsIdentity.GetCurrent().User;
+            if (currentUser is not null)
+            {
+                security.AddAccessRule(new FileSystemAccessRule(
+                    currentUser, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None, AccessControlType.Allow));
+            }
+
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+
+            info.SetAccessControl(security);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Native payload: could not apply the restrictive ACL to '{path}'.", ex);
+        }
+    }
+
+    // ------------------------------------------------------------------ extraction (R18/R20/R23)
+
+    private static void ExtractVerified(string targetDir, Assembly assembly)
     {
         if (!Directory.Exists(targetDir))
         {
             Directory.CreateDirectory(targetDir);
+            ApplyRestrictiveAcl(targetDir);
         }
 
-        var assembly = Assembly.GetExecutingAssembly();
-        foreach (var lib in NativeLibraries)
+        foreach (string lib in NativeLibraries)
         {
-            string targetPath = Path.Combine(targetDir, lib);
-            string resourceName = $"NativePayload.{lib}";
+            string target = Path.Combine(targetDir, lib);
+            string expected = HashOfResource(assembly, lib);
 
-            using var stream = assembly.GetManifestResourceStream(resourceName);
-            if (stream == null) continue;
-
-            // Only extract if file doesn't exist or size differs
-            if (File.Exists(targetPath) && new FileInfo(targetPath).Length == stream.Length)
-            {
+            // R23: a pre-existing file is judged by CONTENT. If it matches, it is already correct; if it
+            // does not - or cannot be read - it is replaced by the verified copy.
+            if (File.Exists(target) && FileMatches(target, expected))
                 continue;
+
+            ExtractOne(assembly, lib, target, expected);
+        }
+    }
+
+    private static bool FileMatches(string path, string expectedHash)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return fs.Length > 0 && HashOfHandle(fs) == expectedHash;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// R20: an extraction failure for a library is a HARD, reported failure. The previous version's
+    /// blanket catch meant any planted file survived a failed write and was then loaded anyway.
+    /// </summary>
+    private static void ExtractOne(Assembly assembly, string lib, string target, string expectedHash)
+    {
+        string temp = target + ".tmp." + Guid.NewGuid().ToString("N");
+
+        try
+        {
+            using (Stream? source = assembly.GetManifestResourceStream($"NativePayload.{lib}"))
+            {
+                if (source is null)
+                    throw new InvalidOperationException($"Native payload '{lib}' is not embedded in this build.");
+
+                using var fs = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None);
+                source.CopyTo(fs);
             }
 
+            // Verify the TEMP COPY before it is promoted, so a truncated write never becomes the file we
+            // are about to trust. (Belt and braces: the promote below is followed by a re-verify too.)
+            if (!FileMatches(temp, expectedHash))
+                throw new InvalidOperationException($"Native payload '{lib}' did not verify after extraction.");
+
+            File.Move(temp, target, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            TryDelete(temp);
+            AppLogger.LogError(
+                $"Native payload '{lib}' could not be extracted to '{targetDirFor(target)}'. " +
+                "The application cannot load its native components and will not continue on an unverified file.", ex);
+            throw new InvalidOperationException(
+                $"Native payload '{lib}' could not be extracted and verified. Refusing to load an unverified native library.", ex);
+        }
+
+        // R23 in the strict form: what is now on disk is what was embedded, or we stop.
+        if (!FileMatches(target, expectedHash))
+        {
+            AppLogger.LogError($"Native payload '{lib}' failed verification after being written to disk.");
+            throw new InvalidOperationException($"Native payload '{lib}' failed post-extraction verification.");
+        }
+
+        static string targetDirFor(string t)
+        {
+            try { return Path.GetDirectoryName(t) ?? t; } catch (Exception) { return t; }
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch (Exception) { }
+    }
+
+    // ------------------------------------------------------------------ loading (R19/R21/R24)
+
+    /// <summary>
+    /// R24: every library is loaded by ABSOLUTE PATH, so the process search path plays no part. R19: the
+    /// file is opened, its content verified through that same handle, and the handle is RETAINED for the
+    /// process lifetime - it cannot be replaced between the check and the load, and cannot be replaced
+    /// afterwards either. R21: the load's return value is checked and the failure is reported with the
+    /// library name and the Win32 error.
+    /// </summary>
+    private static void LoadAll(string directory)
+    {
+        var loaded = new List<FileStream>();
+
+        foreach (string lib in NativeLibraries)
+        {
+            string path = Path.Combine(directory, lib);
+            if (!File.Exists(path)) continue;
+
+            FileStream? handle = null;
             try
             {
-                string tempPath = targetPath + ".tmp." + Guid.NewGuid().ToString("N");
-                using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                handle = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+
+                Assembly assembly = Assembly.GetExecutingAssembly();
+                string expected = HashOfResource(assembly, lib);
+                if (HashOfHandle(handle) != expected)
                 {
-                    stream.CopyTo(fs);
+                    handle.Dispose();
+                    throw new InvalidOperationException(
+                        $"Native payload '{lib}' at '{path}' does not match this build's embedded content. Refusing to load it.");
                 }
-                File.Move(tempPath, targetPath, overwrite: true);
+
+                IntPtr module = LoadLibraryW(path);
+                if (module == IntPtr.Zero)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    handle.Dispose();
+                    AppLogger.LogError(
+                        $"Native payload '{lib}' failed to load from '{path}' (Win32 error {error}).");
+                    throw new InvalidOperationException(
+                        $"Native payload '{lib}' failed to load (Win32 error {error}).");
+                }
+
+                loaded.Add(handle);
             }
-            catch
+            catch (Exception)
             {
-                // In case another instance is running concurrently and has locked the file
+                handle?.Dispose();
+                throw;
             }
         }
+
+        lock (Gate)
+        {
+            VerifiedHandles.AddRange(loaded);
+        }
+    }
+
+    // ------------------------------------------------------------------ base-directory validation
+
+    /// <summary>
+    /// R23: the loose-directory fast path is no longer taken merely because files exist - every file must
+    /// match the embedded content. A directory that fails is not used; the verified extraction runs instead.
+    /// </summary>
+    private static bool AllLibrariesPresentAndValid(string baseDir, Assembly assembly)
+    {
+        foreach (string lib in NativeLibraries)
+        {
+            string candidate = Path.Combine(baseDir, lib);
+            if (!File.Exists(candidate)) return false;
+            if (!FileMatches(candidate, HashOfResource(assembly, lib))) return false;
+        }
+
+        return true;
     }
 }

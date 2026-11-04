@@ -49,6 +49,14 @@ public static class FfmpegPreflight
     public static int VersionTimeoutMs { get; set; } = 5000;
 
     /// <summary>
+    /// R26 (SEC-04b): the ABSOLUTE path that the last successful <see cref="Run"/> proved runnable. This is
+    /// the single resolution authority for ffmpeg - the execution sink consumes it instead of re-deriving a
+    /// path, so the binary that was validated is the binary that runs. It is null until a run succeeds and
+    /// is cleared when a run fails, so a stale path can never be used after ffmpeg has disappeared.
+    /// </summary>
+    public static string? ResolvedPath { get; private set; }
+
+    /// <summary>
     /// Resolves ffmpeg and proves it runs. <paramref name="appDirectory"/> first, then each
     /// <paramref name="pathVariable"/> entry. Every filesystem and process touch is injectable.
     /// </summary>
@@ -71,7 +79,11 @@ public static class FfmpegPreflight
         if (exists(local))
         {
             string? line = TryReadVersion(local, probe);
-            if (line != null) return FfmpegPreflightResult.Available(local, line);
+            if (line != null)
+            {
+                ResolvedPath = local;
+                return FfmpegPreflightResult.Available(local, line);
+            }
         }
 
         // 2. PATH, in order. A binary that exists but cannot run is skipped rather than accepted.
@@ -89,10 +101,15 @@ public static class FfmpegPreflight
                 if (!exists(candidate)) continue;
 
                 string? line = TryReadVersion(candidate, probe);
-                if (line != null) return FfmpegPreflightResult.Available(candidate, line);
+                if (line != null)
+                {
+                    ResolvedPath = candidate;
+                    return FfmpegPreflightResult.Available(candidate, line);
+                }
             }
         }
 
+        ResolvedPath = null;   // R26: never leave a stale path behind a failed preflight
         return FfmpegPreflightResult.Missing(
             $"ffmpeg.exe not found or not runnable. Checked: {string.Join(", ", checkedLocations)}");
     }
