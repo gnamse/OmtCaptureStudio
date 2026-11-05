@@ -90,12 +90,18 @@ if ($running) {
 }
 
 # 3. Clean Staging Folder
-if (-not (Test-Path $publishDir)) {
-    New-Item -ItemType Directory -Path $publishDir -Force | Out-Null
-} else {
-    # Remove old executables to prevent stale builds
-    Get-ChildItem -Path $publishDir -Filter "*.exe" | Remove-Item -Force -ErrorAction SilentlyContinue
+# Clear the target folder COMPLETELY before the AOT publish - not just its root *.exe files.
+# dotnet publish -o recreates the entire payload (the csproj copies ..\version.txt in as a Content
+# item) and the staging step re-adds the OMT libs, ffmpeg, README/LICENSE and docs afterwards, so
+# this folder must start empty. Anything a previous run left beside the exe otherwise rides into
+# the release: on the first v1.0.0.24 cut a stale logs\2026-10-29.log (a developer's local absolute
+# paths and settings summary) and an empty crashdumps\ shipped in BOTH the ZIP and the installer,
+# because installer/OmtCaptureStudio.iss globs ..\Publish_AOT\* recursively.
+if (Test-Path $publishDir) {
+    Remove-Item -Path $publishDir -Recurse -Force
+    Write-Host "   [OK] Cleared the staging folder before publishing: $publishDir" -ForegroundColor Green
 }
+New-Item -ItemType Directory -Path $publishDir -Force | Out-Null
 
 if (-not (Test-Path $releasesDir)) {
     New-Item -ItemType Directory -Path $releasesDir -Force | Out-Null
@@ -317,6 +323,35 @@ if (-not $ffmpegEntry) {
     throw "Staged ZIP '$zipName' does not contain ffmpeg.exe. Removed the partial archive; aborting release build."
 }
 Write-Host "   [OK] Verified ffmpeg.exe is present in $zipName ($([math]::Round($ffmpegEntry.Length / 1MB, 2)) MB, uncompressed)" -ForegroundColor Green
+
+# Composition assertion: the archive's file list must equal the expected payload set EXACTLY.
+# Freshness, checksums and version stamps all pass with a stray file present - this is the check
+# that catches residue (stale logs, crashdumps, temp files) riding into a release. The installer
+# needs it too, since installer/OmtCaptureStudio.iss globs the same folder recursively.
+$expectedPayload = @(
+    "OmtCaptureStudio.exe", "version.txt", "README.md", "LICENSE.txt", "ffmpeg.exe",
+    "libvmx.dll", "libomt.dll", "libomtnet.dll", "libHarfBuzzSharp.dll", "libSkiaSharp.dll",
+    "av_libglesv2.dll",
+    "docs\images\mode_picker.png", "docs\images\capture_mode.png", "docs\images\broadcast_mode.png"
+) | Sort-Object
+$actualPayload = @()
+$zipProbe2 = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+try {
+    $actualPayload = @($zipProbe2.Entries | ForEach-Object { $_.FullName -replace '/', '\' } |
+        Where-Object { $_ -and -not $_.EndsWith('\') } | Sort-Object -Unique)
+} finally {
+    $zipProbe2.Dispose()
+}
+$extraEntries = @($actualPayload | Where-Object { $expectedPayload -notcontains $_ })
+$missingEntries = @($expectedPayload | Where-Object { $actualPayload -notcontains $_ })
+if ($extraEntries.Count -gt 0 -or $missingEntries.Count -gt 0) {
+    Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+    Remove-Item $shaPath -Force -ErrorAction SilentlyContinue
+    foreach ($entry in $extraEntries) { Write-Host "   [FAILED] Unexpected entry in the archive (${zipName}): $entry" -ForegroundColor Red }
+    foreach ($entry in $missingEntries) { Write-Host "   [FAILED] Expected payload entry missing from ${zipName}: $entry" -ForegroundColor Red }
+    throw "ZIP composition check failed for '$zipName' (unexpected: $($extraEntries.Count), missing: $($missingEntries.Count)). Removed the partial archive; aborting release build so no residue ships."
+}
+Write-Host "   [OK] ZIP composition verified: exactly $($expectedPayload.Count) expected entries, no residue" -ForegroundColor Green
 
 # Calculate SHA256 checksum
 $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
