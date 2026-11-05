@@ -1218,6 +1218,108 @@ class Program
             "R22: an ACL'd but empty directory still must not pass the payload check.");
         Directory.Delete(aclDir, recursive: true);
 
+        // ---- R19/R21: the LOAD path, driven through an injectable loader -----------------------------
+        // (3) a content-mismatched file must be refused BEFORE the loader is ever called
+        int loaderCalls = 0;
+        Func<string, IntPtr> countingLoader = _ => { loaderCalls++; return new IntPtr(1); };
+
+        string badDir2 = Path.Combine(Path.GetTempPath(), "omt-load-bad-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(badDir2);
+        File.WriteAllBytes(Path.Combine(badDir2, lib), new byte[payloadLength]);   // same length, wrong content
+        bool refusedBeforeLoad = false;
+        try { NativePayloadBootstrapper.LoadAll(badDir2, countingLoader); }
+        catch (Exception) { refusedBeforeLoad = true; }
+        Expect(refusedBeforeLoad, "R18/R19: a content-mismatched file must be refused on the LOAD path.");
+        Expect(loaderCalls == 0,
+            $"R19: the loader must NEVER be called for an unverified file; it was called {loaderCalls} time(s).");
+        Directory.Delete(badDir2, recursive: true);
+
+        // (5) a verified file whose LOAD fails must report the library name and the loader's failure
+        string badDir3 = Path.Combine(Path.GetTempPath(), "omt-load-fail-" + Guid.NewGuid().ToString("N"));
+        NativePayloadBootstrapper.ExtractVerified(badDir3, product);   // real, verified content
+        string loadFailMessage = "";
+        try { NativePayloadBootstrapper.LoadAll(badDir3, _ => IntPtr.Zero); }   // the loader fails
+        catch (Exception ex) { loadFailMessage = ex.Message; }
+        Expect(loadFailMessage.Length > 0, "R21: a LoadLibrary failure must be RAISED, not discarded.");
+        Expect(loadFailMessage.Contains(lib),
+            $"R21: the failure must NAME the library; got '{loadFailMessage}'.");
+        Directory.Delete(badDir3, recursive: true);
+
+        // and the positive direction: verified content + a working loader returns what it loaded
+        string goodDir = Path.Combine(Path.GetTempPath(), "omt-load-ok-" + Guid.NewGuid().ToString("N"));
+        NativePayloadBootstrapper.ExtractVerified(goodDir, product);
+        IReadOnlyList<string> loadedPaths = NativePayloadBootstrapper.LoadAll(goodDir, _ => new IntPtr(1));
+        Expect(loadedPaths.Count > 0, "A verified directory with a working loader must load its libraries.");
+        Expect(loadedPaths.All(x => x.StartsWith(goodDir, StringComparison.OrdinalIgnoreCase)),
+            "R24: every library must be loaded by ABSOLUTE PATH from the verified directory.");
+
+        // R19's mechanism, demonstrated rather than described: LoadAll RETAINS a handle per verified file
+        // for the process lifetime, so the bytes that were verified are the bytes that stay on disk. The
+        // observable consequence is that the verified directory cannot be swapped out from under us -
+        // deletion fails while the handles are held. That is the TOCTOU protection working.
+        bool couldBeDeleted = true;
+        try { Directory.Delete(goodDir, recursive: true); } catch (Exception) { couldBeDeleted = false; }
+        Expect(!couldBeDeleted,
+            "R19: the verified files must be HELD OPEN, so the directory cannot be replaced while loaded. " +
+            "If this deletes, the retention guarantee is gone.");
+        // deliberately NOT cleaned up: the handles are held for the process lifetime by design. The
+        // directory lives in the temp root and goes with it.
+
+        // ---- R22/R23: an UNTRUSTED pre-existing directory is walked away from ------------------------
+        // The content-hash directory exists but is not one we can vouch for, so a FRESH nonce sibling is
+        // used instead - never the directory we cannot stand behind.
+        string distrustRoot = Path.Combine(Path.GetTempPath(), "omt-distrust-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(distrustRoot);
+        string wouldBeTarget = Path.Combine(distrustRoot, NativePayloadBootstrapper.ComputeContentHash(product));
+        Directory.CreateDirectory(wouldBeTarget);
+        File.WriteAllBytes(Path.Combine(wouldBeTarget, lib), new byte[payloadLength]);   // hostile content
+
+        string chosen = NativePayloadBootstrapper.EnsureExtractedDirectory(
+            product, rootOverride: distrustRoot, isTrusted: _ => false);   // force distrust
+        Expect(chosen != wouldBeTarget,
+            "R22/R23: an untrusted pre-existing directory must NOT be used.");
+        Expect(Path.GetDirectoryName(chosen) == distrustRoot,
+            "R22: the replacement must be a SIBLING in the same root, not somewhere else.");
+        Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(chosen, product),
+            "R23: the replacement directory must hold the VERIFIED payload.");
+        Directory.Delete(distrustRoot, recursive: true);
+
+        // ---- R22: a CREATED directory whose ACL application FAILS is never silently used ----------------
+        // The failure mode this closes: ApplyRestrictiveAcl swallowed its own error, so a directory that was
+        // never actually protected was then used anyway - the bound existed only in a comment.
+        string aclFailRoot = Path.Combine(Path.GetTempPath(), "omt-aclfail-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(aclFailRoot);
+        string expectedFirst = Path.Combine(aclFailRoot, NativePayloadBootstrapper.ComputeContentHash(product));
+
+        int aclCalls = 0;
+        string aclChosen = NativePayloadBootstrapper.EnsureExtractedDirectory(
+            product, rootOverride: aclFailRoot,
+            applyAcl: _ => { aclCalls++; return aclCalls > 1; });   // fails on the FIRST attempt only
+
+        Expect(aclCalls >= 2,
+            $"R22: a failed ACL application must trigger a retry in a fresh directory; ACL calls were {aclCalls}.");
+        Expect(aclChosen != expectedFirst,
+            "R22: a directory whose protection FAILED must not be used - a fresh sibling must be chosen.");
+        Expect(Path.GetDirectoryName(aclChosen) == aclFailRoot,
+            "R22: the fallback must be a sibling in the same root.");
+        Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(aclChosen, product),
+            "R23: the fallback directory must still hold the VERIFIED payload.");
+        Directory.Delete(aclFailRoot, recursive: true);
+
+        // and when NO directory can be protected, it must STOP rather than proceed unprotected
+        string aclAlways = Path.Combine(Path.GetTempPath(), "omt-aclnever-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(aclAlways);
+        bool aclRefused = false;
+        try
+        {
+            NativePayloadBootstrapper.EnsureExtractedDirectory(
+                product, rootOverride: aclAlways, applyAcl: _ => false);
+        }
+        catch (Exception) { aclRefused = true; }
+        Expect(aclRefused,
+            "R22: if no directory can be protected, extraction must REFUSE rather than load from an unprotected path.");
+        Directory.Delete(aclAlways, recursive: true);
+
         Directory.Delete(root, recursive: true);
         Directory.Delete(emptyDir, recursive: true);
 
