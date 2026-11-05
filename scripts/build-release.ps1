@@ -101,6 +101,41 @@ if (-not (Test-Path $releasesDir)) {
     New-Item -ItemType Directory -Path $releasesDir -Force | Out-Null
 }
 
+# Native payload preflight (HARD REQUIREMENT - runs BEFORE the AOT publish).
+# Knowable in milliseconds, so fail in seconds rather than after a minutes-long AOT publish.
+# The csproj embeds OmtCaptureStudio\NativePayload\win-x64\* as manifest resources, and
+# NativePayloadBootstrapper.Initialize() (called from Program.cs) extracts them on first run.
+# That directory is gitignored on purpose (~22 MB of binaries), so a fresh clone/worktree has
+# NOTHING there: the EmbeddedResource glob then matches no files, the assembly builds with no
+# payload at all, and the app dies at startup inside the bootstrapper. A release built from such
+# a tree would ship an app that cannot start, so fail hard - as with ffmpeg.
+$nativePayloadDir = Join-Path (Split-Path $projectFile -Parent) "NativePayload\win-x64"
+$expectedNative = @(
+    "libvmx.dll", "libomt.dll", "libomtnet.dll",
+    "libHarfBuzzSharp.dll", "libSkiaSharp.dll", "av_libglesv2.dll"
+)
+$payloadDlls = @()
+if (Test-Path $nativePayloadDir) {
+    $payloadDlls = @(Get-ChildItem -Path $nativePayloadDir -Filter "*.dll" -File -ErrorAction SilentlyContinue)
+}
+if ($payloadDlls.Count -eq 0) {
+    Write-Host "   [FAILED] Native payload is missing or empty: $nativePayloadDir" -ForegroundColor Red
+    Write-Host "            The build would embed no native libraries and the app would die at startup." -ForegroundColor Red
+    throw "OmtCaptureStudio\NativePayload\win-x64 is missing or contains no DLLs ('$nativePayloadDir'). Refusing to build a release that cannot start: populate that folder first (see README)."
+}
+# All six are REQUIREMENTS, not optional extras: NativePayloadBootstrapper.NativeLibraries lists
+# exactly these, and it throws a missing-payload error if any one is absent. A partial payload
+# therefore ships an app that cannot start - the same defect as an empty payload, only narrower.
+$missingNative = @($expectedNative | Where-Object { -not (Test-Path (Join-Path $nativePayloadDir $_)) })
+if ($missingNative.Count -gt 0) {
+    Write-Host "   [FAILED] Native payload is incomplete: $($missingNative.Count) of $($expectedNative.Count) expected libraries are absent." -ForegroundColor Red
+    foreach ($lib in $missingNative) {
+        Write-Host "            missing: $lib" -ForegroundColor Red
+    }
+    throw "NativePayload\win-x64 is incomplete - missing: $($missingNative -join ', '). NativePayloadBootstrapper requires all six to start, so a release built from this tree would not run. Populate the folder (see README)."
+}
+Write-Host "   [OK] Native payload present and complete: $($payloadDlls.Count) DLL(s) in $nativePayloadDir" -ForegroundColor Green
+
 # 4. Compile Ahead-of-Time (Native AOT)
 Write-Host ""
 Write-Host "[Step 1/4] Compiling Ahead-of-Time (Native AOT) Binary..." -ForegroundColor Cyan
