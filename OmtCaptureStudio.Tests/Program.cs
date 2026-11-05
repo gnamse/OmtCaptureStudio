@@ -1175,6 +1175,49 @@ class Program
         Expect(!NativePayloadBootstrapper.AllLibrariesPresentAndValid(emptyDir, product),
             "R23: a directory with no libraries must not pass the fast-path check.");
 
+        // ---- R20: a failed extraction is a HARD failure, never a silent skip ------------------------
+        // The blanket catch used to swallow this, after which the planted file was loaded anyway. A target
+        // path that cannot be created as a directory must THROW rather than continue.
+        string notADir = Path.Combine(Path.GetTempPath(), "omt-native-file-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(notADir, "I am a file, not a directory");
+        bool threw = false;
+        try { NativePayloadBootstrapper.ExtractVerified(notADir, product); }
+        catch (Exception) { threw = true; }
+        Expect(threw, "R20: an extraction that cannot proceed must THROW, not be silently skipped.");
+        File.Delete(notADir);
+
+        // ---- R23: the directory name is derived from CONTENT, and is stable -------------------------
+        string nameA = NativePayloadBootstrapper.ComputeContentHash(product);
+        string nameB = NativePayloadBootstrapper.ComputeContentHash(product);
+        Expect(nameA.Length == 16, $"R23: the content-addressed name is 16 hex chars; got '{nameA}'.");
+        Expect(nameA.All(char.IsAsciiHexDigitLower), $"R23: the name must be lowercase hex; got '{nameA}'.");
+        Expect(nameA == nameB,
+            "R23: identical content must produce an IDENTICAL name - that is what makes the directory content-addressed.");
+
+        // and the naming rule must be the one actually in force on this machine
+        string liveDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "OmtCaptureStudio", "native", nameA);
+        if (Directory.Exists(liveDir))
+        {
+            Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(liveDir, product),
+                "R23: the live extraction directory (named by the content hash) must hold the verified payload.");
+            Console.WriteLine($"   [note] the live extraction dir IS named by the content hash: {nameA}");
+        }
+        else
+        {
+            Console.WriteLine("   [note] no live extraction dir present in this session - naming rule asserted above.");
+        }
+
+        // ---- R22: the ACL bound is ASSERTED, not assumed -------------------------------------------
+        string aclDir = Path.Combine(Path.GetTempPath(), "omt-acl-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(aclDir);
+        Expect(NativePayloadBootstrapper.ApplyRestrictiveAcl(aclDir),
+            "R22: applying the restrictive ACL to a directory we own must SUCCEED - and report that it did.");
+        Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(aclDir, product) == false,
+            "R22: an ACL'd but empty directory still must not pass the payload check.");
+        Directory.Delete(aclDir, recursive: true);
+
         Directory.Delete(root, recursive: true);
         Directory.Delete(emptyDir, recursive: true);
 

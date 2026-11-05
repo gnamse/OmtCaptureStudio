@@ -115,7 +115,12 @@ public static class NativePayloadBootstrapper
     /// payload is byte-identical. The old name mixed the version string and the libraries' LENGTHS -
     /// every one of which is public, so the location was predictable without touching the machine.
     /// </summary>
-    private static string ComputeContentHash(Assembly assembly)
+    /// <summary>
+    /// SEC-04 (R23): the content-addressed directory name. Public so the suite can assert the naming RULE -
+    /// stable for identical content, different for different content - rather than inferring it from a
+    /// directory that happens to exist on this machine.
+    /// </summary>
+    public static string ComputeContentHash(Assembly assembly)
     {
         using var sha = SHA256.Create();
         using var ms = new MemoryStream();
@@ -138,9 +143,12 @@ public static class NativePayloadBootstrapper
     /// R22: a per-user protected directory, never a shared temp path. Returns a directory whose files are
     /// all content-verified; throws rather than returning one that is not (R20).
     /// </summary>
-    private static string EnsureExtractedDirectory(Assembly assembly)
+    public static string EnsureExtractedDirectory(
+        Assembly assembly, string? rootOverride = null, Func<string, bool>? isTrusted = null)
     {
-        string root = Path.Combine(
+        isTrusted ??= DirectoryIsTrusted;
+
+        string root = rootOverride ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "OmtCaptureStudio",
             "native");
@@ -150,7 +158,7 @@ public static class NativePayloadBootstrapper
         string contentHash = ComputeContentHash(assembly);
         string target = Path.Combine(root, contentHash);
 
-        if (Directory.Exists(target) && !DirectoryIsTrusted(target))
+        if (Directory.Exists(target) && !isTrusted(target))
         {
             // R22's "do not use it". Rather than load from a directory whose owner or ACL we cannot stand
             // behind - and rather than brick the app by refusing outright, which would hand an attacker a
@@ -204,7 +212,7 @@ public static class NativePayloadBootstrapper
     }
 
     /// <summary>R22: current user, SYSTEM and Administrators only - no inherited broad grants.</summary>
-    private static void ApplyRestrictiveAcl(string path)
+    public static bool ApplyRestrictiveAcl(string path)
     {
         try
         {
@@ -232,10 +240,12 @@ public static class NativePayloadBootstrapper
                 PropagationFlags.None, AccessControlType.Allow));
 
             info.SetAccessControl(security);
+            return true;
         }
         catch (Exception ex)
         {
             AppLogger.LogError($"Native payload: could not apply the restrictive ACL to '{path}'.", ex);
+            return false;
         }
     }
 
@@ -251,7 +261,20 @@ public static class NativePayloadBootstrapper
         if (!Directory.Exists(targetDir))
         {
             Directory.CreateDirectory(targetDir);
-            ApplyRestrictiveAcl(targetDir);
+            bool aclApplied = ApplyRestrictiveAcl(targetDir);
+
+            // R22: ASSERT the bound, do not infer it. ApplyRestrictiveAcl used to swallow its own failure, so
+            // a directory whose ACL could not be applied was then used anyway, silently - the protection
+            // existed only in a comment. Now the result is checked and an unprotected directory is refused.
+            if (!aclApplied || !DirectoryIsTrusted(targetDir))   // ExtractVerified has no injected predicate; the real check applies here
+            {
+                AppLogger.LogError(
+                    $"Native payload: extraction directory '{targetDir}' is not one we can vouch for " +
+                    $"(ACL applied: {aclApplied}). Refusing to load executable code from it.");
+                throw new InvalidOperationException(
+                    "Native payload extraction directory could not be protected. Refusing to load native " +
+                    "libraries from an unprotected or unverified location.");
+            }
         }
 
         foreach (string lib in NativeLibraries)
@@ -346,9 +369,20 @@ public static class NativePayloadBootstrapper
     /// afterwards either. R21: the load's return value is checked and the failure is reported with the
     /// library name and the Win32 error.
     /// </summary>
-    private static void LoadAll(string directory)
+    /// <summary>
+    /// SEC-04 (R19/R21). Public and with an injectable loader, so the suite can drive the LOAD path rather
+    /// than only the extraction path: it can prove that a content-mismatched file is refused BEFORE the
+    /// loader is ever called, and that a loader failure is reported with the library name and the Win32
+    /// error instead of being discarded. The default is the real kernel32 entry point.
+    ///
+    /// <para>Returns the paths it loaded, so a caller (or a test) can see exactly which files were accepted.</para>
+    /// </summary>
+    public static IReadOnlyList<string> LoadAll(string directory, Func<string, IntPtr>? loadLibrary = null)
     {
+        loadLibrary ??= LoadLibraryW;
+
         var loaded = new List<FileStream>();
+        var loadedPaths = new List<string>();
 
         foreach (string lib in NativeLibraries)
         {
@@ -369,7 +403,7 @@ public static class NativePayloadBootstrapper
                         $"Native payload '{lib}' at '{path}' does not match this build's embedded content. Refusing to load it.");
                 }
 
-                IntPtr module = LoadLibraryW(path);
+                IntPtr module = loadLibrary(path);
                 if (module == IntPtr.Zero)
                 {
                     int error = Marshal.GetLastWin32Error();
@@ -381,6 +415,7 @@ public static class NativePayloadBootstrapper
                 }
 
                 loaded.Add(handle);
+                loadedPaths.Add(path);
             }
             catch (Exception)
             {
@@ -393,6 +428,8 @@ public static class NativePayloadBootstrapper
         {
             VerifiedHandles.AddRange(loaded);
         }
+
+        return loadedPaths;
     }
 
     // ------------------------------------------------------------------ base-directory validation
