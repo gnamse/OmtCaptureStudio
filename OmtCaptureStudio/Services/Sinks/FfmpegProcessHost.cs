@@ -160,8 +160,27 @@ public class FfmpegProcessHost : IDisposable
             $"-max_interleave_delta 5000000 " +
             $"{vCodecArgs} {aCodecArgs}{containerFlags}\"{_outputPath}\"";
 
-        string localFfmpeg = Path.Combine(AppContext.BaseDirectory, "ffmpeg.exe");
-        string ffmpegBinary = File.Exists(localFfmpeg) ? localFfmpeg : "ffmpeg";
+        // R25 (SEC-04b): this used to fall back to the BARE NAME "ffmpeg", which Windows resolves through
+        // the current directory and PATH - the textbook uncontrolled-search-path sink (CWE-427). Any
+        // user-writable directory earlier in that order yielded execution of an attacker's binary, with
+        // attacker-influenced arguments, under this process's privileges. A missing encoder must now be a
+        // legible refusal, never a search.
+        string localFfmpeg = Path.Combine(AppContext.BaseDirectory, FfmpegPreflight.ExecutableName);
+        string? ffmpegBinary = File.Exists(localFfmpeg) ? localFfmpeg : ResolveAbsoluteFfmpeg();
+
+        if (string.IsNullOrWhiteSpace(ffmpegBinary))
+        {
+            throw new InvalidOperationException(
+                "FFmpeg is unavailable: no ffmpeg executable was found at a known absolute path. " +
+                "Recording cannot start, and the bare command name will not be resolved through PATH.");
+        }
+
+        // Belt and braces: an absolute path is the whole point, so refuse anything that is not one.
+        if (!Path.IsPathFullyQualified(ffmpegBinary))
+        {
+            throw new InvalidOperationException(
+                $"FFmpeg resolution produced a non-absolute path ('{ffmpegBinary}'). Refusing to start a search-resolved process.");
+        }
 
         _ffmpegProcess = new Process
         {
@@ -555,6 +574,18 @@ public class FfmpegProcessHost : IDisposable
         }
 
         return _detectedHardware = VideoEncoderChoice.CpuX264;
+    }
+
+    /// <summary>
+    /// R26 (SEC-04b): ONE resolution authority. The preflight already resolved ffmpeg - app directory
+    /// first, then each PATH entry - and PROVED the candidate runs. Re-deriving it here is consumer
+    /// drift of exactly the kind SEC-OMT-01 turned up: the binary that was validated must be the binary
+    /// that executes. This asks the preflight; it never searches.
+    /// </summary>
+    private static string? ResolveAbsoluteFfmpeg()
+    {
+        string? resolved = FfmpegPreflight.ResolvedPath;
+        return string.IsNullOrWhiteSpace(resolved) ? null : resolved;
     }
 
     public void Dispose()

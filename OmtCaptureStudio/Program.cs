@@ -7,8 +7,8 @@ namespace OmtCaptureStudio;
 
 public static class Program
 {
-    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern bool SetDllDirectory(string lpPathName);
+    // R28 (SEC-04f): the dead SetDllDirectory P/Invoke that lived here is REMOVED. It was never called,
+    // but it advertised a process-wide DLL search-path widening that this pass exists to eliminate.
 
     // Initialization code. Don't use any Avalonia, third-party APIs or any
     // SynchronizationContext-reliant code before AppMain is called: things aren't initialized

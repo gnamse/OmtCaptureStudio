@@ -89,6 +89,8 @@ Open `OmtCaptureStudio.sln` in Visual Studio 2022, JetBrains Rider, or VS Code, 
 dotnet build OmtCaptureStudio.sln -c Release
 ```
 
+> **A fresh clone needs the native payload first:** `OmtCaptureStudio\NativePayload\win-x64\` is gitignored (deliberately — ~22 MB of binaries), so a clean checkout contains none of the six native libraries (`libvmx.dll`, `libomt.dll`, `libomtnet.dll`, `libHarfBuzzSharp.dll`, `libSkiaSharp.dll`, `av_libglesv2.dll`). They are embedded into the assembly and extracted on first run, so populate that folder before building — otherwise the app compiles and then dies at startup, and `scripts/build-release.ps1` refuses to package a release without it.
+
 > **Installer builds need FFmpeg first:** `installer/OmtCaptureStudio.iss` bundles `tools\ffmpeg.exe`, which is gitignored and therefore absent from a fresh clone — place `ffmpeg.exe` in `tools\` before compiling, or a missing one fails the compile (and `scripts/build-release.ps1` throws before iscc is ever invoked).
 
 ### 2. Launching the App

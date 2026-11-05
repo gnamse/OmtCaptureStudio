@@ -90,16 +90,57 @@ if ($running) {
 }
 
 # 3. Clean Staging Folder
-if (-not (Test-Path $publishDir)) {
-    New-Item -ItemType Directory -Path $publishDir -Force | Out-Null
-} else {
-    # Remove old executables to prevent stale builds
-    Get-ChildItem -Path $publishDir -Filter "*.exe" | Remove-Item -Force -ErrorAction SilentlyContinue
+# Clear the target folder COMPLETELY before the AOT publish - not just its root *.exe files.
+# dotnet publish -o recreates the entire payload (the csproj copies ..\version.txt in as a Content
+# item) and the staging step re-adds the OMT libs, ffmpeg, README/LICENSE and docs afterwards, so
+# this folder must start empty. Anything a previous run left beside the exe otherwise rides into
+# the release: on the first v1.0.0.24 cut a stale logs\2026-10-29.log (a developer's local absolute
+# paths and settings summary) and an empty crashdumps\ shipped in BOTH the ZIP and the installer,
+# because installer/OmtCaptureStudio.iss globs ..\Publish_AOT\* recursively.
+if (Test-Path $publishDir) {
+    Remove-Item -Path $publishDir -Recurse -Force
+    Write-Host "   [OK] Cleared the staging folder before publishing: $publishDir" -ForegroundColor Green
 }
+New-Item -ItemType Directory -Path $publishDir -Force | Out-Null
 
 if (-not (Test-Path $releasesDir)) {
     New-Item -ItemType Directory -Path $releasesDir -Force | Out-Null
 }
+
+# Native payload preflight (HARD REQUIREMENT - runs BEFORE the AOT publish).
+# Knowable in milliseconds, so fail in seconds rather than after a minutes-long AOT publish.
+# The csproj embeds OmtCaptureStudio\NativePayload\win-x64\* as manifest resources, and
+# NativePayloadBootstrapper.Initialize() (called from Program.cs) extracts them on first run.
+# That directory is gitignored on purpose (~22 MB of binaries), so a fresh clone/worktree has
+# NOTHING there: the EmbeddedResource glob then matches no files, the assembly builds with no
+# payload at all, and the app dies at startup inside the bootstrapper. A release built from such
+# a tree would ship an app that cannot start, so fail hard - as with ffmpeg.
+$nativePayloadDir = Join-Path (Split-Path $projectFile -Parent) "NativePayload\win-x64"
+$expectedNative = @(
+    "libvmx.dll", "libomt.dll", "libomtnet.dll",
+    "libHarfBuzzSharp.dll", "libSkiaSharp.dll", "av_libglesv2.dll"
+)
+$payloadDlls = @()
+if (Test-Path $nativePayloadDir) {
+    $payloadDlls = @(Get-ChildItem -Path $nativePayloadDir -Filter "*.dll" -File -ErrorAction SilentlyContinue)
+}
+if ($payloadDlls.Count -eq 0) {
+    Write-Host "   [FAILED] Native payload is missing or empty: $nativePayloadDir" -ForegroundColor Red
+    Write-Host "            The build would embed no native libraries and the app would die at startup." -ForegroundColor Red
+    throw "OmtCaptureStudio\NativePayload\win-x64 is missing or contains no DLLs ('$nativePayloadDir'). Refusing to build a release that cannot start: populate that folder first (see README)."
+}
+# All six are REQUIREMENTS, not optional extras: NativePayloadBootstrapper.NativeLibraries lists
+# exactly these, and it throws a missing-payload error if any one is absent. A partial payload
+# therefore ships an app that cannot start - the same defect as an empty payload, only narrower.
+$missingNative = @($expectedNative | Where-Object { -not (Test-Path (Join-Path $nativePayloadDir $_)) })
+if ($missingNative.Count -gt 0) {
+    Write-Host "   [FAILED] Native payload is incomplete: $($missingNative.Count) of $($expectedNative.Count) expected libraries are absent." -ForegroundColor Red
+    foreach ($lib in $missingNative) {
+        Write-Host "            missing: $lib" -ForegroundColor Red
+    }
+    throw "NativePayload\win-x64 is incomplete - missing: $($missingNative -join ', '). NativePayloadBootstrapper requires all six to start, so a release built from this tree would not run. Populate the folder (see README)."
+}
+Write-Host "   [OK] Native payload present and complete: $($payloadDlls.Count) DLL(s) in $nativePayloadDir" -ForegroundColor Green
 
 # 4. Compile Ahead-of-Time (Native AOT)
 Write-Host ""
@@ -282,6 +323,35 @@ if (-not $ffmpegEntry) {
     throw "Staged ZIP '$zipName' does not contain ffmpeg.exe. Removed the partial archive; aborting release build."
 }
 Write-Host "   [OK] Verified ffmpeg.exe is present in $zipName ($([math]::Round($ffmpegEntry.Length / 1MB, 2)) MB, uncompressed)" -ForegroundColor Green
+
+# Composition assertion: the archive's file list must equal the expected payload set EXACTLY.
+# Freshness, checksums and version stamps all pass with a stray file present - this is the check
+# that catches residue (stale logs, crashdumps, temp files) riding into a release. The installer
+# needs it too, since installer/OmtCaptureStudio.iss globs the same folder recursively.
+$expectedPayload = @(
+    "OmtCaptureStudio.exe", "version.txt", "README.md", "LICENSE.txt", "ffmpeg.exe",
+    "libvmx.dll", "libomt.dll", "libomtnet.dll", "libHarfBuzzSharp.dll", "libSkiaSharp.dll",
+    "av_libglesv2.dll",
+    "docs\images\mode_picker.png", "docs\images\capture_mode.png", "docs\images\broadcast_mode.png"
+) | Sort-Object
+$actualPayload = @()
+$zipProbe2 = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+try {
+    $actualPayload = @($zipProbe2.Entries | ForEach-Object { $_.FullName -replace '/', '\' } |
+        Where-Object { $_ -and -not $_.EndsWith('\') } | Sort-Object -Unique)
+} finally {
+    $zipProbe2.Dispose()
+}
+$extraEntries = @($actualPayload | Where-Object { $expectedPayload -notcontains $_ })
+$missingEntries = @($expectedPayload | Where-Object { $actualPayload -notcontains $_ })
+if ($extraEntries.Count -gt 0 -or $missingEntries.Count -gt 0) {
+    Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+    Remove-Item $shaPath -Force -ErrorAction SilentlyContinue
+    foreach ($entry in $extraEntries) { Write-Host "   [FAILED] Unexpected entry in the archive (${zipName}): $entry" -ForegroundColor Red }
+    foreach ($entry in $missingEntries) { Write-Host "   [FAILED] Expected payload entry missing from ${zipName}: $entry" -ForegroundColor Red }
+    throw "ZIP composition check failed for '$zipName' (unexpected: $($extraEntries.Count), missing: $($missingEntries.Count)). Removed the partial archive; aborting release build so no residue ships."
+}
+Write-Host "   [OK] ZIP composition verified: exactly $($expectedPayload.Count) expected entries, no residue" -ForegroundColor Green
 
 # Calculate SHA256 checksum
 $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()

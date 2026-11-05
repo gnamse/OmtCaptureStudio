@@ -10,6 +10,7 @@ using OmtCaptureStudio.Services.Sources;
 using OmtCaptureStudio.ViewModels;
 
 using OmtCaptureStudio.Services.Forensics;
+using System.Reflection;
 namespace OmtCaptureStudio.Tests;
 
 class Program
@@ -656,6 +657,12 @@ class Program
     /// </summary>
     static void RunDefaultSuite()
     {
+        // SEC-04 (R25/R26): PRODUCTION resolves ffmpeg once at startup - App.axaml.cs calls
+        // FfmpegPreflight.Run and the execution sink consumes that proven path. The suite must do the same
+        // before any step that starts a take, because the sink no longer falls back to a bare "ffmpeg"
+        // resolved through PATH. Without this the recording steps fail by design, not by accident.
+        FfmpegPreflight.Run(AppContext.BaseDirectory);
+        Console.WriteLine($"   [ffmpeg] head-of-suite resolution -> {FfmpegPreflight.ResolvedPath ?? "<NULL>"}");
         Console.WriteLine("====================================================");
         Console.WriteLine("  OMT Capture Studio - End-to-End Automated Test");
         Console.WriteLine("====================================================");
@@ -690,8 +697,22 @@ class Program
         TestScheduledSegmentedCapture();
         TestCrashForensics();
         TestFfmpegPreflightAndForensicsFallback();
+
+        // SEC-04 (R26): re-resolve here, deliberately. The preflight STEP above exercises the failure
+        // scenarios (missing, broken, throwing, empty PATH) and each one legitimately CLEARS
+        // FfmpegPreflight.ResolvedPath - so the proven path established at the head of this suite is gone by
+        // the time a take is started, and the sink now refuses to search PATH. Production never clears it
+        // (nothing re-runs the preflight), so the faithful mirror is to re-resolve after the step that
+        // deliberately breaks it, immediately before the steps that start real takes.
+        Console.WriteLine($"   [ffmpeg] after the preflight STEP -> {FfmpegPreflight.ResolvedPath ?? "<NULL>"}"
+                          + "  (NULL here is the STEP's own failure scenarios clearing it, by R26 design)");
+        FfmpegPreflight.Run(AppContext.BaseDirectory);
+        Console.WriteLine($"   [ffmpeg] after re-resolve, SAME process + SAME redirect -> {FfmpegPreflight.ResolvedPath ?? "<NULL>"}"
+                          + "  (non-null REFUTES the redirected-stdio hypothesis)");
         TestCompositeRecordingSink();
         TestCompositeRecordingWiring();
+        TestFfmpegSinkPathDiscipline();
+        TestNativePayloadVerification();
         TestProgressiveDisclosure();
         TestOperatorSettings();
         TestScheduledStopAndRemainingTime();
@@ -1088,6 +1109,281 @@ class Program
         public void Dispose() { }
     }
 
+    /// <summary>
+    /// SEC-04 (R25/R26). Verified BY CONSEQUENCE, as security's re-audit requires: with no proven ffmpeg,
+    /// the REAL recording path must refuse - and must never fall back to a bare "ffmpeg" resolved through
+    /// the current directory and PATH (CWE-427). The positive direction is covered by the composite tests,
+    /// which start a real take and would fail here if the sink could not reach a resolved binary.
+    /// </summary>
+    /// <summary>
+    /// SEC-04 (R18/R20/R23). The bootstrapper used to trust an extracted file whose BYTE LENGTH matched the
+    /// embedded one, so a same-size planted DLL was never re-extracted and was then loaded. These cases pin
+    /// the replacement rule by consequence: the exact shape the old check accepted must no longer verify.
+    /// </summary>
+    static void TestNativePayloadVerification()
+    {
+        Console.WriteLine("\n[Step 0.704] Verifying native payloads by CONTENT, not length (SEC-04, R18/R20/R23)...");
+
+        Assembly product = typeof(NativePayloadBootstrapper).Assembly;
+        string root = Path.Combine(Path.GetTempPath(), "omt-native-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        const string lib = "libvmx.dll";
+        string expectedHash = NativePayloadBootstrapper.HashOfResource(product, lib);
+        Expect(expectedHash.Length == 64,
+            $"R18: the payload identity must be a SHA-256 over CONTENT; got '{expectedHash}'.");
+
+        long payloadLength;
+        using (Stream? res = product.GetManifestResourceStream("NativePayload." + lib))
+        {
+            Expect(res is not null, "The native payload must be embedded in the product assembly.");
+            payloadLength = res!.Length;
+        }
+
+        // ---- THE HEADLINE CASE: same LENGTH, wrong CONTENT ------------------------------------------
+        // This is precisely the file the OLD check accepted without looking: equal byte count, different
+        // bytes. It must not verify, and extraction must overwrite it.
+        string planted = Path.Combine(root, lib);
+        File.WriteAllBytes(planted, new byte[payloadLength]);   // all zeros: identical size, wrong content
+        Expect(new FileInfo(planted).Length == payloadLength,
+            "The planted file must be the same SIZE as the real payload for this case to mean anything.");
+        Expect(!NativePayloadBootstrapper.FileMatches(planted, expectedHash),
+            "R18/R23: a same-size, wrong-content file must NOT be treated as already extracted.");
+
+        NativePayloadBootstrapper.ExtractVerified(root, product);
+        Expect(NativePayloadBootstrapper.FileMatches(planted, expectedHash),
+            "R18/R23: verified extraction must REPLACE a same-size planted file with the real content.");
+        Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(root, product),
+            "R23: after verified extraction the whole directory must pass the content check.");
+
+        // ---- R23: ONE wrong-content library makes the WHOLE directory unusable ----------------------
+        // This is what stops an unverified directory being used as the fast path.
+        string victim = Path.Combine(root, "libSkiaSharp.dll");
+        byte[] correct = File.ReadAllBytes(victim);
+        File.WriteAllBytes(victim, new byte[correct.Length]);   // same size again, wrong content
+        Expect(!NativePayloadBootstrapper.AllLibrariesPresentAndValid(root, product),
+            "R23: a directory with ONE wrong-content library must be rejected, so the verified extraction runs instead.");
+
+        // ---- and the check is not a blanket refusal -------------------------------------------------
+        File.WriteAllBytes(victim, correct);
+        Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(root, product),
+            "R23: restoring the correct content must pass - the check discriminates, it does not just always say no.");
+
+        // ---- an empty directory is not usable (no library is trusted into existence) -----------------
+        string emptyDir = Path.Combine(Path.GetTempPath(), "omt-native-empty-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(emptyDir);
+        Expect(!NativePayloadBootstrapper.AllLibrariesPresentAndValid(emptyDir, product),
+            "R23: a directory with no libraries must not pass the fast-path check.");
+
+        // ---- R20: a failed extraction is a HARD failure, never a silent skip ------------------------
+        // The blanket catch used to swallow this, after which the planted file was loaded anyway. A target
+        // path that cannot be created as a directory must THROW rather than continue.
+        string notADir = Path.Combine(Path.GetTempPath(), "omt-native-file-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(notADir, "I am a file, not a directory");
+        bool threw = false;
+        try { NativePayloadBootstrapper.ExtractVerified(notADir, product); }
+        catch (Exception) { threw = true; }
+        Expect(threw, "R20: an extraction that cannot proceed must THROW, not be silently skipped.");
+        File.Delete(notADir);
+
+        // ---- R23: the directory name is derived from CONTENT, and is stable -------------------------
+        string nameA = NativePayloadBootstrapper.ComputeContentHash(product);
+        string nameB = NativePayloadBootstrapper.ComputeContentHash(product);
+        Expect(nameA.Length == 16, $"R23: the content-addressed name is 16 hex chars; got '{nameA}'.");
+        Expect(nameA.All(char.IsAsciiHexDigitLower), $"R23: the name must be lowercase hex; got '{nameA}'.");
+        Expect(nameA == nameB,
+            "R23: identical content must produce an IDENTICAL name - that is what makes the directory content-addressed.");
+
+        // and the naming rule must be the one actually in force on this machine
+        string liveDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "OmtCaptureStudio", "native", nameA);
+        if (Directory.Exists(liveDir))
+        {
+            Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(liveDir, product),
+                "R23: the live extraction directory (named by the content hash) must hold the verified payload.");
+            Console.WriteLine($"   [note] the live extraction dir IS named by the content hash: {nameA}");
+        }
+        else
+        {
+            Console.WriteLine("   [note] no live extraction dir present in this session - naming rule asserted above.");
+        }
+
+        // ---- R22: the ACL bound is ASSERTED, not assumed -------------------------------------------
+        string aclDir = Path.Combine(Path.GetTempPath(), "omt-acl-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(aclDir);
+        Expect(NativePayloadBootstrapper.ApplyRestrictiveAcl(aclDir),
+            "R22: applying the restrictive ACL to a directory we own must SUCCEED - and report that it did.");
+        Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(aclDir, product) == false,
+            "R22: an ACL'd but empty directory still must not pass the payload check.");
+        Directory.Delete(aclDir, recursive: true);
+
+        // ---- R19/R21: the LOAD path, driven through an injectable loader -----------------------------
+        // (3) a content-mismatched file must be refused BEFORE the loader is ever called
+        int loaderCalls = 0;
+        Func<string, IntPtr> countingLoader = _ => { loaderCalls++; return new IntPtr(1); };
+
+        string badDir2 = Path.Combine(Path.GetTempPath(), "omt-load-bad-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(badDir2);
+        File.WriteAllBytes(Path.Combine(badDir2, lib), new byte[payloadLength]);   // same length, wrong content
+        bool refusedBeforeLoad = false;
+        try { NativePayloadBootstrapper.LoadAll(badDir2, countingLoader); }
+        catch (Exception) { refusedBeforeLoad = true; }
+        Expect(refusedBeforeLoad, "R18/R19: a content-mismatched file must be refused on the LOAD path.");
+        Expect(loaderCalls == 0,
+            $"R19: the loader must NEVER be called for an unverified file; it was called {loaderCalls} time(s).");
+        Directory.Delete(badDir2, recursive: true);
+
+        // (5) a verified file whose LOAD fails must report the library name and the loader's failure
+        string badDir3 = Path.Combine(Path.GetTempPath(), "omt-load-fail-" + Guid.NewGuid().ToString("N"));
+        NativePayloadBootstrapper.ExtractVerified(badDir3, product);   // real, verified content
+        string loadFailMessage = "";
+        try { NativePayloadBootstrapper.LoadAll(badDir3, _ => IntPtr.Zero); }   // the loader fails
+        catch (Exception ex) { loadFailMessage = ex.Message; }
+        Expect(loadFailMessage.Length > 0, "R21: a LoadLibrary failure must be RAISED, not discarded.");
+        Expect(loadFailMessage.Contains(lib),
+            $"R21: the failure must NAME the library; got '{loadFailMessage}'.");
+        Directory.Delete(badDir3, recursive: true);
+
+        // and the positive direction: verified content + a working loader returns what it loaded
+        string goodDir = Path.Combine(Path.GetTempPath(), "omt-load-ok-" + Guid.NewGuid().ToString("N"));
+        NativePayloadBootstrapper.ExtractVerified(goodDir, product);
+        IReadOnlyList<string> loadedPaths = NativePayloadBootstrapper.LoadAll(goodDir, _ => new IntPtr(1));
+        Expect(loadedPaths.Count > 0, "A verified directory with a working loader must load its libraries.");
+        Expect(loadedPaths.All(x => x.StartsWith(goodDir, StringComparison.OrdinalIgnoreCase)),
+            "R24: every library must be loaded by ABSOLUTE PATH from the verified directory.");
+
+        // R19's mechanism, demonstrated rather than described: LoadAll RETAINS a handle per verified file
+        // for the process lifetime, so the bytes that were verified are the bytes that stay on disk. The
+        // observable consequence is that the verified directory cannot be swapped out from under us -
+        // deletion fails while the handles are held. That is the TOCTOU protection working.
+        bool couldBeDeleted = true;
+        try { Directory.Delete(goodDir, recursive: true); } catch (Exception) { couldBeDeleted = false; }
+        Expect(!couldBeDeleted,
+            "R19: the verified files must be HELD OPEN, so the directory cannot be replaced while loaded. " +
+            "If this deletes, the retention guarantee is gone.");
+        // deliberately NOT cleaned up: the handles are held for the process lifetime by design. The
+        // directory lives in the temp root and goes with it.
+
+        // ---- R22/R23: an UNTRUSTED pre-existing directory is walked away from ------------------------
+        // The content-hash directory exists but is not one we can vouch for, so a FRESH nonce sibling is
+        // used instead - never the directory we cannot stand behind.
+        string distrustRoot = Path.Combine(Path.GetTempPath(), "omt-distrust-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(distrustRoot);
+        string wouldBeTarget = Path.Combine(distrustRoot, NativePayloadBootstrapper.ComputeContentHash(product));
+        Directory.CreateDirectory(wouldBeTarget);
+        File.WriteAllBytes(Path.Combine(wouldBeTarget, lib), new byte[payloadLength]);   // hostile content
+
+        string chosen = NativePayloadBootstrapper.EnsureExtractedDirectory(
+            product, rootOverride: distrustRoot, isTrusted: _ => false);   // force distrust
+        Expect(chosen != wouldBeTarget,
+            "R22/R23: an untrusted pre-existing directory must NOT be used.");
+        Expect(Path.GetDirectoryName(chosen) == distrustRoot,
+            "R22: the replacement must be a SIBLING in the same root, not somewhere else.");
+        Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(chosen, product),
+            "R23: the replacement directory must hold the VERIFIED payload.");
+        Directory.Delete(distrustRoot, recursive: true);
+
+        // ---- R22: a CREATED directory whose ACL application FAILS is never silently used ----------------
+        // The failure mode this closes: ApplyRestrictiveAcl swallowed its own error, so a directory that was
+        // never actually protected was then used anyway - the bound existed only in a comment.
+        string aclFailRoot = Path.Combine(Path.GetTempPath(), "omt-aclfail-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(aclFailRoot);
+        string expectedFirst = Path.Combine(aclFailRoot, NativePayloadBootstrapper.ComputeContentHash(product));
+
+        int aclCalls = 0;
+        string aclChosen = NativePayloadBootstrapper.EnsureExtractedDirectory(
+            product, rootOverride: aclFailRoot,
+            // The FIRST attempt reports failure; the retry performs the REAL ACL application. A fake that
+            // simply returns true would not be believed - the real DirectoryIsTrusted still runs, and an
+            // unprotected directory is correctly rejected. That is the bound working, so the retry must
+            // genuinely protect.
+            applyAcl: path =>
+            {
+                aclCalls++;
+                return aclCalls > 1 && NativePayloadBootstrapper.ApplyRestrictiveAcl(path);
+            });
+
+        Expect(aclCalls >= 2,
+            $"R22: a failed ACL application must trigger a retry in a fresh directory; ACL calls were {aclCalls}.");
+        Expect(aclChosen != expectedFirst,
+            "R22: a directory whose protection FAILED must not be used - a fresh sibling must be chosen.");
+        Expect(Path.GetDirectoryName(aclChosen) == aclFailRoot,
+            "R22: the fallback must be a sibling in the same root.");
+        Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(aclChosen, product),
+            "R23: the fallback directory must still hold the VERIFIED payload.");
+        Directory.Delete(aclFailRoot, recursive: true);
+
+        // and when NO directory can be protected, it must STOP rather than proceed unprotected
+        string aclAlways = Path.Combine(Path.GetTempPath(), "omt-aclnever-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(aclAlways);
+        bool aclRefused = false;
+        try
+        {
+            NativePayloadBootstrapper.EnsureExtractedDirectory(
+                product, rootOverride: aclAlways, applyAcl: _ => false);
+        }
+        catch (Exception) { aclRefused = true; }
+        Expect(aclRefused,
+            "R22: if no directory can be protected, extraction must REFUSE rather than load from an unprotected path.");
+        Directory.Delete(aclAlways, recursive: true);
+
+        Directory.Delete(root, recursive: true);
+        Directory.Delete(emptyDir, recursive: true);
+
+        Console.WriteLine(" -> payload identity is a content SHA-256; a same-SIZE wrong-content file is no longer trusted,");
+        Console.WriteLine("    extraction replaces it, one bad file invalidates the directory, and the check discriminates!");
+    }
+
+    static void TestFfmpegSinkPathDiscipline()
+    {
+        Console.WriteLine("\n[Step 0.703] Verifying the ffmpeg execution sink never searches PATH (R25/R26, SEC-04b)...");
+
+        // --- source shape: the fallback must not EXIST, and the two rules must be present -------------
+        // NOTE: this step deliberately verifies BY CONSEQUENCE rather than by inspecting source text.
+        // Security's re-audit asked for the sink's path selection to be driven end-to-end, and a
+        // text-shape assertion is the weaker check anyway - it can pass on a file that merely MENTIONS the
+        // right identifiers (this file's own comments do). The source is reported for the reader, not
+        // asserted on.
+        string? hostSource = FindRepoSource("OmtCaptureStudio/Services/Sinks/FfmpegProcessHost.cs");
+        Console.WriteLine(hostSource is null
+            ? "   [note] repo source not reachable (installed-binary run) - consequence checks below still run."
+            : "   [note] sink source located; the bare-name fallback's absence is asserted by CONSEQUENCE below.");
+
+        // --- the consequence, through the real recording path -----------------------------------------
+        FfmpegPreflightResult none = FfmpegPreflight.Run(
+            AppContext.BaseDirectory, fileExists: _ => false, versionProbe: _ => null, pathVariable: string.Empty);
+        Expect(!none.IsAvailable, "A probe with no candidates must report ffmpeg unavailable.");
+        Expect(FfmpegPreflight.ResolvedPath is null,
+            "R26: a failed preflight must CLEAR the resolved path so a stale path can never be executed.");
+
+        using (var session = new CaptureSession())
+        {
+            session.Connect(new SyntheticPatternSource());
+
+            int ticks = 0;
+            while (session.RecordingFramesWritten == 0 && ticks < 60) { Thread.Sleep(50); ticks++; }
+
+            var cfg = new RecordingConfig
+            {
+                OutputDirectory = Path.Combine(Path.GetTempPath(), "omt-r25-probe"),
+                FilenamePrefix = "R25"
+            };
+
+            Expect(!session.StartRecording(cfg),
+                "R25/R26: with no PROVEN ffmpeg the take must NOT start - and must never fall back to a " +
+                "PATH-resolved 'ffmpeg'. A take that starts here means the sink searched.");
+        }
+
+        // --- restore, so every step AFTER this one still has a proven binary ---------------------------
+        FfmpegPreflight.Run(AppContext.BaseDirectory);
+        Expect(FfmpegPreflight.ResolvedPath is not null,
+            "The preflight must be re-established for the steps that follow.");
+
+        Console.WriteLine(" -> no bare-name fallback in the sink, the preflight is the single resolution authority,");
+        Console.WriteLine("    a failed preflight clears the path, and a real take is REFUSED rather than PATH-searched!");
+    }
+
     static void TestBroadcastCaptureStall()
     {
         Console.WriteLine("\n[Step 0.702] Verifying a capture provider that never yields is REPORTED, not silent (DIAG-BROADCAST)...");
@@ -1332,20 +1628,152 @@ class Program
         var psi = UpdateService.BuildInstallStartInfo(@"C:\Temp\OmtCaptureStudio-v1.0.0.23-Setup.exe");
         Expect(psi.Arguments == "/VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS",
             $"The silent-install switch set must be exact; got '{psi.Arguments}'.");
-        Expect(psi.UseShellExecute, "The installer is launched through the shell.");
+        // Brief amendment 2: CreateProcess, NOT the shell. UseShellExecute=true honours Mark-of-the-Web,
+        // so it would turn our own deliberate MotW mark into a SmartScreen prompt on every update.
+        Expect(!psi.UseShellExecute,
+            "The installer must be launched via CreateProcess - UseShellExecute=true would honour the MotW mark we apply.");
+        Expect(psi.WorkingDirectory == Path.GetDirectoryName(@"C:\Temp\OmtCaptureStudio-v1.0.0.23-Setup.exe"),
+            $"The working directory must be the staged file's folder; got '{psi.WorkingDirectory}'.");
+        Expect(psi.Arguments == "/VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS",
+            "The silent switch set must survive the launch-mode change unchanged.");
 
         string fakeInstaller = Path.Combine(dlDir, "OmtCaptureStudio-v1.0.0.23-Setup.exe");
         File.WriteAllBytes(fakeInstaller, payload);
 
-        // installer channel + verified path + auto-install ON -> launched exactly once, with that path
+        // installer channel + auto-install ON -> download, verify, re-verify ON DISK, then launch
+        var onTransport = new FakeUpdateTransport();
+        onTransport.Strings[UpdateService.ReleasesApiUrl] = feed;
+        onTransport.Strings["https://dl.example/" + shaAsset] = goodHash + "  OmtCaptureStudio-v1.0.0.23-Setup.exe";
+        onTransport.Bytes["https://dl.example/OmtCaptureStudio-v1.0.0.23-Setup.exe"] = payload;
+
         string? launchedPath = null;
-        var onSvc = new UpdateService(transport, currentVersion: () => "1.0.0.22",
+        var onSvc = new UpdateService(onTransport, currentVersion: () => "1.0.0.22",
             executablePath: () => @"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe",
             launchProcess: p => { launchedPath = p; return true; },
             tempDirectory: () => dlDir,
+            stagingDirectory: () => dlDir,
             environment: env);
-        Expect(onSvc.TryStartInstall(fakeInstaller, out string onDetail), $"Auto-install ON must start the installer; got '{onDetail}'.");
-        Expect(launchedPath == fakeInstaller, $"The launcher must receive the VERIFIED path; got {launchedPath}.");
+
+        UpdateRelease onRel = onSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!;
+        string? staged = onSvc.DownloadAndVerifyAsync(onRel).GetAwaiter().GetResult();
+        Expect(staged is not null, "The install path requires a download that verified first.");
+
+        // R27: the staged name carries a nonce, so it cannot be pre-created or predicted
+        Expect(Path.GetFileName(staged!).EndsWith("-OmtCaptureStudio-v1.0.0.23-Setup.exe", StringComparison.Ordinal),
+            $"The staged file must keep the asset name behind a nonce; got '{Path.GetFileName(staged)}'.");
+        Expect(Path.GetFileName(staged!) != "OmtCaptureStudio-v1.0.0.23-Setup.exe",
+            "The staged name must be non-predictable, not the bare asset name.");
+
+        // R27/R19: an installer this session never verified must not be launched at all
+        Expect(!onSvc.TryStartInstall(fakeInstaller, out _),
+            "R27: an installer this session did not verify must be refused, even though it exists.");
+
+        Expect(onSvc.TryStartInstall(staged, out string onDetail), $"Auto-install ON must start the verified installer; got '{onDetail}'.");
+        Expect(launchedPath == staged, $"The launcher must receive the VERIFIED staged path; got {launchedPath}.");
+
+        // R27 TOCTOU: swap the staged file AFTER verification -> the launch must be refused
+        File.WriteAllBytes(staged!, System.Text.Encoding.UTF8.GetBytes("swapped-after-verification"));
+        Expect(!onSvc.TryStartInstall(staged, out string swapDetail),
+            "R27: a staged installer swapped after verification must be refused (the verify->launch TOCTOU).");
+        Expect(swapDetail.Contains("changed on disk"), $"The refusal must say why; got '{swapDetail}'.");
+
+        // ---- R28/amendment 3: the ERROR_ELEVATION_REQUIRED (740) path --------------------------------
+        // If PrivilegesRequired ever moves from 'lowest' to 'admin', the compiled manifest becomes
+        // requireAdministrator, CreateProcess fails with 740, and auto-update would die for machine-wide
+        // installs while every per-user test still passed. These two cases pin that it does not go silent.
+        var psiElevated = UpdateService.BuildElevatedInstallStartInfo(@"C:\Temp\OmtCaptureStudio-v1.0.0.23-Setup.exe");
+        Expect(psiElevated.UseShellExecute && psiElevated.Verb == "runas",
+            $"The elevated relaunch must use the runas verb through the shell; got verb='{psiElevated.Verb}'.");
+        Expect(psiElevated.Arguments == "/VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS",
+            "The elevated relaunch must carry the same silent switch set.");
+
+        int normalLaunches740 = 0;
+        int elevatedLaunches = 0;
+        var elevationTransport = new FakeUpdateTransport();
+        elevationTransport.Strings[UpdateService.ReleasesApiUrl] = feed;
+        elevationTransport.Strings["https://dl.example/" + shaAsset] = goodHash + "  OmtCaptureStudio-v1.0.0.23-Setup.exe";
+        elevationTransport.Bytes["https://dl.example/OmtCaptureStudio-v1.0.0.23-Setup.exe"] = payload;
+
+        var elevDir = Path.Combine(Path.GetTempPath(), "omt-elev-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(elevDir);
+        var elevSvc = new UpdateService(elevationTransport, currentVersion: () => "1.0.0.22",
+            executablePath: () => @"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe",
+            launchProcess: _ =>
+            {
+                normalLaunches740++;
+                // exactly what CreateProcess does when the manifest requires elevation
+                throw new System.ComponentModel.Win32Exception(740);
+            },
+            launchElevated: _ => { elevatedLaunches++; return true; },
+            tempDirectory: () => elevDir,
+            stagingDirectory: () => elevDir,
+            environment: env);
+
+        UpdateRelease elevRel = elevSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!;
+        string? elevStaged = elevSvc.DownloadAndVerifyAsync(elevRel).GetAwaiter().GetResult();
+        Expect(elevStaged is not null, "The 740 case needs a verified staged installer.");
+
+        Expect(elevSvc.TryStartInstall(elevStaged, out string elevDetail),
+            $"A 740 must trigger the runas relaunch and report success; got '{elevDetail}'.");
+        Expect(elevatedLaunches == 1, $"The runas relaunch must be attempted exactly ONCE; got {elevatedLaunches}.");
+        Expect(normalLaunches740 == 1, $"The normal launch must be attempted once and not retried; got {normalLaunches740}.");
+        Expect(elevDetail.Contains("elevation"), $"The detail must say elevation was involved; got '{elevDetail}'.");
+
+        // and when the runas relaunch ALSO fails: report loudly, never loop
+        int normalLaunchesFail = 0;
+        int elevatedFailures = 0;
+        var failSvc = new UpdateService(elevationTransport, currentVersion: () => "1.0.0.22",
+            executablePath: () => @"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe",
+            launchProcess: _ => { normalLaunchesFail++; throw new System.ComponentModel.Win32Exception(740); },
+            launchElevated: _ => { elevatedFailures++; return false; },
+            tempDirectory: () => elevDir,
+            stagingDirectory: () => elevDir,
+            environment: env);
+
+        UpdateRelease failRel = failSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!;
+        string? failStaged = failSvc.DownloadAndVerifyAsync(failRel).GetAwaiter().GetResult();
+        Expect(!failSvc.TryStartInstall(failStaged, out string failDetail),
+            "A failed runas relaunch must be reported as a failure, not swallowed.");
+        Expect(normalLaunchesFail == 1 && elevatedFailures == 1,
+            $"Neither launcher may be retried; got normal={normalLaunchesFail}, elevated={elevatedFailures}.");
+        Expect(failDetail.Contains("administrator") && failDetail.Contains("manually"),
+            $"The operator must be told to install it manually; got '{failDetail}'.");
+        Directory.Delete(elevDir, recursive: true);
+
+        // R27 traversal: a release-supplied name with separators or '..' must never reach a path
+        // R27: the REAL asset name, spelled as build-release.ps1 and the .iss actually write it
+        // (lowercase 'mt'). This is the shape that must never fail closed - a case-SENSITIVE prefix check
+        // against a misspelled literal would reject every update forever, silently reporting "up to date".
+        Expect(UpdateService.IsSafeAssetName("OmtCaptureStudio-v1.0.0.23-Setup.exe"),
+            "The REAL release asset name must be accepted.");
+        // CANARY: the misspelling the brief carried. The contract is suffix+version based, not a fixed
+        // prefix, so this is ALSO accepted - deliberately. Pinning that here documents the decision: a
+        // rename upstream degrades to 'still works', never to 'fails closed with no error surface'.
+        Expect(UpdateService.IsSafeAssetName("OMTCaptureStudio-v1.0.0.23-Setup.exe"),
+            "A differently-cased name must not be rejected - matching is OrdinalIgnoreCase by contract.");
+        Expect(!UpdateService.IsSafeAssetName(@"..\..\evil\OmtCaptureStudio-v1.0.0.23-Setup.exe"), "A traversing name is refused.");
+        Expect(!UpdateService.IsSafeAssetName("sub/dir/OmtCaptureStudio-v1.0.0.23-Setup.exe"), "A slashed name is refused.");
+        Expect(!UpdateService.IsSafeAssetName(".."), "A bare '..' is refused.");
+        Expect(!UpdateService.IsSafeAssetName(null), "A null name is refused.");
+
+        // the same, through the whole feed: the real name must yield an installer asset
+        var realFeed = new FakeUpdateTransport();
+        realFeed.Strings[UpdateService.ReleasesApiUrl] = FakeReleaseJson(
+            "v1.0.0.23", "OmtCaptureStudio-v1.0.0.23-Setup.exe", 73017804,
+            "OmtCaptureStudio-v1.0.0.23-Setup.exe.sha256");
+        var realSvc = new UpdateService(realFeed, currentVersion: () => "1.0.0.22");
+        UpdateRelease realRel = realSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!;
+        Expect(realRel.SetupAssetName == "OmtCaptureStudio-v1.0.0.23-Setup.exe",
+            $"The real release shape must resolve to an installer; got '{realRel.SetupAssetName}'.");
+        Expect(realRel.SetupSha256Url is not null, "and its sidecar must be located.");
+
+        var trav = new FakeUpdateTransport();
+        trav.Strings[UpdateService.ReleasesApiUrl] = FakeReleaseJson(
+            "v1.0.0.23", @"..\..\evil\OmtCaptureStudio-v1.0.0.23-Setup.exe", 1, "x.sha256");
+        var travSvc = new UpdateService(trav, currentVersion: () => "1.0.0.22");
+        UpdateRelease? travRel = travSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release;
+        Expect(travRel is null || travRel.SetupAssetName is null,
+            $"A release naming a traversing asset must yield no installer at all; got '{travRel?.SetupAssetName}'.");
 
         // PORTABLE: notify-only. The launcher must not even be called.
         bool portableLaunched = false;
@@ -1354,7 +1782,7 @@ class Program
             launchProcess: _ => { portableLaunched = true; return true; },
             tempDirectory: () => dlDir,
             environment: env);
-        Expect(!portableSvc.TryStartInstall(fakeInstaller, out string portableDetail),
+        Expect(!portableSvc.TryStartInstall(staged, out string portableDetail),
             "A portable copy must never self-replace.");
         Expect(!portableLaunched, "The portable path must not launch the installer at all.");
         Expect(portableDetail.Contains("portable", StringComparison.OrdinalIgnoreCase),
@@ -1471,6 +1899,8 @@ class Program
             case "0.700": SecurityRegressionTable.RunAll(); break;
             case "0.701": TestUpdateService(); break;
             case "0.702": TestBroadcastCaptureStall(); break;
+            case "0.703": TestFfmpegSinkPathDiscipline(); break;
+            case "0.704": TestNativePayloadVerification(); break;
             case "0.75":  TestMainWindowViewModel(); break;
             default:
                 Console.Error.WriteLine($"Unknown step id '{id}'.");

@@ -132,6 +132,9 @@ public sealed class UpdateService
     public const string ReleasesPageUrl = "https://github.com/gnamse/OmtCaptureStudio/releases";
     public const string UserAgent = "OmtCaptureStudio-UpdateCheck";
 
+    /// <summary>CreateProcess cannot elevate; this is the Win32 error that says so.</summary>
+    public const int ErrorElevationRequired = 740;
+
     /// <summary>The silent-install switch set. Inno closes us, replaces the files, relaunches.</summary>
     public const string SilentInstallArguments = "/VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS";
 
@@ -147,6 +150,10 @@ public sealed class UpdateService
     private readonly Func<string, string?> _environment;
 
     private bool _checkedThisLaunch;
+    private readonly Func<string> _stagingDirectory;
+    private readonly Func<string, bool> _launchElevated;
+    private string? _stagedInstallerPath;
+    private string? _stagedInstallerHash;
 
     public UpdateService(
         IUpdateTransport transport,
@@ -155,7 +162,9 @@ public sealed class UpdateService
         Func<string, bool>? launchProcess = null,
         Func<string>? tempDirectory = null,
         Func<DateTime>? utcNow = null,
-        Func<string, string?>? environment = null)
+        Func<string, string?>? environment = null,
+        Func<string>? stagingDirectory = null,
+        Func<string, bool>? launchElevated = null)
     {
         _transport = transport;
         _currentVersion = currentVersion ?? (() => ResolveInstalledVersion());
@@ -167,6 +176,10 @@ public sealed class UpdateService
         // live, it silently depended on the developer's own %LOCALAPPDATA%, which made the policy
         // untestable and the behaviour machine-dependent.
         _environment = environment ?? Environment.GetEnvironmentVariable;
+        // R27: the staged installer belongs in the per-user protected directory, never a shared temp path
+        // where a predictable name could be pre-created or swapped. Injectable so tests stay off the real one.
+        _stagingDirectory = stagingDirectory ?? DefaultStagingDirectory;
+        _launchElevated = launchElevated ?? LaunchElevatedDefault;
     }
 
     /// <summary>True once this instance has spent its one permitted network check.</summary>
@@ -326,6 +339,12 @@ public sealed class UpdateService
         {
             if (!name.EndsWith(setupSuffix, StringComparison.OrdinalIgnoreCase)) continue;
             if (!name.Contains($"v{version}", StringComparison.OrdinalIgnoreCase)) continue;
+
+            // R27 (SEC-04d): the suffix and version FILTERS pass a traversing name easily - a name such as
+            // '..\..\...\Startup\OmtCaptureStudio-v1.0.0.22-Setup.exe' satisfies both. The name reaches
+            // Path.Combine, so it has to be a bare file name or it is refused outright. Taken from the
+            // release JSON, which is a remote input.
+            if (!IsSafeAssetName(name)) continue;
             setupName = name;
             setupUrl = url;
             setupSize = size;
@@ -349,6 +368,23 @@ public sealed class UpdateService
             setupUrl,
             shaUrl,
             setupSize);
+    }
+
+    /// <summary>
+    /// R27 (SEC-04d): a release-supplied asset name is a REMOTE input that is about to become a path. It is
+    /// safe only if it is a bare file name: no directory separators (either slash), no '..' segment, and
+    /// unchanged by <see cref="Path.GetFileName(string)"/>. Any failure means the release is not trusted to
+    /// name a file on this machine.
+    /// </summary>
+    public static bool IsSafeAssetName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        if (name.Contains('/') || name.Contains('\\')) return false;
+        if (name.Contains("..", StringComparison.Ordinal)) return false;
+        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return false;
+
+        string bare = Path.GetFileName(name);
+        return string.Equals(bare, name, StringComparison.Ordinal);
     }
 
     private static IEnumerable<(string Name, string Url, long Size)> EnumerateAssets(string json)
@@ -477,8 +513,15 @@ public sealed class UpdateService
     // ---------------------------------------------------------------- download + verify
 
     /// <summary>
-    /// Downloads the installer to the temp directory and verifies it against the release's published
-    /// .sha256 BEFORE anything may execute it. Returns the verified path, or null with a loud log line.
+    /// Downloads the installer and verifies it against the release's published .sha256 before anything
+    /// may execute it, staging it in the per-user protected directory under a non-predictable name.
+    /// Returns the verified path, or null with a loud log line.
+    ///
+    /// <para><b>What this check is and is NOT (R28).</b> It is an INTEGRITY check against corruption,
+    /// truncation and a mangled transfer. It is <b>not</b> tamper detection: the artifact and its expected
+    /// hash are taken from the same release, so an actor who can publish - or who holds a token that can -
+    /// replaces both and passes this check. Binding to a publisher requires an Authenticode signature,
+    /// which is an open decision (unsigned releases are an ACCEPTED RISK, on the record).</para>
     /// A hash mismatch deletes the download: an unverified installer is not left on disk for a later
     /// accident to run.
     /// </summary>
@@ -520,7 +563,19 @@ public sealed class UpdateService
             return null;
         }
 
-        string path = Path.Combine(_tempDirectory(), release.SetupAssetName);
+        // R27 (SEC-04c): the staged installer used to land in %TEMP% under a predictable name, and was
+        // launched later BY PATH - so anything running as this user could swap it between the check and the
+        // launch. It now stages in the per-user protected directory under a name carrying a fresh nonce,
+        // which an attacker cannot pre-create or predict.
+        string stagingDir = _stagingDirectory();
+        try { Directory.CreateDirectory(stagingDir); }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Update staging directory '{stagingDir}' could not be created.", ex);
+            return null;
+        }
+
+        string path = Path.Combine(stagingDir, $"{Guid.NewGuid():N}-{release.SetupAssetName}");
         try
         {
             await File.WriteAllBytesAsync(path, payload, cancellationToken).ConfigureAwait(false);
@@ -530,6 +585,19 @@ public sealed class UpdateService
             AppLogger.LogError($"Update download could not be written to '{path}'.", ex);
             return null;
         }
+
+        _stagedInstallerPath = path;
+        _stagedInstallerHash = actual;
+
+        // MotW added DELIBERATELY - it warns manual double-clicks; the app's own launch is CreateProcess and
+        // unaffected. Two halves, both chosen:
+        //   * We write the bytes ourselves, so the file would otherwise carry NO Zone.Identifier and
+        //     SmartScreen would never prompt for it at all - losing the one free defence if the operator
+        //     later opens the staged installer by hand from the updates folder.
+        //   * The app's own install path must NOT be impeded, which is why the launch is CreateProcess
+        //     rather than ShellExecuteEx (see BuildInstallStartInfo) - that mode is what honours this mark.
+        // This is a trade, not a restored default: the mark protects the human path and is inert on ours.
+        TryMarkZoneFromInternet(path);
 
         AppLogger.LogInfo($"Update verified: '{release.SetupAssetName}' ({payload.Length} bytes) SHA-256 {actual}.");
         return path;
@@ -574,6 +642,16 @@ public sealed class UpdateService
             return false;
         }
 
+        // R27/R19 (SEC-04c): re-verify the file ON DISK immediately before launch. Verifying the in-memory
+        // bytes and then launching a path leaves a window in which the file can be replaced; this closes it
+        // as far as a path-based launch can be closed, and refuses on any doubt.
+        if (!StagedInstallerStillVerifies(verifiedInstallerPath, out string why))
+        {
+            AppLogger.LogError($"Update install refused: {why}");
+            detail = "The downloaded update changed on disk after verification and was refused.";
+            return false;
+        }
+
         try
         {
             if (_launchProcess(verifiedInstallerPath))
@@ -585,6 +663,33 @@ public sealed class UpdateService
             detail = "The installer could not be started.";
             return false;
         }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == ErrorElevationRequired)
+        {
+            // R28/amendment 3: the installer needs elevation and CreateProcess cannot provide it. This is the
+            // ONE place a shell verb is legitimate - "runas" is what raises the UAC prompt. Relaunch ONCE and
+            // never loop: a second failure is reported, not retried.
+            AppLogger.LogInfo(
+                "Update install requires elevation (Win32 740); relaunching once through the runas verb.");
+
+            try
+            {
+                if (_launchElevated(verifiedInstallerPath))
+                {
+                    detail = "Installer started with an elevation prompt; the app will now close so it can be replaced.";
+                    return true;
+                }
+            }
+            catch (Exception elevatedEx)
+            {
+                AppLogger.LogError("Update install failed to start even with elevation.", elevatedEx);
+            }
+
+            AppLogger.LogError(
+                "Update install could not be started even with elevation. " +
+                $"Install it manually from {ReleasesPageUrl}.");
+            detail = "The update needs administrator rights and could not be started - install it manually from the releases page.";
+            return false;
+        }
         catch (Exception ex)
         {
             AppLogger.LogError("Update install failed to start.", ex);
@@ -593,12 +698,129 @@ public sealed class UpdateService
         }
     }
 
+    /// <summary>
+    /// R27 (SEC-04c/R19): hashes the file that is ABOUT to be executed and compares it with the hash that
+    /// was verified at download time. Any difference - a swap, a truncation, a replaced file - refuses the
+    /// install rather than launching something that was never checked.
+    /// </summary>
+    public bool StagedInstallerStillVerifies(string path, out string why)
+    {
+        why = string.Empty;
+
+        if (_stagedInstallerHash is null || !string.Equals(path, _stagedInstallerPath, StringComparison.Ordinal))
+        {
+            why = "the installer on disk is not the one this session verified.";
+            return false;
+        }
+
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            string actual = Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
+            if (!string.Equals(actual, _stagedInstallerHash, StringComparison.OrdinalIgnoreCase))
+            {
+                why = $"its SHA-256 is {actual} but the verified download was {_stagedInstallerHash}.";
+                return false;
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            why = $"it could not be re-read ({ex.Message}).";
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// R28: writes the Mark-of-the-Web <c>Zone.Identifier</c> alternate data stream so Windows treats the
+    /// staged installer as though a browser had downloaded it. Plain file I/O - AOT-safe. Best effort: a
+    /// filesystem without ADS support must not turn a verified update into a failed one.
+    /// </summary>
+    public static void TryMarkZoneFromInternet(string path)
+    {
+        const string zoneStream = ":Zone.Identifier";
+        string body = "[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=" + ReleasesPageUrl + "\r\n";
+
+        try
+        {
+            File.WriteAllText(path + zoneStream, body);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogInfo(
+                $"Update: could not mark '{Path.GetFileName(path)}' as Internet-sourced ({ex.Message}). " +
+                "SmartScreen will not prompt for it.");
+        }
+    }
+
     /// <summary>Builds the launch description. Split out so its ARGUMENT SHAPE is assertable.</summary>
-    public static ProcessStartInfo BuildInstallStartInfo(string installerPath) => new(installerPath)
+    /// <summary>
+    /// The launch description for a verified installer. Split out so its ARGUMENT SHAPE is assertable.
+    ///
+    /// <para><b>CreateProcess, NOT the shell (brief amendment 2).</b> This was <c>UseShellExecute = true</c>,
+    /// and that mode HONOURS Mark-of-the-Web: the shell checks the zone marker <i>before</i> Inno ever runs,
+    /// so the MotW we deliberately apply would put a SmartScreen prompt in front of the app's own update
+    /// flow for every user - and Inno's <c>/VERYSILENT</c> cannot suppress a block that happens before Inno
+    /// starts. <c>UseShellExecute = false</c> is the honest mode for launching our OWN already-verified file
+    /// with a known argument vector.</para>
+    ///
+    /// <para><b>Why this is safe, stated correctly (brief amendment 3).</b> The released installers carry an
+    /// <c>asInvoker</c> manifest - there is <b>no elevation request in it at all</b>, so CreateProcess simply
+    /// runs it. That manifest is the product of <c>PrivilegesRequired=lowest</c> in the .iss; the all-users
+    /// option is elevated by <b>Inno relaunching itself internally</b>, not by this call. <b>Do not change
+    /// <c>PrivilegesRequired</c> without re-testing BOTH channels:</b> moving it to <c>admin</c> compiles
+    /// <c>requireAdministrator</c>, CreateProcess then fails with <c>ERROR_ELEVATION_REQUIRED (740)</c>, and
+    /// auto-update would die for machine-wide installs while every per-user test still passed. The 740
+    /// relaunch below is what keeps that from being silent.</para>
+    /// </summary>
+    public static ProcessStartInfo BuildInstallStartInfo(string installerPath)
+    {
+        var startInfo = new ProcessStartInfo(installerPath)
+        {
+            Arguments = SilentInstallArguments,
+            UseShellExecute = false
+        };
+
+        // Set the working directory to the staged file's own folder, so nothing about the launch depends on
+        // whatever directory this process happens to be sitting in.
+        try
+        {
+            startInfo.WorkingDirectory = Path.GetDirectoryName(installerPath) ?? string.Empty;
+        }
+        catch (Exception)
+        {
+            startInfo.WorkingDirectory = string.Empty;
+        }
+
+        return startInfo;
+    }
+
+    /// <summary>R27: <c>%LOCALAPPDATA%\OmtCaptureStudio\updates\</c>, falling back to temp only if the
+    /// per-user directory is unavailable - and never to a bare predictable name.</summary>
+    public static string DefaultStagingDirectory()
+    {
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return string.IsNullOrWhiteSpace(local)
+            ? Path.Combine(Path.GetTempPath(), "OmtCaptureStudio", "updates")
+            : Path.Combine(local, "OmtCaptureStudio", "updates");
+    }
+
+    /// <summary>
+    /// The elevated launch, used only after CreateProcess reports 740. This is the one legitimate use of the
+    /// shell verb in this file: <c>runas</c> is what raises the UAC prompt that CreateProcess cannot.
+    /// </summary>
+    public static ProcessStartInfo BuildElevatedInstallStartInfo(string installerPath) => new(installerPath)
     {
         Arguments = SilentInstallArguments,
-        UseShellExecute = true
+        UseShellExecute = true,   // required for a shell verb
+        Verb = "runas"
     };
+
+    private static bool LaunchElevatedDefault(string path)
+    {
+        using var p = Process.Start(BuildElevatedInstallStartInfo(path));
+        return p is not null;
+    }
 
     private static bool LaunchProcessDefault(string path)
     {
