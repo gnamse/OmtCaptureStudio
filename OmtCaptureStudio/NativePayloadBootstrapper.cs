@@ -144,9 +144,11 @@ public static class NativePayloadBootstrapper
     /// all content-verified; throws rather than returning one that is not (R20).
     /// </summary>
     public static string EnsureExtractedDirectory(
-        Assembly assembly, string? rootOverride = null, Func<string, bool>? isTrusted = null)
+        Assembly assembly, string? rootOverride = null, Func<string, bool>? isTrusted = null,
+        Func<string, bool>? applyAcl = null)
     {
         isTrusted ??= DirectoryIsTrusted;
+        applyAcl ??= ApplyRestrictiveAcl;
 
         string root = rootOverride ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -164,12 +166,42 @@ public static class NativePayloadBootstrapper
             // behind - and rather than brick the app by refusing outright, which would hand an attacker a
             // trivial denial of service - fall back to a fresh unpredictable sibling directory that the
             // attacker cannot pre-create. The verified extraction below still has to pass.
-            target = Path.Combine(root, contentHash + "-" + Guid.NewGuid().ToString("N")[..12]);
+            target = FreshSibling(root, contentHash);
+        }
+
+        // R22: a directory we CREATE must also be one we can vouch for. Apply the ACL and CHECK it, rather
+        // than assuming the call did what it said. A directory whose protection did not take is not a place
+        // to load executable code from - so fall back ONCE to a fresh nonce sibling, exactly as an untrusted
+        // PRE-EXISTING directory does, and if that cannot be protected either, stop rather than proceed.
+        if (!Directory.Exists(target))
+        {
+            Directory.CreateDirectory(target);
+            if (!applyAcl(target) || !DirectoryIsTrusted(target))
+            {
+                AppLogger.LogError(
+                    $"Native payload: freshly created directory '{target}' could not be protected. " +
+                    "Falling back to a fresh directory once.");
+                target = FreshSibling(root, contentHash);
+                Directory.CreateDirectory(target);
+
+                if (!applyAcl(target) || !DirectoryIsTrusted(target))
+                {
+                    AppLogger.LogError(
+                        $"Native payload: the fallback directory '{target}' also could not be protected. Refusing.");
+                    throw new InvalidOperationException(
+                        "Native payload extraction directory could not be protected. Refusing to load native " +
+                        "libraries from an unprotected location.");
+                }
+            }
         }
 
         ExtractVerified(target, assembly);
         return target;
     }
+
+    /// <summary>R22: a fresh, unpredictable sibling of the content-addressed directory.</summary>
+    private static string FreshSibling(string root, string contentHash)
+        => Path.Combine(root, contentHash + "-" + Guid.NewGuid().ToString("N")[..12]);
 
     /// <summary>
     /// R22: is this directory ours and closed? A directory owned by someone else, or granting write access

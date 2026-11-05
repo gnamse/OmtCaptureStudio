@@ -1294,7 +1294,15 @@ class Program
         int aclCalls = 0;
         string aclChosen = NativePayloadBootstrapper.EnsureExtractedDirectory(
             product, rootOverride: aclFailRoot,
-            applyAcl: _ => { aclCalls++; return aclCalls > 1; });   // fails on the FIRST attempt only
+            // The FIRST attempt reports failure; the retry performs the REAL ACL application. A fake that
+            // simply returns true would not be believed - the real DirectoryIsTrusted still runs, and an
+            // unprotected directory is correctly rejected. That is the bound working, so the retry must
+            // genuinely protect.
+            applyAcl: path =>
+            {
+                aclCalls++;
+                return aclCalls > 1 && NativePayloadBootstrapper.ApplyRestrictiveAcl(path);
+            });
 
         Expect(aclCalls >= 2,
             $"R22: a failed ACL application must trigger a retry in a fresh directory; ACL calls were {aclCalls}.");
