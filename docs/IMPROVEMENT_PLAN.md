@@ -1,6 +1,6 @@
 # OMT Capture Studio — Improvement Plan
 
-**Status:** Living plan — Phase 0 complete (2026-11-08); Phases 1+ pending  
+**Status:** Living plan — Phase 0 complete (2026-11-08); Phase 1.1 CI skeleton landed; Phases 1.2+ pending  
 **Owner:** Gbolahan  
 **Grounded against:** repo @ `feature/media-foundation-sink` / version `1.0.0.24` (main carries security/broadcast line)  
 **Companions:** `AGENTS.md`, `CODING_STANDARDS.md`, `CONTEXT.md`, `DESIGN.md`, `docs/adr/*`, `spikes/mf-sinkwriter/README.md`
@@ -73,7 +73,7 @@
 
 | Workstream | Concrete tickets | Effort |
 |---|---|---|
-| **1.1 CI workflow** | Add `.github/workflows/ci.yml` (or Azure DevOps if preferred — default GitHub Actions): restore → `dotnet build OmtCaptureStudio.sln -c Release -p:Platform=x64` → `dotnet run --project OmtCaptureStudio.Tests -c Release -p:Platform=x64` (default suite, no soak). Fail on non-zero. Cache NuGet. Document that headless DXGI/GDI paths already soft-fail (see prior OMT-11/12 remediations). | M (1–2 d) |
+| **1.1 CI workflow** | Add `.github/workflows/ci.yml` (or Azure DevOps if preferred — default GitHub Actions): restore → `dotnet build OmtCaptureStudio.sln -c Release -p:Platform=x64` → `dotnet run --project OmtCaptureStudio.Tests -c Release -p:Platform=x64` (default suite, no soak). Fail on non-zero. Cache NuGet. Document that headless DXGI/GDI paths already soft-fail (see prior OMT-11/12 remediations). | M (1–2 d) **Done 2026-11-08** (skeleton: workflow + `scripts/ci-prerequisites.ps1`; suite green on runners still blocked on 1.2 artifacts) |
 | **1.2 CI prerequisites** | Decide how runners get native libs + ffmpeg: (a) checked-in CI cache artifact / secret-stored zip, or (b) job step that fails with clear message if missing. Prefer (a) for green main. Suite already calls `FfmpegPreflight.Run` at head of `RunDefaultSuite`. | M (1 d) + infra |
 | **1.3 Optional AOT job** | Nightly or `workflow_dispatch`: `dotnet publish OmtCaptureStudio/OmtCaptureStudio.csproj -c Release -r win-x64 /p:PublishAot=true`. Not required on every PR initially (slow). | S–M |
 | **1.4 Directory.Build.props + editorconfig** | Root `Directory.Build.props`: `Nullable`, `TreatWarningsAsErrors` (start Warning-level treat carefully — may need baseline), `LangVersion`, shared `Platform=x64` notes. `.editorconfig` for C# style aligned with existing code. Optional: `EnableNETAnalyzers` + a small allowlist; **do not** enable rules that fight AOT or CommunityToolkit generators without a dry-run. | M (1–2 d) |
@@ -82,10 +82,12 @@
 
 **Acceptance criteria**
 
-- [ ] PR CI red/green without manual local ritual for build + default suite.
+- [ ] PR CI red/green without manual local ritual for build + default suite. *(1.1 skeleton: workflow exists; clean runners fail at prerequisites with an explicit Phase 1.2 message until artifacts are provisioned.)*
 - [ ] `Program.cs` is a router (<~400 lines target after split); step ids still work (`--step 0.682` etc.).
 - [ ] At least one VM slice extracted with tests green and AOT publish still succeeding.
 - [ ] `Directory.Build.props` + `.editorconfig` present; build warning policy documented in `CODING_STANDARDS.md` (one paragraph).
+
+**1.1 landed (2026-11-08):** `.github/workflows/ci.yml` on `windows-latest` — NuGet cache via `setup-dotnet`, Release\|x64 restore/build, `scripts/ci-prerequisites.ps1`, stage `tools/ffmpeg.exe` beside the test host, default suite via `dotnet run` (no soak). Does not commit binaries; does not touch `spikes/mf-sinkwriter`.
 
 **Dependencies / risks:** CI without native payload/ffmpeg will false-red. Splitting tests without preserving step order will break muscle memory / any external scripts. TreatWarningsAsErrors can stall — phase in.
 
@@ -174,8 +176,8 @@
 ### This week (execute in order)
 
 1. ~~**Phase 0.1–0.2** — gitignore + README/CONTEXT truth~~ **Done 2026-11-08** (0.3 Known gaps also landed).
-2. **Phase 1.1 skeleton** — CI YAML that builds; tolerate missing payload with explicit fail message if artifact not ready yet. ← **next**
-3. **Phase 1.5 first PR** — extract `Expect` + one domain file (e.g. security already partial; next: recording arm / composite steps) without changing assertions.
+2. ~~**Phase 1.1 skeleton** — CI YAML that builds; tolerate missing payload with explicit fail message if artifact not ready yet.~~ **Done 2026-11-08**.
+3. **Next (owner pick):** **Phase 1.2** runner artifacts (green suite on Actions) **or** commit Phase 0+1.1 now **or** **Phase 1.5** extract `Expect` + one domain file (assertions unchanged).
 4. **Phase 1.6 first VM slice** — e.g. mode-shell / broadcast projection only (smallest binding surface).
 5. Owner ping: **MF vs FFmpeg** decision meeting scheduled (read spike README beforehand).
 
@@ -207,7 +209,7 @@
 
 | Metric | Baseline (verified) | Target |
 |---|---|---|
-| CI on default branch / PRs | No `.github/workflows` | Required check: build + default suite green |
+| CI on default branch / PRs | No `.github/workflows` → **1.1 workflow present** (prereq-red without artifacts) | Required check: build + default suite green (needs 1.2) |
 | Test entrypoint size | `OmtCaptureStudio.Tests/Program.cs` ≈ **9069** lines | Router ≤ ~400 lines; domains in separate files |
 | Shell VM size | `MainWindowViewModel.cs` ≈ **3036** lines | No single VM file > ~1k without active split plan; mode concerns separated |
 | Onboarding | `CONTEXT.md`, `*.ps1`, `*.bat` gitignored | Tracked scripts + CONTEXT; README prerequisites unambiguous |

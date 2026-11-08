@@ -1,0 +1,58 @@
+# Phase 1.1 — minimal CI gate matching AGENTS.md / IMPROVEMENT_PLAN.md:
+#   restore → Release|x64 build → default OmtCaptureStudio.Tests suite (no soak).
+# Native payload + tools/ffmpeg.exe are gitignored; until Phase 1.2 provisions them
+# the "Check native payload + ffmpeg" step fails with an explicit message (non-zero).
+# Headless DXGI/GDI capture paths already soft-skip inside the suite where appropriate.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build + default suite
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+          cache: true
+          cache-dependency-path: |
+            OmtCaptureStudio/OmtCaptureStudio.csproj
+            OmtCaptureStudio.Tests/OmtCaptureStudio.Tests.csproj
+
+      - name: Restore
+        run: dotnet restore OmtCaptureStudio.sln
+
+      - name: Build Release x64
+        run: dotnet build OmtCaptureStudio.sln -c Release -p:Platform=x64 --no-restore
+
+      # Fails loudly until Phase 1.2 artifacts exist. Build above still proves compile on a clean tree.
+      - name: Check native payload + ffmpeg
+        run: ./scripts/ci-prerequisites.ps1
+
+      - name: Stage ffmpeg beside test host
+        run: |
+          $out = "OmtCaptureStudio.Tests/bin/x64/Release/net8.0-windows"
+          if (-not (Test-Path -LiteralPath $out)) {
+            throw "Test output directory missing after Release|x64 build: $out"
+          }
+          Copy-Item -LiteralPath "tools/ffmpeg.exe" -Destination (Join-Path $out "ffmpeg.exe") -Force
+          Write-Host "Staged tools/ffmpeg.exe -> $out/ffmpeg.exe"
+
+      - name: Run default OmtCaptureStudio.Tests suite
+        run: dotnet run --project OmtCaptureStudio.Tests -c Release -p:Platform=x64 --no-build

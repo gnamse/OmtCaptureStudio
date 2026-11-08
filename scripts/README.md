@@ -16,5 +16,20 @@ Populate those paths before a first run, release build, or CI packaging job. The
 | Script | Purpose |
 | :--- | :--- |
 | `build-release.ps1` | Version stamp, Native AOT publish, ZIP + SHA-256 under `Releases/`, optional `gh` upload. |
+| `ci-prerequisites.ps1` | Exit non-zero with a clear message if `NativePayload/win-x64` (6 DLLs) or `tools/ffmpeg.exe` is missing. Used by `.github/workflows/ci.yml` before the default suite. |
 
 Root operator launchers (also tracked): `Launch-OmtCaptureStudio.bat`, `Build-AOT.bat`.
+
+## Same gate as CI (local)
+
+Requires the binaries above. From the repo root:
+
+```powershell
+dotnet restore OmtCaptureStudio.sln
+dotnet build OmtCaptureStudio.sln -c Release -p:Platform=x64 --no-restore
+./scripts/ci-prerequisites.ps1
+Copy-Item tools\ffmpeg.exe OmtCaptureStudio.Tests\bin\x64\Release\net8.0-windows\ffmpeg.exe -Force
+dotnet run --project OmtCaptureStudio.Tests -c Release -p:Platform=x64 --no-build
+```
+
+Default suite only (no soak / no `--step`). Failures exit non-zero. On GitHub Actions without provisioned binaries, the prerequisites step fails on purpose until Phase 1.2.
