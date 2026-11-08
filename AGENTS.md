@@ -34,3 +34,12 @@ shipping reflection-sensitive or generic-hot-loop changes.
 ## Commit style
 Conventional Commits, lowercase scope: `fix(recording):`, `fix(build):`,
 `fix(ui):`, `feat(core):`, `refactor(...):`, `docs:`, `chore:`, `test:`.
+
+## Known gaps
+Living improvement work lives in **`docs/IMPROVEMENT_PLAN.md`** (phases, acceptance
+criteria, open decisions). Do not invent missing ADRs — the numbered series has
+gaps by design for now:
+
+- Present: `docs/adr/0001`, `0002`, `0003`, `0005`, `0006`, `0010`, `0011`
+- Missing / not authored yet: **0004**, **0007**, **0008**, **0009** (leave vacant
+  until a real decision needs that slot; do not stub speculative ADRs)

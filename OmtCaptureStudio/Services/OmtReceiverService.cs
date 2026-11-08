@@ -79,7 +79,7 @@ public class OmtReceiverService : IDisposable
             Interlocked.Exchange(ref _hostileSourceTornDown, 0);   // a fresh connection gets a fresh chance
             ConnectionStatusChanged?.Invoke($"Connecting to {address}...");
 
-            // Prefer BGRA for direct WPF WriteableBitmap rendering and FFmpeg rawvideo input
+            // Prefer BGRA for Avalonia WriteableBitmap rendering and FFmpeg rawvideo input
             receiver = new OMTReceive(
                 address,
                 OMTFrameType.Video | OMTFrameType.Audio,

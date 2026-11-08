@@ -8,7 +8,7 @@ namespace OmtCaptureStudio.Services;
 /// <summary>
 /// Headless capture session engine coordinating polymorphic media sources, audio routing,
 /// stream format negotiation, telemetry aggregation, and recording orchestration.
-/// Decoupled entirely from presentation layers (WPF).
+/// Decoupled entirely from presentation layers (Avalonia).
 /// </summary>
 public class CaptureSession : IDisposable
 {
