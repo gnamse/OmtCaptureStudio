@@ -6,11 +6,20 @@ change against these rules. When this file conflicts with a generic guideline
 you've seen elsewhere, **this file wins** — it encodes constraints proven
 necessary by bugs, deadlocks, and audit findings in this specific codebase.
 
-Scope applies to the two projects in the solution:
+Scope applies to the projects in the solution:
 
-- `OmtCaptureStudio/` — the Avalonia 11 Native AOT Windows desktop app.
+- `OmtCaptureStudio/` — the Avalonia 11 Native AOT Windows desktop app
+  (UI + engines/sinks/sources live here today).
 - `OmtCaptureStudio.Tests/` — the headless end-to-end test executable
   (no unit-test framework; it is a console app that throws on failure).
+
+**No `OmtCaptureStudio.Core` project (Phase 2.1 NO-GO, 2026-11-09):** Services
+and Models have zero Avalonia usings and *could* move mechanically, but the Core
+classlib is deferred until CI suite is green with owner-provisioned artifacts and
+an owner confirms appetite for csproj/AOT-trim churn. Until then, keep engines in
+the app project and integrate new recording transports only through
+`IRecordingSink` / `RecordingSinkSelector.ForProduction()`. See
+`docs/IMPROVEMENT_PLAN.md` Phase 2.
 
 Companion context: `CONTEXT.md` (domain vocabulary/seams), `README.md`
 (build/deploy). Read both before making architectural choices.
@@ -157,6 +166,11 @@ Preserve; do not weaken:
 - `AllowUnsafeBlocks=true` and x64-only. Do not add x86/AnyCPU to the solution
   config matrix.
 - `AvaloniaUseCompiledBindingsByDefault=true` — keep compiled bindings on.
+- Root `Directory.Build.props` shares `LangVersion` / `Nullable` / `ImplicitUsings`
+  for the shipping projects; `.editorconfig` encodes C# style suggestions. **Warning
+  policy:** `TreatWarningsAsErrors` stays off until a measured baseline exists —
+  enabling it without a dry-run stalls the tree. Do not turn on analyzer rules that
+  fight Native AOT or CommunityToolkit source generators without an explicit pass.
 - Naming: file-scoped namespaces, `_camelCase` private fields, `PascalCase`
   public members, `I*` interfaces (`IMediaSource`, `IRecordingSink`,
   `IAudioMonitor`), `*Service` for orchestrators.
@@ -236,6 +250,14 @@ a 1-second smoke. The test records 6 seconds specifically to verify past the
 Fail hard with `throw new Exception("<Step> failed: <what and got>");` and a
 console banner. Do not swallow and continue when a hard invariant is unmet.
 
+### 4.4 PA16 / hostile-peer audio (product + suite)
+
+`OmtAudioFrameGuard` **refuses** PA16 and any non-FPA1 codec by name
+(`UnsupportedCodec`, detail contains `PA16`). Do not add silent reinterpretation
+or decode without an explicit product call — see ADR-0012 §3. Suite rows that
+assert refuse-not-reinterpret remain load-bearing (`OmtAudioFrameGuardTests`,
+`SecurityRegressionTable` R1).
+
 ---
 
 ## 5. Review Checklist
@@ -296,8 +318,9 @@ A reviewer must confirm **all** of the following before merge. Any "No" blocks.
 | Hot rendering path | `OmtCaptureStudio/Controls/VideoViewportControl.cs` |
 | VU meter control | `OmtCaptureStudio/Controls/VuMeterControl.axaml.cs` |
 | Recording transport (pipes, pool, bounded queue) | `OmtCaptureStudio/Services/Sinks/FfmpegPipeSink.cs`, `BoundedMediaQueue.cs`, `FfmpegProcessHost.cs` |
+| Recording sink selection (sole production `new` site) | `OmtCaptureStudio/Services/Sinks/RecordingSinkSelector.cs` (`ForProduction`, `IRecordingSink`) |
 | Session engine (headless, polymorphic source) | `OmtCaptureStudio/Services/CaptureSession.cs` |
-| Recording orchestration | `OmtCaptureStudio/Services/StreamRecorderService.cs` |
+| Recording orchestration | `OmtCaptureStudio/Services/StreamRecorderService.cs` → `RecordingArm` |
 | Async logger | `OmtCaptureStudio/Services/Forensics/AppLogger.cs` (NET-017) |
 | Headless E2E suite | `OmtCaptureStudio.Tests/Program.cs` |
 | Build / AOT publish / release | `scripts/build-release.ps1`, `installer/OmtCaptureStudio.iss` |

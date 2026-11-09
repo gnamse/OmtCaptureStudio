@@ -28,11 +28,11 @@ public class StreamRecorderService : ITakeRecorder, IDisposable
     private readonly IRecordingSink _sink;
 
     /// <summary>
-    /// Default constructor for the production FFmpeg named pipe sink. The concrete sink is chosen when a
-    /// take STARTS rather than here (NET-011): the arm holds its sink from construction, but whether the
-    /// take fans out to a backup destination is only known at <c>Initialize(config, …)</c> time. With no
-    /// backup configured the selector builds exactly one <see cref="FfmpegPipeSink"/>, so a
-    /// single-destination take is unchanged.
+    /// Production path: wraps <see cref="RecordingSinkSelector.ForProduction"/> — the sole place that
+    /// constructs shipping <see cref="FfmpegPipeSink"/> instances. The concrete sink (single vs composite)
+    /// is chosen when a take STARTS rather than here (NET-011): the arm holds its sink from construction,
+    /// but whether the take fans out to a backup destination is only known at
+    /// <c>Initialize(config, …)</c> time. A future MF sink plugs in at the selector factories, not here.
     /// </summary>
     public StreamRecorderService()
         : this(RecordingSinkSelector.ForProduction(), ownsSink: true)

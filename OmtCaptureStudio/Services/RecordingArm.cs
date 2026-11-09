@@ -261,20 +261,26 @@ public sealed class RecordingArm : IDisposable
                 _avClock.Reset(format.SampleRate, format.FrameRate, format.Channels);
 
                 // ---- Step 2: storage preflight (policy lives in the guard) -------------------------
+                // In-memory sinks (NullRecordingSink) never write bytes to the candidate path, so the
+                // session-size headroom floor must not gate them — CI runners often have far less free
+                // space than a High-quality 1080p60 hour estimate requires.
                 _currentRecordingPath = candidatePath;
-                StoragePreflightResult preflight = RecordingStorageGuard.Preflight(candidatePath, config, format);
-                if (preflight.IsRefusal)
+                if (_sink.RequiresDurableStorage)
                 {
-                    RecordingError?.Invoke(preflight.Message ?? "Cannot record: storage preflight refused the destination.");
-                    _currentRecordingPath = null;
-                    return false;
-                }
-                if (preflight.Outcome == StoragePreflightOutcome.Undetermined)
-                {
-                    // Drive status could not be determined (e.g. a mapped/UNC path offline).
-                    // Surfacing a clear warning is safer than faking a PASS or FAIL — proceed,
-                    // the periodic guard will still protect the session once storage is reachable.
-                    AppLogger.LogError($"Disk preflight could not determine free space for {candidatePath}; proceeding without preflight check.");
+                    StoragePreflightResult preflight = RecordingStorageGuard.Preflight(candidatePath, config, format);
+                    if (preflight.IsRefusal)
+                    {
+                        RecordingError?.Invoke(preflight.Message ?? "Cannot record: storage preflight refused the destination.");
+                        _currentRecordingPath = null;
+                        return false;
+                    }
+                    if (preflight.Outcome == StoragePreflightOutcome.Undetermined)
+                    {
+                        // Drive status could not be determined (e.g. a mapped/UNC path offline).
+                        // Surfacing a clear warning is safer than faking a PASS or FAIL — proceed,
+                        // the periodic guard will still protect the session once storage is reachable.
+                        AppLogger.LogError($"Disk preflight could not determine free space for {candidatePath}; proceeding without preflight check.");
+                    }
                 }
 
                 // ---- Step 3: initialize the sink ---------------------------------------------------
@@ -478,6 +484,8 @@ public sealed class RecordingArm : IDisposable
     /// </summary>
     public void CheckLowDisk()
     {
+        if (!_sink.RequiresDurableStorage) return;
+
         string? path;
         lock (_gateLock)
         {

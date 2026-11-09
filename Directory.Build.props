@@ -1,0 +1,15 @@
+<Project>
+  <!--
+    Phase 1.4 — shared defaults for OmtCaptureStudio + OmtCaptureStudio.Tests.
+    Project files remain the source of truth for AOT, Avalonia, and unsafe blocks.
+    TreatWarningsAsErrors is intentionally OFF until a warning baseline is landed
+    (see CODING_STANDARDS.md §3.1 / IMPROVEMENT_PLAN Phase 1.4).
+  -->
+  <PropertyGroup>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Solution + project pins already force x64; this documents the contract for new projects. -->
+    <PlatformConditionNote>win-x64 only; do not add AnyCPU/x86 shipping targets</PlatformConditionNote>
+  </PropertyGroup>
+</Project>
