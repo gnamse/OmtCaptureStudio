@@ -9,7 +9,7 @@ the operator sequence.
 1. `OmtCaptureStudio/NativePayload/win-x64/` populated (release script refuses without it).
 2. `tools/ffmpeg.exe` present (recording preflight + installer bundle).
 3. Visual Studio / .NET 8 SDK with Native AOT workload; Inno Setup 6.x if building the installer.
-4. Working tree clean enough that you know what you are shipping (spikes stay out of production).
+4. Working tree clean enough that you know what you are shipping (no throwaway spike trees in the release payload).
 
 ## Sequence
 
@@ -47,6 +47,6 @@ the operator sequence.
 
 ## Do not ship
 
-- Anything under `spikes/` (including `spikes/mf-sinkwriter`) as production code.
+- Any revived `spikes/` tree (former `mf-sinkwriter` was deleted with ADR-0012) as production code.
 - A release that skipped the headless suite after recording/sink/UI shell changes.
 - Binaries (`ffmpeg.exe`, native payload DLLs) committed into git.

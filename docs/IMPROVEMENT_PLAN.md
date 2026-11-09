@@ -1,10 +1,10 @@
 # OMT Capture Studio — Improvement Plan
 
-**Status:** Living plan — Phase 0–1 structural complete; **Phase 2 done** (Core NO-GO + sink selector harden + mode-view facade notes, 2026-11-09); **Phase 3 done** (ADR-0012 stay-FFmpeg + PA16 refuse, 2026-11-09); **Phase 4 done** (ADR index, DESIGN drift, release checklist, historical audit pointer); suite green on Actions still needs owner artifact secrets
+**Status:** Living plan — Phase 0–1 structural complete; **Phase 2 done** (Core NO-GO + sink selector harden + mode-view facade notes, 2026-11-09); **Phase 3 done** (ADR-0012 stay-FFmpeg + PA16 refuse + spike deleted, 2026-11-09); **Phase 4 done** (ADR index, DESIGN drift, release checklist, historical audit pointer); suite green on Actions still needs owner artifact secrets
 
 **Owner:** Gbolahan  
 **Grounded against:** repo @ `feature/media-foundation-sink` / version `1.0.0.24` (main carries security/broadcast line)  
-**Companions:** `AGENTS.md`, `CODING_STANDARDS.md`, `CONTEXT.md`, `DESIGN.md`, `docs/adr/*`, `spikes/mf-sinkwriter/README.md`
+**Companions:** `AGENTS.md`, `CODING_STANDARDS.md`, `CONTEXT.md`, `DESIGN.md`, `docs/adr/*` (recording evidence in ADR-0012)
 
 ---
 
@@ -23,7 +23,7 @@
 - Full rewrite / framework swap (stay Avalonia 11 / .NET 8 / win-x64 AOT).
 - Replacing the custom suite with xUnit *as a prerequisite* for CI (CI first; harness migration is a later open decision).
 - Process-isolating Capture vs Broadcast unless product forces it (open decision; default: keep one process).
-- Shipping the MF spike as-is (`spikes/mf-sinkwriter` remains throwaway until an ADR greenlights a sink).
+- Shipping MF from the deleted spike (`spikes/mf-sinkwriter` removed after ADR-0012; evidence lives in that ADR — do not revive as production).
 - Expanding codec decode surface for hostile peers without an explicit product call (PA16 stays refuse-by-default unless decided otherwise).
 - “Perfect” layered architecture before quality gates exist.
 
@@ -40,7 +40,7 @@
 | Seams over rewrites | `IMediaSource`, `IRecordingSink`, `CompositeRecordingSink`, ADRs 0001/0002/0005/0010/0011 | Prefer new sink/source behind interfaces |
 | Throw-on-fail suite; soak when touching record/render | `AGENTS.md`, `OmtCaptureStudio.Tests` | Keep `--step` ids usable; E2E still records past known failure thresholds (e.g. 6s) |
 | Security surface | native payload hash, frame guards (`OmtAudioFrameGuard` / `OmtVideoFrameGuard`), update SHA-256, FFmpeg preflight | CI must exercise security table (`SecurityRegressionTable`) |
-| Spike discipline | `spikes/mf-sinkwriter/README.md` | Measure → ADR → implement; never merge spike code sideways |
+| Spike discipline | ADR-0012 evidence table (former `spikes/mf-sinkwriter`) | Measure → ADR → implement; never merge spike code sideways; tree deleted |
 
 ---
 
@@ -88,7 +88,7 @@
 - [x] At least one VM slice extracted with tests green and AOT publish still succeeding. *(AppModeShell + BroadcastChrome + RecordingChrome + CaptureWorkspace + BroadcastWorkspace partials; nightly AOT workflow landed — full AOT publish not re-run locally this pass)*
 - [x] `Directory.Build.props` + `.editorconfig` present; build warning policy documented in `CODING_STANDARDS.md` (one paragraph).
 
-**1.1 landed (2026-11-08):** `.github/workflows/ci.yml` on `windows-latest` — NuGet cache via `setup-dotnet`, Release\|x64 restore/build, `scripts/ci-prerequisites.ps1`, stage `tools/ffmpeg.exe` beside the test host, default suite via `dotnet run` (no soak). Does not commit binaries; does not touch `spikes/mf-sinkwriter`.
+**1.1 landed (2026-11-08):** `.github/workflows/ci.yml` on `windows-latest` — NuGet cache via `setup-dotnet`, Release\|x64 restore/build, `scripts/ci-prerequisites.ps1`, stage `tools/ffmpeg.exe` beside the test host, default suite via `dotnet run` (no soak). Does not commit binaries; never depended on the MF spike (now deleted).
 
 **1.5–1.6 complete for Phase 1 structural goals (2026-11-09):** Test domains under `OmtCaptureStudio.Tests/{Capture,Operator,Diagnostics,Recording,Security,Broadcast,Audio,UiShell,Support}`; `Program.cs` router ~400 lines. VM partials: AppModeShell, BroadcastChrome, RecordingChrome, CaptureWorkspace, BroadcastWorkspace (facade bindings unchanged). `.github/workflows/aot-nightly.yml`. **Owner still owes** `CI_PREREQ_ARCHIVE_URL` (or split URLs) for Actions suite green. Optional later: true composed Capture/Broadcast workspace *types* (Phase 2.3), not required for 1.6 acceptance.
 
@@ -135,8 +135,8 @@ Revisit after Actions suite is green **and** owner confirms appetite for csproj 
 
 | Workstream | Concrete tickets | Effort |
 |---|---|---|
-| **3.1 ADR: FFmpeg vs Media Foundation** | New ADR (next free number; note gap series 0004/0007–0009 — either fill intentionally or skip with “reserved/withdrawn” stubs). Consume `spikes/mf-sinkwriter/README.md`: BGRA path OK, fragmented `Fmpeg4` required for crash parity with ADR-0002, audio AAC path still incomplete, HW encode identity unmeasured, installer size win (~102 MB ffmpeg). Decision options: (A) stay FFmpeg, harden; (B) MF primary + FFmpeg fallback; (C) MF-only after audio/HW/crash gates. | M — **Done 2026-11-09** → **(A)** in `docs/adr/0012-recording-engine-strategy.md` |
-| **3.2 If MF proceeds** | Implement `MediaFoundationRecordingSink : IRecordingSink` behind flag; port suite steps that assert preflight/R25/R26 only when FFmpeg path selected; keep spike throwaway. Measure HW MFT + multi-hour soak before flipping default. | L — **Deferred** (ADR-0012 gates unmet: HW identity, multi-hour soak, ProRes/MKV matrix, PCM16 convert cost) |
+| **3.1 ADR: FFmpeg vs Media Foundation** | New ADR (next free number; note gap series 0004/0007–0009 — either fill intentionally or skip with “reserved/withdrawn” stubs). Consume former `spikes/mf-sinkwriter` evidence: BGRA path OK, fragmented `Fmpeg4` required for crash parity with ADR-0002, audio AAC path still incomplete, HW encode identity unmeasured, installer size win (~102 MB ffmpeg). Decision options: (A) stay FFmpeg, harden; (B) MF primary + FFmpeg fallback; (C) MF-only after audio/HW/crash gates. | M — **Done 2026-11-09** → **(A)** in `docs/adr/0012-recording-engine-strategy.md` |
+| **3.2 If MF proceeds** | Implement `MediaFoundationRecordingSink : IRecordingSink` behind flag; port suite steps that assert preflight/R25/R26 only when FFmpeg path selected; do not revive deleted spike into `Services/`. Measure HW MFT + multi-hour soak before flipping default. | L — **Deferred** (ADR-0012 gates unmet: HW identity, multi-hour soak, ProRes/MKV matrix, PCM16 convert cost) |
 | **3.3 PA16 / hostile peer policy** | Product decision ticket: keep refuse+name (`OmtAudioFrameGuard`, suite asserts) **or** add PA16 decode. Document operator-visible messaging. No silent reinterpretation (already forbidden by tests). | S — **Done 2026-11-09** → **refuse** (ADR-0012 §3 + CONTEXT / CODING_STANDARDS §4.4) |
 | **3.4 ADR-0010 tee follow-through** | Only after measurement unlock in ADR-0010 §5; else leave composite two-child as shipping. | blocked |
 
@@ -144,9 +144,11 @@ Revisit after Actions suite is green **and** owner confirms appetite for csproj 
 
 - [x] Accepted ADR for recording engine strategy linked from `CONTEXT.md` / `AGENTS.md`. *(ADR-0012; indexed in `docs/adr/README.md`)*
 - [x] PA16 policy recorded (product + test expectation one-liner in CODING_STANDARDS or CONTEXT). *(refuse-by-name; suite rows remain load-bearing)*
-- [x] No production dependency on `spikes/` project. *(spike kept for evidence; not referenced by shipping csproj)*
+- [x] No production dependency on `spikes/` project. *(tree deleted 2026-11-09; evidence in ADR-0012; never referenced by shipping csproj)*
 
-**Completed:** 2026-11-09 — ADR-0012 **(A) stay FFmpeg** as production default; MF option (B) only after explicit gates; (C) NO-GO. Spike evidence table copied into the ADR; `spikes/mf-sinkwriter` retained until owner confirms delete. PA16 refuse documented. No MF code in `Services/`.
+**Completed:** 2026-11-09 — ADR-0012 **(A) stay FFmpeg** as production default; MF option (B) only after explicit gates; (C) NO-GO. Spike evidence table copied into the ADR; **`spikes/mf-sinkwriter` deleted** (and empty `spikes/` removed) after owner go-ahead. PA16 refuse documented. No MF code in `Services/`.
+
+**Phase 3 follow-ups (agent wrap-up done):** spike delete + pointer updates. **Still owner-only:** set `CI_PREREQ_ARCHIVE_URL` (or split URLs) so Actions suite can go green. Optional later: reopen MF (B) only after ADR-0012 gates; Core after CI green; composed workspace *types*.
 
 **Dependencies / risks:** MF without fragmented MP4 regresses crash forensics story. Dual-engine increases test matrix — gate with feature flag. Reopen 3.2 only when ADR-0012 go/no-go table is green.
 
@@ -209,13 +211,14 @@ Revisit after Actions suite is green **and** owner confirms appetite for csproj 
 11. ~~**Phase 2** (Core NO-GO + sink selector harden + mode-view facade notes)~~ **Done 2026-11-09**.
 12. ~~**Phase 4** (ADR index, DESIGN drift, release checklist, historical audit pointer)~~ **Done 2026-11-09**.
 13. ~~**Phase 3** (ADR-0012 stay-FFmpeg + PA16 refuse)~~ **Done 2026-11-09**.
-14. **Next (owner):** set CI artifact secrets for Actions suite green; confirm when `spikes/mf-sinkwriter` may be deleted (evidence already in ADR-0012). Optional: revisit Core after CI green; composed workspace *types*; reopen MF (B) only after ADR-0012 gates.
+14. ~~Spike delete after ADR-0012~~ **Done 2026-11-09** (`spikes/mf-sinkwriter` + empty `spikes/` removed).
+15. **Next (owner):** set CI artifact secrets (`CI_PREREQ_ARCHIVE_URL` or split URLs) for Actions suite green. Optional: revisit Core after CI green; composed workspace *types*; reopen MF (B) only after ADR-0012 gates.
 
 ### Next month
 
 1. CI green with cached native+ffmpeg artifacts (owner secrets).
 2. ~~ADR for recording engine + PA16 policy written and accepted (Phase 3).~~ **Done** (ADR-0012).
-3. If owner reopens MF after gates: `MediaFoundationRecordingSink : IRecordingSink` behind flag via `RecordingSinkSelector` factories — spike stays throwaway until then (or delete after owner confirm).
+3. If owner reopens MF after gates: `MediaFoundationRecordingSink : IRecordingSink` behind flag via `RecordingSinkSelector` factories — build from ADR-0012 evidence; do not revive the deleted spike tree.
 4. Revisit Core split only after CI green + owner appetite; if go, one vertical move (sinks+sources) not a big-bang.
 5. Optional: named Capture/Broadcast workspace VM *types* behind facade bindings.
 
@@ -225,7 +228,7 @@ Revisit after Actions suite is green **and** owner confirms appetite for csproj 
 
 | Decision | Options | Recommendation (default) | Needed from owner |
 |---|---|---|---|
-| **FFmpeg vs MF** | Stay / MF+fallback / MF-only | **Stay FFmpeg** (ADR-0012 accepted 2026-11-09); MF (B) only after gates; (C) NO-GO | Confirm spike delete timing; reopen (B) only if gates green |
+| **FFmpeg vs MF** | Stay / MF+fallback / MF-only | **Stay FFmpeg** (ADR-0012 accepted 2026-11-09); MF (B) only after gates; (C) NO-GO; spike deleted | Reopen (B) only if gates green |
 | **Test harness vs xUnit** | Keep console throw-on-fail / migrate | **Keep** harness; CI invokes `dotnet run`; migrate only if IDE/explorer pain dominates | Only if CI friction |
 | **Core project split** | Now / later / never | **Later / NO-GO this pass** (Phase 2.1 written 2026-11-09) — revisit after CI green | Confirm appetite for csproj churn |
 | **CONTEXT.md tracking** | Track in git / generate / personal-only | **Track** (remove from `.gitignore`) — AGENTS already requires it | Confirm no secrets in file |
@@ -243,7 +246,7 @@ Revisit after Actions suite is green **and** owner confirms appetite for csproj 
 | Shell VM size | `MainWindowViewModel.cs` ~2.2k + AppModeShell/BroadcastChrome/RecordingChrome/CaptureWorkspace/BroadcastWorkspace partials | No single VM file > ~1k without active split plan; mode concerns separated — further split optional |
 | Onboarding | Tracked scripts + CONTEXT | Tracked scripts + CONTEXT; README prerequisites unambiguous |
 | Repo standards files | **`Directory.Build.props` + `.editorconfig` present** | Present; documented in CODING_STANDARDS |
-| Recording strategy | **ADR-0012 accepted** — stay FFmpeg; spike retained as evidence | Production still `RecordingSinkSelector` → `FfmpegPipeSink`; MF only after gates |
+| Recording strategy | **ADR-0012 accepted** — stay FFmpeg; spike deleted; evidence in ADR | Production still `RecordingSinkSelector` → `FfmpegPipeSink`; MF only after gates |
 | Regressions | Manual `dotnet run` suite | Same suite in CI; security table still runs (`SecurityRegressionTable.RunAll`) |
 | Doc drift | WPF/NAudio strings in CONTEXT / comments | Zero false stack claims |
 

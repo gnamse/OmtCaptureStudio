@@ -51,6 +51,6 @@ shipping a real decision (see `AGENTS.md` Known gaps). Next free after 0012 is
 
 1. Use the next free number after the highest accepted ADR, **or** intentionally
    fill a reserved gap when that topic historically belonged there.
-2. Keep scope to one decision; link companions (`CODING_STANDARDS.md`, spike
-   READMEs) rather than pasting them.
+2. Keep scope to one decision; link companions (`CODING_STANDARDS.md`, plan,
+   evidence tables) rather than pasting them.
 3. Add a row to this index in the same PR.

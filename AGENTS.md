@@ -45,8 +45,9 @@ the numbered series has gaps by design for now:
   (recording engine stays FFmpeg; MF gated; PA16 refuse)
 - Missing / not authored yet: **0004**, **0007**, **0008**, **0009** (leave vacant
   until a real decision needs that slot; do not stub speculative ADRs)
-- Recording: production remains `RecordingSinkSelector` → `FfmpegPipeSink`; do **not**
-  merge `spikes/mf-sinkwriter` into `Services/` until ADR-0012 gates flip. PA16 stays
+- Recording: production remains `RecordingSinkSelector` → `FfmpegPipeSink`. The MF
+  spike (`spikes/mf-sinkwriter`) was **deleted** after ADR-0012; evidence lives in that
+  ADR — do **not** revive it into `Services/` until ADR-0012 gates flip. PA16 stays
   refuse-by-name (`OmtAudioFrameGuard`) until a real sender requires decode.
 
 `CODE_REVIEW_REPORT.md` is a **historical** Oct 2026 audit — point new work at the

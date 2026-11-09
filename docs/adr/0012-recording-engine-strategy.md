@@ -2,13 +2,13 @@
 
 - **Status:** Accepted (2026-11-09)
 - **Deciders:** Agent (Phase 3 of `docs/IMPROVEMENT_PLAN.md`) on behalf of the project owner,
-  consuming `spikes/mf-sinkwriter/README.md` measurements and plan open-decision defaults
+  consuming former `spikes/mf-sinkwriter` measurements and plan open-decision defaults
 - **Scope:** Product strategy for the shipping recording engine; PA16 / hostile-peer audio codec
-  policy. **No production code change this pass.** Spike remains throwaway under `spikes/`.
+  policy. Spike evidence lives in this ADR; the throwaway tree was deleted after acceptance.
 - **Related:** ADR-0002 (crash/segment salvageability), ADR-0005 (`RecordingArm` + `IRecordingSink`
   seam), ADR-0010 (composite fan-out; `tee` still measurement-blocked),
-  `Services/Sinks/RecordingSinkSelector.cs`, `spikes/mf-sinkwriter/README.md`,
-  `docs/IMPROVEMENT_PLAN.md` Phase 3
+  `Services/Sinks/RecordingSinkSelector.cs`, `docs/IMPROVEMENT_PLAN.md` Phase 3
+  (evidence table below supersedes deleted `spikes/mf-sinkwriter/README.md`)
 
 ## Context
 
@@ -19,17 +19,19 @@ hardening (preflight, R25/R26, elevation 740, AV quarantine), and the full conta
 encoder matrix operators already use: MP4 / MKV / MOV × AutoHardware / NVENC / QSV /
 AMF / CpuX264 / ProRes.
 
-A throwaway spike (`spikes/mf-sinkwriter`, Vortice.MediaFoundation 3.6.2) asked whether
-`IMFSinkWriter` can record this app's pipeline in-process. The spike **validated** a
-1080p60 BGRA → H.264 MP4 path, including fragmented-container crash salvage and a
-hybrid AAC+H.264 write — but left several load-bearing questions open (HW encoder
-identity, multi-hour soak, float32→PCM16 cost, ProRes/MKV/MOV matrix).
+A throwaway spike (formerly `spikes/mf-sinkwriter`, Vortice.MediaFoundation 3.6.2)
+asked whether `IMFSinkWriter` can record this app's pipeline in-process. The spike
+**validated** a 1080p60 BGRA → H.264 MP4 path, including fragmented-container crash
+salvage and a hybrid AAC+H.264 write — but left several load-bearing questions open
+(HW encoder identity, multi-hour soak, float32→PCM16 cost, ProRes/MKV/MOV matrix).
+The tree was **deleted** after this ADR accepted stay-FFmpeg; numbers below are the
+canonical record.
 
 Phase 3 must choose among:
 
 | Option | Meaning |
 |---|---|
-| **(A) Stay FFmpeg** | Harden the shipping subprocess; keep spike evidence; no MF in `Services/` |
+| **(A) Stay FFmpeg** | Harden the shipping subprocess; retain spike evidence in this ADR; no MF in `Services/` |
 | **(B) MF primary + FFmpeg fallback** | `MediaFoundationRecordingSink : IRecordingSink` behind a flag; FFmpeg remains for matrix / fallback |
 | **(C) MF-only** | Retire `ffmpeg.exe` from the installer after audio / HW / crash / soak gates |
 
@@ -49,9 +51,9 @@ explicitly fund PA16 decode.
 
 1. **Shipping takes continue to use `FfmpegPipeSink` via `RecordingSinkSelector.ForProduction()`.**
    No Media Foundation types land under `OmtCaptureStudio/Services/` in this phase.
-2. **Do not ship the spike.** `spikes/mf-sinkwriter` stays throwaway evidence. Keep it
-   until the owner confirms deletion; load-bearing numbers are copied into this ADR so
-   deletion later does not erase the record.
+2. **Do not ship the spike.** `spikes/mf-sinkwriter` was throwaway evidence and has been
+   **deleted** (owner go-ahead after this ADR). Load-bearing numbers remain in the
+   evidence table below — do not revive the tree as production code.
 3. **Option (B) is the only plausible next step**, not (C). MF-only is **NO-GO** until
    (B) has been the field default through multi-hour soaks *and* the ProRes / MKV / MOV /
    HW-encoder matrix either moves to MF or is deliberately dropped as product.
@@ -105,14 +107,14 @@ explicit matrix plan (which presets stay FFmpeg-fallback forever).
   forbidden.
 - **ADR-0010:** unchanged. Two-child composite of FFmpeg sinks remains shipping; `tee`
   still blocked.
-- **Tests / AOT / CI:** no production dependency on `spikes/`. Docs-only this pass; AOT
-  and the headless suite are unaffected.
+- **Tests / AOT / CI:** no `spikes/` tree in the repo; no production dependency on MF
+  spike code. AOT and the headless suite are unaffected by the delete.
 - **PA16:** security posture unchanged; product question closed as refuse-by-default.
 
 ## Evidence table (load-bearing spike numbers)
 
-Copied from `spikes/mf-sinkwriter/README.md` so the spike can later be deleted without
-losing the decision basis. All runs: synthetic 1080p60, Vortice.MediaFoundation 3.6.2,
+Copied from the deleted `spikes/mf-sinkwriter/README.md` so deletion does not erase
+the decision basis. All runs: synthetic 1080p60, Vortice.MediaFoundation 3.6.2,
 decode verified with `ffmpeg -v error -f null -` unless noted.
 
 | Topic | Result |
@@ -140,13 +142,13 @@ compile-time references, not the spike's reflection helper.
 
 ## Follow-ups
 
-1. **Keep `spikes/mf-sinkwriter` until owner confirms delete** after this ADR is accepted
-   and the evidence table above is considered sufficient.
+1. **`spikes/mf-sinkwriter` deleted** (2026-11-09) after owner go-ahead; evidence table
+   above is the sole retained decision basis.
 2. **Phase 3.2 (only if owner reopens (B)):** implement `MediaFoundationRecordingSink :
    IRecordingSink` behind an explicit flag in `RecordingSinkSelector` factories; mandatory
    `Fmpeg4`; fail closed on media-type setup; float32→PCM16 with measured cost; MFT
    identity probe; paced multi-hour soak; suite kill-test; keep FFmpeg for ProRes/MKV (or
-   whatever the matrix plan assigns). **Do not copy spike `Program.cs` into Services.**
+   whatever the matrix plan assigns). **Do not resurrect the spike tree into `Services/`.**
 3. **Ticket stubs (not started):**
    - `feat(recording):` MF sink behind flag once gates green
    - `test(recording):` hard-kill asserts fragmented MF output decode-clean
