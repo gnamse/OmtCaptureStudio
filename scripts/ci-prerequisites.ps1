@@ -6,8 +6,8 @@
     scripts/ci-provision-artifacts.ps1 first (optional download via secrets), then this script
     fails loudly if the tree is still empty. Do not commit binaries.
 
-    Native payload must be present *before* `dotnet build` so EmbeddedResource embedding succeeds;
-    after provisioning, re-run the full gate (restore → build → tests), not tests alone.
+    Native payload must be present *before* `dotnet build` so EmbeddedResource embedding succeeds.
+    `.github/workflows/ci.yml` provisions and checks before build; locally run this script before build.
 #>
 [CmdletBinding()]
 param(
@@ -70,7 +70,7 @@ foreach ($item in $missing) {
     Write-Host "  - $item" -ForegroundColor Red
 }
 Write-Host ""
-Write-Host "After provisioning: re-run restore → build → default suite so NativePayload" -ForegroundColor Yellow
-Write-Host "is embedded at build time (empty embed = TestNativePayloadVerification fails)." -ForegroundColor Yellow
+Write-Host "CI order is provision → check → build → suite so NativePayload embeds at build" -ForegroundColor Yellow
+Write-Host "time (building before populate leaves an empty embed; TestNativePayloadVerification fails)." -ForegroundColor Yellow
 Write-Host ""
 exit 1

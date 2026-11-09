@@ -1,8 +1,8 @@
-# Phase 1.1 — minimal CI gate matching AGENTS.md / IMPROVEMENT_PLAN.md:
-#   restore → Release|x64 build → default OmtCaptureStudio.Tests suite (no soak).
-# Native payload + tools/ffmpeg.exe are gitignored; until Phase 1.2 provisions them
-# the "Check native payload + ffmpeg" step fails with an explicit message (non-zero).
-# Headless DXGI/GDI capture paths already soft-skip inside the suite where appropriate.
+# Phase 1.1 / 1.2 — CI gate matching AGENTS.md / IMPROVEMENT_PLAN.md:
+#   restore → provision NativePayload+ffmpeg → prerequisites check →
+#   Release|x64 build (embeds NativePayload) → stage ffmpeg → default suite (no soak).
+# Native payload + tools/ffmpeg.exe are gitignored; runners download them via owner-configured
+# CI_* URL secrets (see scripts/README.md). Headless DXGI/GDI paths soft-skip inside the suite.
 name: CI
 
 on:
@@ -38,13 +38,13 @@ jobs:
       - name: Restore
         run: dotnet restore OmtCaptureStudio.sln
 
-      - name: Build Release x64
-        run: dotnet build OmtCaptureStudio.sln -c Release -p:Platform=x64 --no-restore
-
-      # Phase 1.2: optional download when secrets are configured. No-op (exit 0) if unset.
+      # Phase 1.2: must run BEFORE build so EmbeddedResource picks up NativePayload.
+      # On GitHub Actions, missing CI_* URL secrets fails this step (exit 1). Locally the
+      # script still no-ops when unset so developers can populate the tree by hand.
       # Owner: set repository secret CI_PREREQ_ARCHIVE_URL (preferred) or
       # CI_NATIVE_PAYLOAD_URL + CI_FFMPEG_URL; optional CI_ARTIFACTS_BEARER_TOKEN for private assets.
-      - name: Provision native payload + ffmpeg (optional)
+      # Public portable release zips are accepted (flat 6 DLLs + ffmpeg.exe at archive root).
+      - name: Provision native payload + ffmpeg
         env:
           CI_PREREQ_ARCHIVE_URL: ${{ secrets.CI_PREREQ_ARCHIVE_URL }}
           CI_NATIVE_PAYLOAD_URL: ${{ secrets.CI_NATIVE_PAYLOAD_URL }}
@@ -52,10 +52,11 @@ jobs:
           CI_ARTIFACTS_BEARER_TOKEN: ${{ secrets.CI_ARTIFACTS_BEARER_TOKEN }}
         run: ./scripts/ci-provision-artifacts.ps1
 
-      # Fails loudly until artifacts are present (local populate or secrets above).
-      # Build above still proves compile on a clean tree even when this step is red.
       - name: Check native payload + ffmpeg
         run: ./scripts/ci-prerequisites.ps1
+
+      - name: Build Release x64
+        run: dotnet build OmtCaptureStudio.sln -c Release -p:Platform=x64 --no-restore
 
       - name: Stage ffmpeg beside test host
         run: |
