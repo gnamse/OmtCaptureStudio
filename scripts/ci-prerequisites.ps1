@@ -2,8 +2,9 @@
 .SYNOPSIS
     Fails non-zero with a clear message when CI/local binaries required by the default suite are missing.
 .DESCRIPTION
-    Native payload DLLs and tools/ffmpeg.exe are gitignored (size / redistribution). Phase 1.1 CI
-    checks for them and fails loudly until Phase 1.2 provisions runner artifacts. Do not commit binaries.
+    Native payload DLLs and tools/ffmpeg.exe are gitignored (size / redistribution). CI runs
+    scripts/ci-provision-artifacts.ps1 first (optional download via secrets), then this script
+    fails loudly if the tree is still empty. Do not commit binaries.
 
     Native payload must be present *before* `dotnet build` so EmbeddedResource embedding succeeds;
     after provisioning, re-run the full gate (restore → build → tests), not tests alone.
@@ -56,14 +57,13 @@ if ($missing.Count -eq 0) {
 
 Write-Host ""
 Write-Host "========================================================================" -ForegroundColor Red
-Write-Host " CI prerequisites missing (Phase 1.1 gate / awaiting Phase 1.2 artifacts)" -ForegroundColor Red
+Write-Host " CI prerequisites missing (Phase 1.2 artifacts not provisioned)" -ForegroundColor Red
 Write-Host "========================================================================" -ForegroundColor Red
 Write-Host ""
-Write-Host "Native payload and ffmpeg.exe are gitignored and are NOT restored by this" -ForegroundColor Yellow
-Write-Host "workflow yet. Do not commit those binaries." -ForegroundColor Yellow
+Write-Host "Native payload and ffmpeg.exe are gitignored. Do not commit those binaries." -ForegroundColor Yellow
 Write-Host ""
-Write-Host "Populate locally (see scripts/README.md and README Quick Start §0), or complete" -ForegroundColor Yellow
-Write-Host "Phase 1.2 (CI cache / secret-stored zip for NativePayload + ffmpeg)." -ForegroundColor Yellow
+Write-Host "Populate locally (scripts/README.md + README Quick Start §0), OR set Actions" -ForegroundColor Yellow
+Write-Host "secrets for scripts/ci-provision-artifacts.ps1 (CI_PREREQ_ARCHIVE_URL preferred)." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Missing:" -ForegroundColor Red
 foreach ($item in $missing) {

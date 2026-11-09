@@ -16,7 +16,18 @@ Populate those paths before a first run, release build, or CI packaging job. The
 | Script | Purpose |
 | :--- | :--- |
 | `build-release.ps1` | Version stamp, Native AOT publish, ZIP + SHA-256 under `Releases/`, optional `gh` upload. |
-| `ci-prerequisites.ps1` | Exit non-zero with a clear message if `NativePayload/win-x64` (6 DLLs) or `tools/ffmpeg.exe` is missing. Used by `.github/workflows/ci.yml` before the default suite. |
+| `ci-provision-artifacts.ps1` | Phase 1.2: optional download of NativePayload + ffmpeg when `CI_PREREQ_ARCHIVE_URL` (or `CI_NATIVE_PAYLOAD_URL` + `CI_FFMPEG_URL`) is set. No-op if unset. Never commits binaries. |
+| `ci-prerequisites.ps1` | Exit non-zero with a clear message if `NativePayload/win-x64` (6 DLLs) or `tools/ffmpeg.exe` is missing. Used by `.github/workflows/ci.yml` after provision. |
+
+## CI artifact owner actions (Phase 1.2)
+
+GitHub Actions will stay red on the prerequisites step until one of these is done:
+
+1. **Preferred:** Host a private zip (release asset or blob) whose layout includes `NativePayload/win-x64/*` (the 6 DLLs) and `tools/ffmpeg.exe`. Set repository secret **`CI_PREREQ_ARCHIVE_URL`** to an HTTPS URL the runner can GET. For private assets, also set **`CI_ARTIFACTS_BEARER_TOKEN`**.
+2. **Split:** Set **`CI_NATIVE_PAYLOAD_URL`** (zip of the win-x64 folder) and **`CI_FFMPEG_URL`** (raw `ffmpeg.exe` or a zip containing it).
+3. **Local only:** Populate the gitignored paths on a self-hosted runner; leave secrets unset (provision script no-ops; prerequisites then pass if files exist).
+
+Do **not** commit `ffmpeg.exe` or native DLLs into git.
 
 Root operator launchers (also tracked): `Launch-OmtCaptureStudio.bat`, `Build-AOT.bat`.
 

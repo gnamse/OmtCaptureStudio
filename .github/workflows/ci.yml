@@ -41,7 +41,19 @@ jobs:
       - name: Build Release x64
         run: dotnet build OmtCaptureStudio.sln -c Release -p:Platform=x64 --no-restore
 
-      # Fails loudly until Phase 1.2 artifacts exist. Build above still proves compile on a clean tree.
+      # Phase 1.2: optional download when secrets are configured. No-op (exit 0) if unset.
+      # Owner: set repository secret CI_PREREQ_ARCHIVE_URL (preferred) or
+      # CI_NATIVE_PAYLOAD_URL + CI_FFMPEG_URL; optional CI_ARTIFACTS_BEARER_TOKEN for private assets.
+      - name: Provision native payload + ffmpeg (optional)
+        env:
+          CI_PREREQ_ARCHIVE_URL: ${{ secrets.CI_PREREQ_ARCHIVE_URL }}
+          CI_NATIVE_PAYLOAD_URL: ${{ secrets.CI_NATIVE_PAYLOAD_URL }}
+          CI_FFMPEG_URL: ${{ secrets.CI_FFMPEG_URL }}
+          CI_ARTIFACTS_BEARER_TOKEN: ${{ secrets.CI_ARTIFACTS_BEARER_TOKEN }}
+        run: ./scripts/ci-provision-artifacts.ps1
+
+      # Fails loudly until artifacts are present (local populate or secrets above).
+      # Build above still proves compile on a clean tree even when this step is red.
       - name: Check native payload + ffmpeg
         run: ./scripts/ci-prerequisites.ps1
 
