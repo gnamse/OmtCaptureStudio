@@ -686,8 +686,43 @@ partial class Program
         if (RecordingStorageGuard.FormatBytes(3L * 1024 * 1024 * 1024) != "3.0 GB") throw new Exception("GB formatting changed.");
         if (RecordingStorageGuard.FormatBytes(500L * 1024 * 1024) != "500 MB") throw new Exception("MB formatting changed.");
 
+        // --- In-memory sinks must not be gated by the durable-storage headroom floor (CI Step 0.5). ---
+        // High 1080p60 needs RequiredPreflightBytes(13.5 GB) = 54 GB; a 14 GB free volume would refuse a
+        // production sink. NullRecordingSink opts out via RequiresDurableStorage, so the arm still opens.
+        long highHd60 = RecordingStorageGuard.EstimateSessionSize(high, hd60);
+        long highRequired = RecordingStorageGuard.RequiredPreflightBytes(highHd60);
+        var wouldRefuse = RecordingStorageGuard.Classify(
+            "D:\\", "NTFS", RecordingStorageGuard.MinimumPreflightFreeBytes, highHd60);
+        if (!wouldRefuse.IsRefusal || highRequired < 50L * 1024 * 1024 * 1024)
+        {
+            throw new Exception(
+                $"Expected High 1080p60 to refuse a 2 GB-free volume (required={highRequired}); got {wouldRefuse.Outcome}.");
+        }
+
+        var nullCfg = new RecordingConfig
+        {
+            OutputDirectory = Path.GetTempPath(),
+            FilenamePrefix = "NullSink_PreflightBypass",
+            Quality = QualityPreset.High
+        };
+        var nullFmt = hd60 with { SampleRate = 48000, Channels = 2 };
+        using (var nullSink = new NullRecordingSink())
+        using (var nullArm = new RecordingArm(nullSink))
+        {
+            if (nullSink.RequiresDurableStorage)
+            {
+                throw new Exception("NullRecordingSink must opt out of durable-storage preflight.");
+            }
+            if (!nullArm.Arm(nullCfg, nullFmt) || !nullArm.IsRecording)
+            {
+                throw new Exception(
+                    "NullRecordingSink must arm at High 1080p60 even when Classify would refuse the same estimate on a tight volume.");
+            }
+            nullArm.Disarm(RecordingStopReason.Manual, out _);
+        }
+
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine(" -> Storage guard verified (FAT32, headroom, low-water, estimate scaling, formatting)!");
+        Console.WriteLine(" -> Storage guard verified (FAT32, headroom, low-water, estimate scaling, formatting, null-sink bypass)!");
         Console.ResetColor();
     }
 
