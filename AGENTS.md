@@ -41,9 +41,13 @@ criteria, open decisions). Navigable ADR index: **`docs/adr/README.md`**. Releas
 operator sequence: **`docs/RELEASE_CHECKLIST.md`**. Do not invent missing ADRs —
 the numbered series has gaps by design for now:
 
-- Present: `docs/adr/0001`, `0002`, `0003`, `0005`, `0006`, `0010`, `0011`
+- Present: `docs/adr/0001`, `0002`, `0003`, `0005`, `0006`, `0010`, `0011`, **`0012`**
+  (recording engine stays FFmpeg; MF gated; PA16 refuse)
 - Missing / not authored yet: **0004**, **0007**, **0008**, **0009** (leave vacant
   until a real decision needs that slot; do not stub speculative ADRs)
+- Recording: production remains `RecordingSinkSelector` → `FfmpegPipeSink`; do **not**
+  merge `spikes/mf-sinkwriter` into `Services/` until ADR-0012 gates flip. PA16 stays
+  refuse-by-name (`OmtAudioFrameGuard`) until a real sender requires decode.
 
 `CODE_REVIEW_REPORT.md` is a **historical** Oct 2026 audit — point new work at the
 plan + ADR index, not at extending that report.

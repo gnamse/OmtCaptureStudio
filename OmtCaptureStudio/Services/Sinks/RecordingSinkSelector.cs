@@ -12,7 +12,7 @@ namespace OmtCaptureStudio.Services.Sinks;
 /// <para><b>Sole production construction point for concrete sinks.</b> Callers that need a real take
 /// (not a test stub) go through <see cref="ForProduction"/> → <see cref="StreamRecorderService"/>'s
 /// default ctor. Do not <c>new FfmpegPipeSink()</c> from orchestration code. A future Media Foundation
-/// sink (Phase 3 ADR) plugs in by changing the factories here — still behind
+/// sink (ADR-0012 — gated; not shipping) would plug in by changing the factories here — still behind
 /// <see cref="IRecordingSink"/> — never by branching inside the arm or the facade.</para>
 ///
 /// <para>This seam exists because of an ordering fact, not a design preference: the arm holds its sink

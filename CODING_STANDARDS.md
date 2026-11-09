@@ -250,6 +250,14 @@ a 1-second smoke. The test records 6 seconds specifically to verify past the
 Fail hard with `throw new Exception("<Step> failed: <what and got>");` and a
 console banner. Do not swallow and continue when a hard invariant is unmet.
 
+### 4.4 PA16 / hostile-peer audio (product + suite)
+
+`OmtAudioFrameGuard` **refuses** PA16 and any non-FPA1 codec by name
+(`UnsupportedCodec`, detail contains `PA16`). Do not add silent reinterpretation
+or decode without an explicit product call — see ADR-0012 §3. Suite rows that
+assert refuse-not-reinterpret remain load-bearing (`OmtAudioFrameGuardTests`,
+`SecurityRegressionTable` R1).
+
 ---
 
 ## 5. Review Checklist

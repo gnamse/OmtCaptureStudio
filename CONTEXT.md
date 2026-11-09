@@ -19,8 +19,9 @@ This document captures the domain model, ubiquitous vocabulary, and architectura
 
 ### Recording Subsystem
 - **StreamRecorder**: The module orchestrating file recording. It tracks recording duration, frame counts, byte counts, and delegates actual stream writing to an `IRecordingSink`.
-- **RecordingSink**: An output transport seam for encoded or containerized media. In production, `FfmpegPipeSink` delivers raw video/audio to FFmpeg over Windows Named Pipes. In test environments, `TestRecordingSink` verifies frame throughput in memory without external process dependencies.
+- **RecordingSink**: An output transport seam for encoded or containerized media. In production, `RecordingSinkSelector.ForProduction()` constructs `FfmpegPipeSink` (raw A/V over Windows Named Pipes to an FFmpeg subprocess). Media Foundation remains a gated future option behind the same `IRecordingSink` seam — see `docs/adr/0012-recording-engine-strategy.md`. In test environments, `NullRecordingSink` / in-memory stubs verify throughput without an external process.
 - **RecordingConfig**: User-specified parameters for output container format (MP4, MKV, MOV), video encoder (AutoHardware, NVENC, QSV, AMF, CPU x264, ProRes), quality preset, and destination directory.
+- **PA16 policy**: Incoming OMT audio that announces PA16 (or any non-FPA1 codec) is **refused by name** via `OmtAudioFrameGuard` — never reinterpreted as float32. Decode support waits on an explicit product requirement (ADR-0012 §3).
 
 ### Broadcast Control & Resilience
 - **BroadcastSessionState**: The headless module that owns broadcast-mode state (`Offline`, `Connecting`, `NetworkConnected`, `TestSignal`, `Broadcasting`; `Reconnecting` and `InputLost` reserved per ADR-0002). It owns every mode-transition rule (stop-recording-first, selector locking) and raises a single `StateChanged` event; presentation layers only project state onto `StudioPalette` visuals. See `docs/adr/0001-broadcast-session-state.md`.
