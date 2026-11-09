@@ -157,6 +157,11 @@ Preserve; do not weaken:
 - `AllowUnsafeBlocks=true` and x64-only. Do not add x86/AnyCPU to the solution
   config matrix.
 - `AvaloniaUseCompiledBindingsByDefault=true` — keep compiled bindings on.
+- Root `Directory.Build.props` shares `LangVersion` / `Nullable` / `ImplicitUsings`
+  for the shipping projects; `.editorconfig` encodes C# style suggestions. **Warning
+  policy:** `TreatWarningsAsErrors` stays off until a measured baseline exists —
+  enabling it without a dry-run stalls the tree. Do not turn on analyzer rules that
+  fight Native AOT or CommunityToolkit source generators without an explicit pass.
 - Naming: file-scoped namespaces, `_camelCase` private fields, `PascalCase`
   public members, `I*` interfaces (`IMediaSource`, `IRecordingSink`,
   `IAudioMonitor`), `*Service` for orchestrators.
