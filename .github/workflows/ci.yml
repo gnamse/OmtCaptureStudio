@@ -1,8 +1,9 @@
 # Phase 1.1 / 1.2 — CI gate matching AGENTS.md / IMPROVEMENT_PLAN.md:
 #   restore → provision NativePayload+ffmpeg → prerequisites check →
 #   Release|x64 build (embeds NativePayload) → stage ffmpeg → default suite (no soak).
-# Native payload + tools/ffmpeg.exe are gitignored; runners download them via owner-configured
-# CI_* URL secrets (see scripts/README.md). Headless DXGI/GDI paths soft-skip inside the suite.
+# Native payload + tools/ffmpeg.exe are gitignored; runners download them via CI_PREREQ_ARCHIVE_URL
+# (workflow default = public portable release; secret overrides — see scripts/README.md).
+# Headless DXGI/GDI paths soft-skip inside the suite.
 name: CI
 
 on:
@@ -39,14 +40,13 @@ jobs:
         run: dotnet restore OmtCaptureStudio.sln
 
       # Phase 1.2: must run BEFORE build so EmbeddedResource picks up NativePayload.
-      # On GitHub Actions, missing CI_* URL secrets fails this step (exit 1). Locally the
-      # script still no-ops when unset so developers can populate the tree by hand.
-      # Owner: set repository secret CI_PREREQ_ARCHIVE_URL (preferred) or
-      # CI_NATIVE_PAYLOAD_URL + CI_FFMPEG_URL; optional CI_ARTIFACTS_BEARER_TOKEN for private assets.
-      # Public portable release zips are accepted (flat 6 DLLs + ffmpeg.exe at archive root).
+      # Default archive URL is the public portable release (flat 6 DLLs + ffmpeg.exe).
+      # Override with repository secret CI_PREREQ_ARCHIVE_URL for a newer/private zip, or
+      # use CI_NATIVE_PAYLOAD_URL + CI_FFMPEG_URL; optional CI_ARTIFACTS_BEARER_TOKEN for private assets.
+      # Provision fails only if download/extract/validate fails (or no URL at all on GHA).
       - name: Provision native payload + ffmpeg
         env:
-          CI_PREREQ_ARCHIVE_URL: ${{ secrets.CI_PREREQ_ARCHIVE_URL }}
+          CI_PREREQ_ARCHIVE_URL: ${{ secrets.CI_PREREQ_ARCHIVE_URL != '' && secrets.CI_PREREQ_ARCHIVE_URL || 'https://github.com/gnamse/OmtCaptureStudio/releases/download/v1.0.0.24/OmtCaptureStudio-v1.0.0.24-win-x64.zip' }}
           CI_NATIVE_PAYLOAD_URL: ${{ secrets.CI_NATIVE_PAYLOAD_URL }}
           CI_FFMPEG_URL: ${{ secrets.CI_FFMPEG_URL }}
           CI_ARTIFACTS_BEARER_TOKEN: ${{ secrets.CI_ARTIFACTS_BEARER_TOKEN }}

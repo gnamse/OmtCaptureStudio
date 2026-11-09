@@ -16,25 +16,28 @@ Populate those paths before a first run, release build, or CI packaging job. The
 | Script | Purpose |
 | :--- | :--- |
 | `build-release.ps1` | Version stamp, Native AOT publish, ZIP + SHA-256 under `Releases/`, optional `gh` upload. |
-| `ci-provision-artifacts.ps1` | Phase 1.2: download NativePayload + ffmpeg when `CI_PREREQ_ARCHIVE_URL` (or `CI_NATIVE_PAYLOAD_URL` + `CI_FFMPEG_URL`) is set. On GitHub Actions, missing URLs fail this step. Locally, unset URLs no-op. Never commits binaries. |
+| `ci-provision-artifacts.ps1` | Phase 1.2: download NativePayload + ffmpeg when `CI_PREREQ_ARCHIVE_URL` (or `CI_NATIVE_PAYLOAD_URL` + `CI_FFMPEG_URL`) is set. CI workflow supplies a public release URL by default. On GitHub Actions, missing URLs fail this step; download/validate failures also fail. Locally, unset URLs no-op. Never commits binaries. |
 | `ci-prerequisites.ps1` | Exit non-zero with a clear message if `NativePayload/win-x64` (6 DLLs) or `tools/ffmpeg.exe` is missing. Used by `.github/workflows/ci.yml` after provision, before build. |
 
 ## CI artifact owner checklist (Phase 1.2) — make Actions green
 
-Do **not** commit `ffmpeg.exe` or native DLLs into git. Actions downloads them via a repository secret.
+Do **not** commit `ffmpeg.exe` or native DLLs into git. Actions downloads them over HTTPS.
 
-### Fastest path (reuse existing public portable release)
+### Default path (no secret required)
 
-The latest portable ZIP already contains the 6 native DLLs + `ffmpeg.exe` at its root. `ci-provision-artifacts.ps1` accepts that flat layout.
+`.github/workflows/ci.yml` already defaults `CI_PREREQ_ARCHIVE_URL` to the public portable release when the repository secret is unset:
+
+`https://github.com/gnamse/OmtCaptureStudio/releases/download/v1.0.0.24/OmtCaptureStudio-v1.0.0.24-win-x64.zip`
+
+That ZIP has the 6 native DLLs + `ffmpeg.exe` at its root; `ci-provision-artifacts.ps1` accepts that flat layout. Forks and same-repo PRs go green without a secret ritual. Provision fails only if the download/extract/validate step fails.
+
+### Optional override (newer or private assets)
 
 1. Open **GitHub → repo → Settings → Secrets and variables → Actions → New repository secret**.
 2. Name: `CI_PREREQ_ARCHIVE_URL`
-3. Value (public; no bearer token needed):
-
-   `https://github.com/gnamse/OmtCaptureStudio/releases/download/v1.0.0.24/OmtCaptureStudio-v1.0.0.24-win-x64.zip`
-
-4. Re-run the failed workflow (**Actions → failed run → Re-run jobs**), or push a new commit.
-5. When you cut a newer release, update the secret URL to that tag’s `*-win-x64.zip` (or switch to a slim zip below).
+3. Value: HTTPS URL to a zip with layout **(A)** or **(B)** below (public release or private host).
+4. For **private** assets, also set `CI_ARTIFACTS_BEARER_TOKEN`.
+5. Re-run the workflow, or push a new commit. When you cut a newer release, bump the secret (or the workflow default) to that tag’s `*-win-x64.zip`.
 
 ### Slim zip (optional, smaller than the portable release)
 
@@ -62,7 +65,7 @@ Set `CI_NATIVE_PAYLOAD_URL` (zip of the win-x64 folder / flat 6 DLLs) **and** `C
 
 ### Local / self-hosted only
 
-Populate the gitignored paths on the runner; leave secrets unset. Provision no-ops locally; prerequisites then pass if files exist. On **GitHub-hosted** Actions, unset secrets fail the Provision step on purpose (suite green requires artifacts).
+Populate the gitignored paths on the runner; leave env vars unset. Provision no-ops locally; prerequisites then pass if files exist. On **GitHub-hosted** Actions the workflow default URL is used unless you override; a run with no URL at all still fails Provision on purpose.
 
 ## Same gate as CI (local)
 
@@ -76,6 +79,6 @@ Copy-Item tools\ffmpeg.exe OmtCaptureStudio.Tests\bin\x64\Release\net8.0-windows
 dotnet run --project OmtCaptureStudio.Tests -c Release -p:Platform=x64 --no-build
 ```
 
-Default suite only (no soak / no `--step`). Failures exit non-zero. On GitHub Actions, provision runs before build so NativePayload is embedded when secrets are set.
+Default suite only (no soak / no `--step`). Failures exit non-zero. On GitHub Actions, provision runs before build so NativePayload is embedded from the default (or secret) archive URL.
 
 Root operator launchers (also tracked): `Launch-OmtCaptureStudio.bat`, `Build-AOT.bat`.
