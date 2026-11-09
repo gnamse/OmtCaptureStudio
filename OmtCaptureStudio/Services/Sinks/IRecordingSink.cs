@@ -98,4 +98,16 @@ public interface IRecordingSink : IDisposable
         survivingPath = null;
         return false;
     }
+
+    /// <summary>
+    /// Whether this sink persists media to durable storage that needs disk-headroom preflight and the
+    /// periodic low-water guard.
+    ///
+    /// <para>Default <c>true</c> so production adapters (FFmpeg pipe, future MF) keep today's storage
+    /// policy. In-memory test adapters (<see cref="NullRecordingSink"/>) return <c>false</c>: a High
+    /// quality 1080p60 hour estimate needs ~50 GB free, which CI runners often lack, and refusing the
+    /// take would break the zero-disk seam while the sink never touches the volume. Same DIM shape as
+    /// <see cref="HasSurvivingDestination"/>: default to the OLD production behaviour.</para>
+    /// </summary>
+    bool RequiresDurableStorage => true;
 }

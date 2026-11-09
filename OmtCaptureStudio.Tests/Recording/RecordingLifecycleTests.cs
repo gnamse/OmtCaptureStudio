@@ -95,6 +95,7 @@ partial class Program
         public long AudioChunksDropped => 0;
         public string ResolvedEncoderName => "SignalSink";
         public string DiagnosticTail => "diag-tail";
+        public bool RequiresDurableStorage => false;
 
         public event Action<string>? SinkError;
         public void RaiseSinkError(string msg) => SinkError?.Invoke(msg);

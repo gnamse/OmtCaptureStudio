@@ -48,6 +48,7 @@ partial class Program
         public long AudioChunksDropped => 0;
         public string ResolvedEncoderName => Name;
         public string DiagnosticTail => string.Empty;
+        public bool RequiresDurableStorage => false;
         public event Action<string>? SinkError;
 
         public void RaiseError(string message) => SinkError?.Invoke(message);

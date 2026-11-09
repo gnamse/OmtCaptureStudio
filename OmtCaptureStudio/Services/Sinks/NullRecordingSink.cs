@@ -15,6 +15,9 @@ public class NullRecordingSink : IRecordingSink
     public long AudioChunksDropped => 0;
     public string ResolvedEncoderName => "NullSink";
     public string DiagnosticTail => "";
+    /// <inheritdoc />
+    /// <remarks>Null sink never touches disk — skip storage preflight / low-water policy.</remarks>
+    public bool RequiresDurableStorage => false;
     public StreamFormat? InitializedFormat { get; private set; }
     public string? OutputPath { get; private set; }
     public event Action<string>? SinkError { add { } remove { } }

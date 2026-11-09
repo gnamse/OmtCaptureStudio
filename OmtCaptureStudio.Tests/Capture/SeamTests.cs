@@ -79,8 +79,13 @@ partial class Program
             FilenamePrefix = "Seam_Test"
         };
 
+        string? seamRecordError = null;
+        testSession.RecordingError += msg => seamRecordError = msg;
+        Expect(!nullSink.RequiresDurableStorage,
+            "NullRecordingSink must opt out of durable-storage preflight so CI runners are not gated on disk headroom.");
         bool seamRecordStarted = testSession.StartRecording(testConfig);
-        Expect(seamRecordStarted, "Failed to start recording via NullRecordingSink!");
+        Expect(seamRecordStarted,
+            $"Failed to start recording via NullRecordingSink!{(seamRecordError is null ? "" : $" RecordingError={seamRecordError}")}");
 
         Thread.Sleep(300);
         testSession.StopRecording();
