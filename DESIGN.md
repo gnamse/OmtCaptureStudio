@@ -9,6 +9,11 @@ a bug in this file.
 **Mode:** Operate. The user is completing a task (connect to a stream, broadcast,
 record). Scanability, consistency and native expectations outrank expression;
 brand lives in precise details, not decoration.
+**Shell:** ADR-0011 mode picker — the window opens on **Capture vs Broadcast**,
+then shows only that mode's content region (`ModeSelectionView` /
+`CaptureModeView` / `BroadcastModeView`). Shared chrome (status / telemetry /
+recording health / diagnostics) sits outside the content region. Do not revive
+the old dual-mode top-bar Broadcast toggle.
 **Non-goal:** this is not a marketing surface. Do not add gradients, hero
 imagery, or display type to functional controls.
 
@@ -155,41 +160,31 @@ record actions.
 > Controls may also carry their own `MaxWidth`; both are fine, but the column cap
 > is what actually prevents the balloon.
 
-### 5.2 Header structure
+### 5.2 Header structure (ADR-0011)
 
-The top bar is a **two-row responsive grid** inside one `Border`:
+The window has **one swapped content region** plus **shared chrome** (status bar).
+Do not put Capture and Broadcast controls in the same header again.
 
-- **Row 0** — brand, `Source:` picker, refresh, Connect/Disconnect, divider, Test Signal,
-  **compact live-setting summary**, **Broadcast toggle**.
-- **Row 1** — broadcast configuration: `Target:`, `Audio:`, `Network:`, refresh.
-- Rows below: viewport + VU meter (star), recording config bar, status bar.
+**Mode picker (`ModeSelectionView`)** — two large cards (Capture / Broadcast). Last-used
+mode is pre-highlighted; the picker always shows at open (no auto-skip).
 
-Do not collapse these back into one row; that is what caused the original crowding
-at 950px. Preserve every `Grid.Column` assignment when editing — add to the row, do
-not restructure it.
+**Capture mode (`CaptureModeView`)** — operate path is pick source → connect → record:
 
-**NET-012 amendment — row 1 collapses until Broadcast is ON.** The broadcast configuration
-row is `IsVisible`-bound to the **broadcast state** (`IsBroadcastRowVisible`), and the
-Broadcast toggle moved up to row 0 because it is the entry point that reveals the row.
+- Top bar: brand, `Source:` picker, refresh, Connect/Disconnect, divider, Test Signal,
+  **Change Mode** (disabled while a take or host broadcast is live — ADR-0011 decision 4).
+- Below: viewport + VU meter, recording config bar.
+- There is **no** Broadcast toggle or broadcast configuration row in this mode.
 
-- Collapsing-when-off and locking-when-on are **different axes**. Collapsing is visibility;
-  the selector locks (`IsMainContentEnabled` / `IsSourceSelectorEnabled` /
-  `IsCaptureSelectorEnabled`) still apply while a broadcast is live.
-- The row's visibility is keyed to **broadcast** state and never to **recording** state, so a
-  take is never disturbed by the collapse. A broadcast switched off mid-recording collapses
-  the row and the recording keeps running.
-- While collapsed, row 0 carries a **compact live-setting summary** (`LiveSettingSummary`,
-  e.g. `Desktop · SystemAudio`) so hiding the pickers never hides *which* target and audio are
-  selected. It is `Polite` — descriptive, not an alarm.
-- **NET-013 P1-01 — the summary's column is ELASTIC (`Width="*" MaxWidth="240"`).** At the 950px
-  floor the summary must SHRINK (and `TextTrimming="CharacterEllipsis"`) rather than push the
-  Broadcast toggle past the window edge; at wide sizes `MaxWidth` caps it at 240 so the surplus
-  still falls at the right edge (§5.1) and the toggle does not drift. Measured before the fix:
-  the summary occupied `716..956` and pushed `BtnDesktopCapture` to `966..1056` — 16px past a
-  950px window, i.e. **the toggle was unreachable at the minimum size.** Any control placed to the
-  right of an elastic summary must be an `Auto` column that the summary can never displace.
-- Every row-1 `Grid.Column` assignment is preserved (including the now-unused column 8) so the
-  row can be restored or extended without re-deriving the layout.
+**Broadcast mode (`BroadcastModeView`)** — host path is select → start (NET-014, §5.5):
+
+- Top bar: brand + **Change Mode**, then the host-broadcast studio row
+  (`Target:`, `Audio:`, `Network:`, Start/Stop Broadcasting).
+- Below: viewport + VU meter; recording-to-file is Capture-only (on-screen hint).
+
+Preserve every `Grid.Column` assignment when editing mode bars — add to the row, do
+not restructure it. The 950px floor and elastic-column lessons from NET-013 still apply:
+any control to the right of a `*` summary/hint column must be `Auto` so it cannot be
+pushed past the window edge.
 
 ### 5.4 The recording bar is two tiers (NET-012)
 
@@ -225,44 +220,34 @@ Gaps between adjacent toolbar controls are **not** implicit: `BtnAdvancedRecordi
 `Margin="8,0,0,0"` and `BtnTestSignal` carries `Margin="0,0,10,0"`, because two controls that abut
 at 0px read as one control (NET-013 P2-02).
 
-### 5.5 The broadcast row is three states (NET-014)
+### 5.5 Broadcast mode is select → start (NET-014, ADR-0011)
 
-The broadcast row is not a toggle, it is a **reveal → select → start** sequence. The user's report:
-*"when I click Broadcast, it disabled the controls. What I want is: when I click Broadcast, it should
-show the controls and after my selection, there should be an extra button that says Start
-Broadcasting."* Revealing used to start the send, so the pickers the operator still had to touch
-appeared already locked.
+Under the mode shell, Broadcast **is** its own view — there is no Capture-mode reveal toggle.
+Inside `BroadcastModeView` the host bar is still a **select → start** sequence (not
+"toggle = go live"):
 
-| State | Row | Pickers | Row-0 button | In-row action |
-|---|---|---|---|---|
-| **1 Hidden** (default) | invisible | — | reveal | — |
-| **2 Selecting** | visible | **enabled** | hide | `Start Broadcasting` |
-| **3 Live** | visible | **locked** | stop + hide | `Stop Broadcasting` |
+| State | Pickers | In-row action |
+|---|---|---|
+| **Selecting** (entered mode, not live) | **enabled** | `Start Broadcasting` |
+| **Live** | **locked** | `Stop Broadcasting` |
 
-The live-lock key is the **live state**, not the reveal: pickers lock when a send is running, because
-that is when a mid-flight change drops receivers. `BroadcastSessionState.IsCaptureSelectorEnabled`
-(`!IsBroadcasting`) is already correct for this and did not change.
+The live-lock key is the **live state**: pickers lock when a send is running, because a
+mid-flight change drops receivers. `BroadcastSessionState.IsCaptureSelectorEnabled`
+(`!IsBroadcasting`) is already correct for this.
 
-**A live broadcast is never orphaned.** Row visibility is
-`IsBroadcastRevealed || IsDesktopCaptureActive` — OR'd with the live state deliberately, so clearing
-the reveal flag cannot hide a running send. The row-0 button's role depends on the state for the same
-reason: while OFF it reveals/hides, and while LIVE it **stops the send and returns to Hidden**
-(stopped, never merely hidden). The in-row action stops but **keeps the panel revealed**, so the
-operator can adjust and restart without the controls vanishing under the cursor.
+**Change Mode** is disabled while live (ADR-0011 decision 4) — a mode switch must never
+silently tear down a send. Stopping returns to Selecting in the same Broadcast view so the
+operator can adjust and restart.
 
-The start still routes through `SetDesktopCaptureActiveAsync` and therefore through
-`OmtDesktopCaptureGenerator` — the new button is a **UI-state change only**; the send lifecycle and
-its single gate are untouched (the ADR-0005 analog).
+The start still routes through `SetDesktopCaptureActiveAsync` /
+`OmtDesktopCaptureGenerator` — UI state vs send lifecycle stay separated (ADR-0001 /
+ADR-0005 analog).
 
-The in-row action is `MinHeight="30"` (no second control height), named with the action it will
-perform (`BroadcastActionAutomationName`), tooltipped, and keyboard reachable. It is **always
-enabled** — binding `IsCaptureSelectorEnabled` here would disable *Stop* exactly when it is needed.
-The selecting-state hint carries `AutomationProperties.LiveSetting="Polite"`: it is guidance, not an
-alarm. The hint sits in the freed column 8 as an elastic `*` column (`MinWidth="0"`,
-`TextTrimming="CharacterEllipsis"`, `MaxWidth="260"`), so it shrinks before it can push the action
-button out of the window — the P1-01 lesson applied to row 1. At 950px the three pickers hold their
-`MinWidth`s (130 + 140 + 130 = 400), the action needs ~150, labels and refresh ~216 of the 922
-available, leaving ~156 for the hint, which trims.
+The in-row action is `MinHeight="30"`, named with the action it will perform
+(`BroadcastActionAutomationName`), tooltipped, and keyboard reachable. It is **always
+enabled** — binding `IsCaptureSelectorEnabled` here would disable *Stop* exactly when it is
+needed. The selecting-state hint is `Polite` and sits in an elastic `*` column so it trims
+before pushing the action button past the 950px floor.
 
 ### 5.3 The VU meter is a fixed column
 
@@ -274,8 +259,8 @@ window; its scale is calibrated.
 ## 6. Components
 
 - **ComboBox** — used for every selection (sources, targets, audio devices, network, container/encoder/quality). Item templates are a single `TextBlock` bound to `DisplayName` with `TextTrimming="CharacterEllipsis"`.
-- **ToggleButton** — only for state that is *live*: Test Signal and Broadcast. Background binds a `StudioPalette` brush; they are never plain buttons.
-- **Button** — actions (Connect, Record, Refresh, Browse). Command-bound, never click-handlers.
+- **ToggleButton** — only for state that is *live* inside Capture (Test Signal, Advanced recording). Background binds a `StudioPalette` brush; they are never plain buttons. Host Start/Stop Broadcasting is a **Button**, not a toggle (NET-014).
+- **Button** — actions (Connect, Record, Refresh, Browse, Change Mode, Start/Stop Broadcasting). Command-bound, never click-handlers.
 - **Icon set** — drawn `StreamGeometry` in `App.axaml` (`IconRefresh`, `IconFolder`, `IconWarning`), rendered as `Path` at 14–15px with `StrokeThickness="1.8"`, `Stretch="Uniform"`. Add new icons the same way — no image files, no emoji, no font icons.
 
 ---
@@ -284,7 +269,7 @@ window; its scale is calibrated.
 
 - **Status bar** is the primary channel for what just happened and why.
 - **Live regions are mandatory.** `AutomationProperties.LiveSetting="Assertive"` on status / LIVE / record-stats text; `"Polite"` on high-frequency telemetry (bitrate, dropped frames, audio). Screen readers announce nothing without this.
-- **Lock what cannot change mid-flight — and not a moment before.** Target, Audio and Network selectors are disabled while a broadcast is **live**; revealing the row for selection leaves them **enabled** (NET-014 §5.5). Locking on reveal made the pickers unusable exactly when the operator needed them. Source is disabled while connected. All of them require restarting the sender, so allowing edits mid-stream would silently drop receivers. Reuse the existing enabled-flag pattern rather than inventing a new one.
+- **Lock what cannot change mid-flight — and not a moment before.** In Broadcast mode, Target / Audio / Network are disabled while a send is **live**; while Selecting they stay **enabled** (NET-014 §5.5). Source is disabled while connected in Capture. Mid-stream edits would silently drop receivers — reuse the existing enabled-flag pattern.
 - **VU meter** uses `StudioVuMeterGradient` (`#10B981` → `#22C55E` → `#84CC16` → `#EAB308` → `#F59E0B` → `#EF4444` → `#DC2626`), calibrated −60 dBFS to 0 dBFS. Do not restyle it freely; it communicates level by colour.
 - **Modals must trap focus.** The recording-close overlay cycles Tab/Shift+Tab between its two buttons so focus cannot reach the controls behind it.
 

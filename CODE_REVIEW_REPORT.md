@@ -1,4 +1,10 @@
 # Codebase Architecture & Standards Audit Report
+
+> **Historical (2026-10-13).** Kept as a verified remediation record — do not treat this
+> file as the living roadmap. New structure, CI, recording-strategy, and doc work goes
+> through **`docs/IMPROVEMENT_PLAN.md`** and **`docs/adr/README.md`**, with the
+> enforceable contract in **`CODING_STANDARDS.md`**.
+
 **Project:** OMT Capture Studio  
 **Target Solution:** `OmtCaptureStudio.sln` (`OmtCaptureStudio`, `OmtCaptureStudio.Tests`)  
 **Specification:** `CODING_STANDARDS.md` & `CONTEXT.md`  

@@ -1,6 +1,6 @@
 # OMT Capture Studio — Improvement Plan
 
-**Status:** Living plan — Phase 0 complete; Phase 1.1–1.4 done; **1.5 router landed** + **1.6 Capture/Broadcast workspace partials** + 1.3 nightly AOT (2026-11-09); suite green on Actions still needs owner artifact secrets  
+**Status:** Living plan — Phase 0–1 structural complete; **Phase 2 done** (Core NO-GO + sink selector harden + mode-view facade notes, 2026-11-09); **Phase 4 done** (ADR index, DESIGN drift, release checklist, historical audit pointer); suite green on Actions still needs owner artifact secrets; Phase 3 owner decisions open  
 
 **Owner:** Gbolahan  
 **Grounded against:** repo @ `feature/media-foundation-sink` / version `1.0.0.24` (main carries security/broadcast line)  
@@ -102,14 +102,28 @@
 
 | Workstream | Concrete tickets | Effort |
 |---|---|---|
-| **2.1 Core project decision spike** | Timebox: list types with **zero** Avalonia references (`CaptureSession`, sinks, sources, guards, forensics, settings). Propose `OmtCaptureStudio.Core` classlib (AOT-compatible) referenced by app + tests. **Ship only if** move is mechanical and does not drag UI types. | M (1–2 d spike) → L if execute |
-| **2.2 Recording sink selector** | Document / harden the selection point for sinks (spike notes `RecordingSinkSelector.Initialize` — verify actual type name in tree; today production is FFmpeg pipe via `StreamRecorderService` / `FfmpegPipeSink`). Keep `IRecordingSink` as the only integration surface for MF later. | S |
-| **2.3 Continue VM + view alignment** | Mode views already exist (`Views/CaptureModeView`, `BroadcastModeView`, `ModeSelectionView`). Bind extracted VMs; avoid second mega-VM. | M |
+| **2.1 Core project decision spike** | Timebox: list types with **zero** Avalonia references (`CaptureSession`, sinks, sources, guards, forensics, settings). Propose `OmtCaptureStudio.Core` classlib (AOT-compatible) referenced by app + tests. **Ship only if** move is mechanical and does not drag UI types. | M (1–2 d spike) → L if execute — **NO-GO 2026-11-09** (see outcome below) |
+| **2.2 Recording sink selector** | Document / harden the selection point for sinks (spike notes `RecordingSinkSelector.Initialize` — verify actual type name in tree; today production is FFmpeg pipe via `StreamRecorderService` / `FfmpegPipeSink`). Keep `IRecordingSink` as the only integration surface for MF later. | S — **Done 2026-11-09** |
+| **2.3 Continue VM + view alignment** | Mode views already exist (`Views/CaptureModeView`, `BroadcastModeView`, `ModeSelectionView`). Bind extracted VMs; avoid second mega-VM. | M — **Done 2026-11-09** (facade bindings + view comments; named workspace *types* still deferred) |
 
 **Acceptance criteria**
 
-- [ ] Written go/no-go for Core split (if go: project in `.sln`, tests reference Core, AOT publish green).
-- [ ] No circular project refs; CODING_STANDARDS scope list updated.
+- [x] Written go/no-go for Core split (if go: project in `.sln`, tests reference Core, AOT publish green).
+- [x] No circular project refs; CODING_STANDARDS scope list updated.
+
+**2.1 Core go/no-go (2026-11-09) — NO-GO / defer**
+
+Inventory: `OmtCaptureStudio/Services/**` and `Models/**` have **zero** `using Avalonia` references — engines, sinks, sources, guards, forensics, and settings are Avalonia-free on paper. Still **do not ship** `OmtCaptureStudio.Core` this pass:
+
+1. Phase 1 CI suite remains prereq-red until owner sets `CI_PREREQ_ARCHIVE_URL` (plan risk: Core csproj/AOT-trim churn without green CI).
+2. Move is not purely mechanical: app csproj owns Vortice + `libomtnet` refs, embedded `NativePayload`, and AOT publish roots — a split would re-home trim/rd.xml and test project refs without a vertical slice plan.
+3. Safer subset lands instead: harden `RecordingSinkSelector` as the sole production `FfmpegPipeSink` construction point behind `IRecordingSink` (Phase 3 MF plugs factories here, not a Core rewrite).
+
+Revisit after Actions suite is green **and** owner confirms appetite for csproj churn (open decision table still defaults to Later).
+
+**2.2 landed:** `RecordingSinkSelector` (+ `CompositeRecordingSinkFactory`) extracted to `Services/Sinks/RecordingSinkSelector.cs`; `ForProduction()` documented as sole shipping `new FfmpegPipeSink()` site; forwards `DetachedDestinationNames` (NET-020 production gap closed); suite step `0.690` asserts selector detach forward. No MF code in Services; no FFmpeg-vs-MF product call.
+
+**2.3 landed:** Mode views continue to bind the `MainWindowViewModel` facade (AppModeShell / workspace / chrome partials). View summaries state "do not invent a second Capture/Broadcast VM." Named composed workspace *types* remain optional polish — not required for Phase 2 acceptance.
 
 **Dependencies / risks:** Premature Core split churns csproj/AOT trim without CI → defer if Phase 1 incomplete. ADR-0010 `tee` work remains **measurement-blocked** — do not couple to Core.
 
@@ -142,15 +156,17 @@
 
 | Workstream | Concrete tickets | Effort |
 |---|---|---|
-| **4.1 ADR index** | `docs/adr/README.md` listing 0001–0011 with status; mark missing numbers reserved/missing. | S |
-| **4.2 DESIGN / README drift** | Pass for leftover dual-mode shell language vs ADR-0011 picker; screenshot paths already OK under `docs/images/`. | S |
-| **4.3 Release checklist** | Short `docs/RELEASE_CHECKLIST.md`: version.txt bump, `scripts/build-release.ps1`, SHA-256, installer (`installer/OmtCaptureStudio.iss`), suite + optional AOT. | S |
-| **4.4 Retire stale audit noise** | Keep `CODE_REVIEW_REPORT.md` as historical; point new work at this plan + ADRs. | S |
+| **4.1 ADR index** | `docs/adr/README.md` listing 0001–0011 with status; mark missing numbers reserved/missing. | S — **Done 2026-11-09** |
+| **4.2 DESIGN / README drift** | Pass for leftover dual-mode shell language vs ADR-0011 picker; screenshot paths already OK under `docs/images/`. | S — **Done 2026-11-09** (`DESIGN.md` §5.2/§5.5/components; README already picker-first) |
+| **4.3 Release checklist** | Short `docs/RELEASE_CHECKLIST.md`: version.txt bump, `scripts/build-release.ps1`, SHA-256, installer (`installer/OmtCaptureStudio.iss`), suite + optional AOT. | S — **Done 2026-11-09** |
+| **4.4 Retire stale audit noise** | Keep `CODE_REVIEW_REPORT.md` as historical; point new work at this plan + ADRs. | S — **Done 2026-11-09** |
 
 **Acceptance criteria**
 
-- [ ] New contributor can find mode shell, recording arm, and security gates from ADR index alone.
-- [ ] Release steps are copy-pasteable without tribal knowledge.
+- [x] New contributor can find mode shell, recording arm, and security gates from ADR index alone.
+- [x] Release steps are copy-pasteable without tribal knowledge.
+
+**Completed:** 2026-11-09 — `docs/adr/README.md` (topic → ADR map + gap series); `DESIGN.md` aligned to ADR-0011 (no dual-mode Broadcast toggle narrative); `docs/RELEASE_CHECKLIST.md`; `CODE_REVIEW_REPORT.md` historical banner; `AGENTS.md` Known gaps points at ADR index + release checklist.
 
 ---
 
@@ -188,16 +204,17 @@
 8. ~~**1.3 nightly AOT**~~ **Done 2026-11-09**.
 9. ~~**1.6 chrome slices** (Broadcast/Recording)~~ **Done 2026-11-09**.
 10. ~~**1.5 router finish** + ~~**1.6 Capture/Broadcast workspace partials**~~ **Done 2026-11-09** (`Program.cs` ~400).
-11. **Next (owner):** set CI artifact secrets for Actions suite green; MF vs FFmpeg decision meeting (read spike README — do not invent ADR). Phase 2/4 as appetite allows (ADR index, Core go/no-go, composed workspace types).
+11. ~~**Phase 2** (Core NO-GO + sink selector harden + mode-view facade notes)~~ **Done 2026-11-09**.
+12. ~~**Phase 4** (ADR index, DESIGN drift, release checklist, historical audit pointer)~~ **Done 2026-11-09**.
+13. **Next (owner):** set CI artifact secrets for Actions suite green; **Phase 3** MF vs FFmpeg decision meeting (read `spikes/mf-sinkwriter/README.md` — do not invent ADR); PA16 policy call. Optional: revisit Core after CI green; composed workspace *types*.
 
 ### Next month
 
 1. CI green with cached native+ffmpeg artifacts (owner secrets).
-2. Finish mechanical test split; `Program.cs` router-only.
-3. Named Capture/Broadcast workspace VMs behind facade bindings.
-4. ADR for recording engine + PA16 policy written and accepted.
-5. Core split go/no-go; if go, one vertical move (sinks+sources) not a big-bang.
-6. Phase 4 ADR index + release checklist.
+2. ADR for recording engine + PA16 policy written and accepted (Phase 3).
+3. If MF proceeds: `MediaFoundationRecordingSink : IRecordingSink` behind flag via `RecordingSinkSelector` factories — spike stays throwaway.
+4. Revisit Core split only after CI green + owner appetite; if go, one vertical move (sinks+sources) not a big-bang.
+5. Optional: named Capture/Broadcast workspace VM *types* behind facade bindings.
 
 ---
 
@@ -207,7 +224,7 @@
 |---|---|---|---|
 | **FFmpeg vs MF** | Stay / MF+fallback / MF-only | Stay FFmpeg until audio+HW+crash gates in ADR; keep spike evidence | Strategy call |
 | **Test harness vs xUnit** | Keep console throw-on-fail / migrate | **Keep** harness; CI invokes `dotnet run`; migrate only if IDE/explorer pain dominates | Only if CI friction |
-| **Core project split** | Now / later / never | **Later** (Phase 2), after CI + test split | Confirm appetite for csproj churn |
+| **Core project split** | Now / later / never | **Later / NO-GO this pass** (Phase 2.1 written 2026-11-09) — revisit after CI green | Confirm appetite for csproj churn |
 | **CONTEXT.md tracking** | Track in git / generate / personal-only | **Track** (remove from `.gitignore`) — AGENTS already requires it | Confirm no secrets in file |
 | **Capture vs Broadcast process isolation** | One process (today) / two processes | **Stay one process** unless stability data demands isolation | Only if multi-hour broadcast faults require it |
 | **PA16** | Refuse (current) / decode | **Refuse** until a real sender requirement appears | Product |

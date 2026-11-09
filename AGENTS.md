@@ -37,9 +37,13 @@ Conventional Commits, lowercase scope: `fix(recording):`, `fix(build):`,
 
 ## Known gaps
 Living improvement work lives in **`docs/IMPROVEMENT_PLAN.md`** (phases, acceptance
-criteria, open decisions). Do not invent missing ADRs — the numbered series has
-gaps by design for now:
+criteria, open decisions). Navigable ADR index: **`docs/adr/README.md`**. Release
+operator sequence: **`docs/RELEASE_CHECKLIST.md`**. Do not invent missing ADRs —
+the numbered series has gaps by design for now:
 
 - Present: `docs/adr/0001`, `0002`, `0003`, `0005`, `0006`, `0010`, `0011`
 - Missing / not authored yet: **0004**, **0007**, **0008**, **0009** (leave vacant
   until a real decision needs that slot; do not stub speculative ADRs)
+
+`CODE_REVIEW_REPORT.md` is a **historical** Oct 2026 audit — point new work at the
+plan + ADR index, not at extending that report.
