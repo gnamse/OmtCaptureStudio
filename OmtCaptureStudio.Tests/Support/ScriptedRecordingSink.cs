@@ -20,12 +20,18 @@ partial class Program
     private sealed class ScriptedRecordingSink : IRecordingSink
     {
         private readonly bool _rentsPooledBuffer;
+        private readonly bool _requiresDurableStorage;
 
-        public ScriptedRecordingSink(string name, bool rentsPooledBuffer = false, bool initializeResult = true)
+        public ScriptedRecordingSink(
+            string name,
+            bool rentsPooledBuffer = false,
+            bool initializeResult = true,
+            bool requiresDurableStorage = false)
         {
             Name = name;
             _rentsPooledBuffer = rentsPooledBuffer;
             InitializeResult = initializeResult;
+            _requiresDurableStorage = requiresDurableStorage;
         }
 
         public string Name { get; }
@@ -48,7 +54,7 @@ partial class Program
         public long AudioChunksDropped => 0;
         public string ResolvedEncoderName => Name;
         public string DiagnosticTail => string.Empty;
-        public bool RequiresDurableStorage => false;
+        public bool RequiresDurableStorage => _requiresDurableStorage;
         public event Action<string>? SinkError;
 
         public void RaiseError(string message) => SinkError?.Invoke(message);

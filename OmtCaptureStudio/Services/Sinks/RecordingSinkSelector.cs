@@ -30,6 +30,7 @@ public sealed class RecordingSinkSelector : IRecordingSink
 {
     private readonly Func<RecordingConfig, string, IRecordingSink> _singleFactory;
     private readonly Func<RecordingConfig, string, IRecordingSink> _compositeFactory;
+    private readonly bool _requiresDurableStorageBeforeSelect;
     private readonly object _lock = new();
 
     private IRecordingSink? _inner;
@@ -37,10 +38,15 @@ public sealed class RecordingSinkSelector : IRecordingSink
 
     public RecordingSinkSelector(
         Func<RecordingConfig, string, IRecordingSink> singleFactory,
-        Func<RecordingConfig, string, IRecordingSink> compositeFactory)
+        Func<RecordingConfig, string, IRecordingSink> compositeFactory,
+        bool requiresDurableStorage = true)
     {
         _singleFactory = singleFactory ?? throw new ArgumentNullException(nameof(singleFactory));
         _compositeFactory = compositeFactory ?? throw new ArgumentNullException(nameof(compositeFactory));
+        // The arm reads RequiresDurableStorage BEFORE Initialize (so a full disk never spawns FFmpeg).
+        // Until a child is selected the pre-select answer stands; production stays true, in-memory
+        // test selectors pass false so CI is not gated on the High 1080p60 hour estimate.
+        _requiresDurableStorageBeforeSelect = requiresDurableStorage;
     }
 
     /// <summary>
@@ -57,6 +63,12 @@ public sealed class RecordingSinkSelector : IRecordingSink
 
     /// <summary>True when the take that started is running as a composite (i.e. a backup is in use).</summary>
     public bool IsComposite => _inner is CompositeRecordingSink;
+
+    /// <summary>
+    /// Forwarded from the selected sink once Initialize has run; before that, the constructor's
+    /// pre-select answer (production default <c>true</c>).
+    /// </summary>
+    public bool RequiresDurableStorage => _inner?.RequiresDurableStorage ?? _requiresDurableStorageBeforeSelect;
 
     public event Action<string>? SinkError;
 

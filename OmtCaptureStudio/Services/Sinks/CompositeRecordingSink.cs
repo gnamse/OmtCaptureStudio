@@ -124,6 +124,26 @@ public sealed class CompositeRecordingSink : IRecordingSink
     public long AudioBytesWritten => Interlocked.Read(ref _audioBytesWritten);
 
     /// <summary>
+    /// True when any child persists to durable storage. A dual-FFmpeg take keeps the arm's disk
+    /// preflight; a composite of in-memory children (test wiring) opts out the same way a lone
+    /// <see cref="NullRecordingSink"/> does — CI runners must not be gated on a High 1080p60
+    /// hour estimate when no child will write a byte to disk.
+    /// </summary>
+    public bool RequiresDurableStorage
+    {
+        get
+        {
+            ChildState[] children = _children;
+            for (int i = 0; i < children.Length; i++)
+            {
+                if (children[i].Sink.RequiresDurableStorage) return true;
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Initializes every child. A child that cannot start is dropped and the others carry on - the take
     /// only fails when NO destination came up, which is the same total failure as before.
     /// </summary>
