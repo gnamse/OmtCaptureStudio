@@ -1,6 +1,6 @@
 # OMT Capture Studio — Improvement Plan
 
-**Status:** Living plan — Phase 0 complete; Phase 1.1–1.4 done; 1.5 domain extracts + 1.6 chrome slices + 1.3 nightly AOT landed (2026-11-09); suite green on Actions still needs owner artifact secrets  
+**Status:** Living plan — Phase 0 complete; Phase 1.1–1.4 done; **1.5 router landed** + **1.6 Capture/Broadcast workspace partials** + 1.3 nightly AOT (2026-11-09); suite green on Actions still needs owner artifact secrets  
 
 **Owner:** Gbolahan  
 **Grounded against:** repo @ `feature/media-foundation-sink` / version `1.0.0.24` (main carries security/broadcast line)  
@@ -78,19 +78,19 @@
 | **1.2 CI prerequisites** | Decide how runners get native libs + ffmpeg: (a) checked-in CI cache artifact / secret-stored zip, or (b) job step that fails with clear message if missing. Prefer (a) for green main. Suite already calls `FfmpegPreflight.Run` at head of `RunDefaultSuite`. | M (1 d) + infra — **Scaffolding done 2026-11-08** (`ci-provision-artifacts.ps1` + workflow secret hooks); **owner must set `CI_PREREQ_ARCHIVE_URL` (or split URLs) for green suite on Actions** |
 | **1.3 Optional AOT job** | Nightly or `workflow_dispatch`: `dotnet publish OmtCaptureStudio/OmtCaptureStudio.csproj -c Release -r win-x64 /p:PublishAot=true`. Not required on every PR initially (slow). | S–M **Done 2026-11-09** (`.github/workflows/aot-nightly.yml` — schedule + `workflow_dispatch`; publish smoke only, no artifact upload) |
 | **1.4 Directory.Build.props + editorconfig** | Root `Directory.Build.props`: `Nullable`, `TreatWarningsAsErrors` (start Warning-level treat carefully — may need baseline), `LangVersion`, shared `Platform=x64` notes. `.editorconfig` for C# style aligned with existing code. Optional: `EnableNETAnalyzers` + a small allowlist; **do not** enable rules that fight AOT or CommunityToolkit generators without a dry-run. | M (1–2 d) **Done 2026-11-08** (props + editorconfig landed; `TreatWarningsAsErrors` deferred — policy paragraph in `CODING_STANDARDS.md` §3.1) |
-| **1.5 Test harness split (mechanical)** | Extract `RunDefaultSuite` steps from `OmtCaptureStudio.Tests/Program.cs` (~9.0k lines today) into files by domain, keeping the **same** console host + `Expect` + `--step` switch (`RunSingleStep` cases `0`…`0.69x`). Suggested first cuts mirroring suite order + existing extract `SecurityRegressionTable.cs`: `Tests/Recording/*.cs`, `Tests/Security/*.cs`, `Tests/Broadcast/*.cs`, `Tests/Audio/*.cs`, `Tests/UiShell/*.cs`, `Tests/Support/Expect.cs`. Keep CLI modes (`--diag-*`, `--real-sender-soak`, `--step`) in thin `Program.cs`. | L (3–5 d), incremental PRs — **Major cut 2026-11-09:** Recording / Security / Broadcast / Audio partials + `Support/FindRepoSource` + `Support/ScriptedRecordingSink`; `Program.cs` ~3.5k (router + remaining Ui/Capture/diag/soak still inline) |
-| **1.6 VM decomposition (continue)** | Carve `ViewModels/MainWindowViewModel.cs` (~3.0k lines) along existing `#region`s and mode shell (ADR-0011): e.g. `CaptureWorkspaceViewModel`, `BroadcastWorkspaceViewModel`, `RecordingChromeViewModel`, keep facade or thin shell VM for bindings in `MainWindow.axaml` / mode views. Preserve headless ctor + palette rules. Drive with existing `TestMainWindowViewModel` + `TestAppModeShell`. | L (ongoing; first slice 2–3 d) — **Second cut 2026-11-09:** `MainWindowViewModel.BroadcastChrome.cs` + `RecordingChrome.cs` partials (row projection / state projection / advanced disclosure); named workspace VMs still pending |
+| **1.5 Test harness split (mechanical)** | Extract `RunDefaultSuite` steps from `OmtCaptureStudio.Tests/Program.cs` into files by domain, keeping the **same** console host + `Expect` + `--step` switch. Keep CLI modes (`--diag-*`, `--real-sender-soak`, `--step`) in thin `Program.cs`. | L — **Done 2026-11-09:** `Program.cs` is router-only (~400 lines: `Main` + `RunDefaultSuite` + `RunSingleStep`). Domains under `Capture/`, `Operator/`, `Diagnostics/`, `Recording/`, `Security/`, `Broadcast/`, `Audio/`, `UiShell/`, `Support/`. |
+| **1.6 VM decomposition (continue)** | Carve `ViewModels/MainWindowViewModel.cs` along existing `#region`s and mode shell (ADR-0011): Capture/Broadcast workspace + chrome slices; keep facade bindings. Preserve headless ctor + palette rules. | L (ongoing) — **Third cut 2026-11-09:** `MainWindowViewModel.CaptureWorkspace.cs` + `BroadcastWorkspace.cs` partials (target/audio/ASIO population + host-broadcast arm); prior AppModeShell / BroadcastChrome / RecordingChrome remain. Separate named workspace *types* (composition) still optional Phase 2 polish. |
 
 **Acceptance criteria**
 
 - [ ] PR CI red/green without manual local ritual for build + default suite. *(1.1 workflow + 1.2 provision hooks exist; clean runners stay prereq-red until owner secrets populate artifacts.)*
-- [ ] `Program.cs` is a router (<~400 lines target after split); step ids still work (`--step 0.682` etc.). *(partial: Recording/Security/Broadcast/Audio/UiShell extracted; Program ~3.5k — Capture/desktop, TakeSupervisor, OperatorSettings, Diagnostics, soak/diag CLI remain)*
-- [x] At least one VM slice extracted with tests green and AOT publish still succeeding. *(AppModeShell + BroadcastChrome + RecordingChrome partials; nightly AOT workflow landed — full AOT publish not re-run locally this pass)*
+- [x] `Program.cs` is a router (<~400 lines target after split); step ids still work (`--step 0.682` etc.). *(~400 lines: Main + RunDefaultSuite + RunSingleStep; domains extracted incl. Capture/Operator/Diagnostics/soak/diag CLI)*
+- [x] At least one VM slice extracted with tests green and AOT publish still succeeding. *(AppModeShell + BroadcastChrome + RecordingChrome + CaptureWorkspace + BroadcastWorkspace partials; nightly AOT workflow landed — full AOT publish not re-run locally this pass)*
 - [x] `Directory.Build.props` + `.editorconfig` present; build warning policy documented in `CODING_STANDARDS.md` (one paragraph).
 
 **1.1 landed (2026-11-08):** `.github/workflows/ci.yml` on `windows-latest` — NuGet cache via `setup-dotnet`, Release\|x64 restore/build, `scripts/ci-prerequisites.ps1`, stage `tools/ffmpeg.exe` beside the test host, default suite via `dotnet run` (no soak). Does not commit binaries; does not touch `spikes/mf-sinkwriter`.
 
-**1.2–1.6 + 1.3 progress (2026-11-09):** Domain test partials under `Tests/{Recording,Security,Broadcast,Audio,UiShell,Support}`; VM `BroadcastChrome` / `RecordingChrome` partials; `.github/workflows/aot-nightly.yml`. **Owner still owes** `CI_PREREQ_ARCHIVE_URL` (or split URLs) for Actions suite green. Remaining 1.5: Capture/desktop + operator/settings/diagnostics/soak into domains until `Program.cs` is router-only. Remaining 1.6: named Capture/Broadcast workspace VMs (bindings stay on facade).
+**1.5–1.6 complete for Phase 1 structural goals (2026-11-09):** Test domains under `OmtCaptureStudio.Tests/{Capture,Operator,Diagnostics,Recording,Security,Broadcast,Audio,UiShell,Support}`; `Program.cs` router ~400 lines. VM partials: AppModeShell, BroadcastChrome, RecordingChrome, CaptureWorkspace, BroadcastWorkspace (facade bindings unchanged). `.github/workflows/aot-nightly.yml`. **Owner still owes** `CI_PREREQ_ARCHIVE_URL` (or split URLs) for Actions suite green. Optional later: true composed Capture/Broadcast workspace *types* (Phase 2.3), not required for 1.6 acceptance.
 
 **Dependencies / risks:** CI without native payload/ffmpeg will false-red. Splitting tests without preserving step order will break muscle memory / any external scripts. TreatWarningsAsErrors can stall — phase in.
 
@@ -184,10 +184,11 @@
 4. ~~**Phase 1.6 first VM slice** — AppModeShell partial~~ **Done 2026-11-08**.
 5. ~~**Phase 1.4** — `Directory.Build.props` + `.editorconfig`~~ **Done 2026-11-08** (`TreatWarningsAsErrors` deferred).
 6. ~~**Phase 1.2 scaffolding** — provision script + secret hooks~~ **Done 2026-11-08**; **owner action:** set `CI_PREREQ_ARCHIVE_URL` (or split URLs) for Actions suite green.
-7. ~~**1.5 domain extracts** (Recording/Security/Broadcast/Audio)~~ **Done 2026-11-09** (major cut; Capture/operator/diag remain).
+7. ~~**1.5 domain extracts** (Recording/Security/Broadcast/Audio)~~ **Done 2026-11-09**.
 8. ~~**1.3 nightly AOT**~~ **Done 2026-11-09**.
 9. ~~**1.6 chrome slices** (Broadcast/Recording)~~ **Done 2026-11-09**.
-10. **Next:** finish 1.5 router (`Program.cs` ≤ ~400); named workspace VMs; **owner:** set CI artifact secrets; MF vs FFmpeg decision meeting (read spike README — do not invent ADR).
+10. ~~**1.5 router finish** + ~~**1.6 Capture/Broadcast workspace partials**~~ **Done 2026-11-09** (`Program.cs` ~400).
+11. **Next (owner):** set CI artifact secrets for Actions suite green; MF vs FFmpeg decision meeting (read spike README — do not invent ADR). Phase 2/4 as appetite allows (ADR index, Core go/no-go, composed workspace types).
 
 ### Next month
 
@@ -218,8 +219,8 @@
 | Metric | Baseline (verified) | Target |
 |---|---|---|
 | CI on default branch / PRs | **1.1 workflow + 1.2 provision hooks** (prereq-red until secrets) | Required check: build + default suite green (needs owner artifact URL) |
-| Test entrypoint size | `Program.cs` ~3.5k after Recording/Security/Broadcast/Audio extract (was ~9.0k) | Router ≤ ~400 lines; domains in separate files |
-| Shell VM size | `MainWindowViewModel.cs` ~2.3k + AppModeShell/BroadcastChrome/RecordingChrome partials | No single VM file > ~1k without active split plan; mode concerns separated |
+| Test entrypoint size | `Program.cs` ~400 router (was ~9.0k → ~3.5k → ~400) | Router ≤ ~400 lines; domains in separate files — **met** |
+| Shell VM size | `MainWindowViewModel.cs` ~2.2k + AppModeShell/BroadcastChrome/RecordingChrome/CaptureWorkspace/BroadcastWorkspace partials | No single VM file > ~1k without active split plan; mode concerns separated — further split optional |
 | Onboarding | Tracked scripts + CONTEXT | Tracked scripts + CONTEXT; README prerequisites unambiguous |
 | Repo standards files | **`Directory.Build.props` + `.editorconfig` present** | Present; documented in CODING_STANDARDS |
 | Recording strategy | Spike only on `feature/media-foundation-sink` | Accepted ADR; production still behind `IRecordingSink` |
