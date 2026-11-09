@@ -243,19 +243,27 @@ public static class NativePayloadBootstrapper
         }
     }
 
-    /// <summary>R22: current user, SYSTEM and Administrators only - no inherited broad grants.</summary>
+    /// <summary>
+    /// R22: current user, SYSTEM and Administrators only. Built from a <i>fresh</i>
+    /// <see cref="DirectorySecurity"/> so pre-existing explicit ACEs (e.g. Everyone / Users left on
+    /// GitHub Actions TEMP directories after inheritance is frozen) cannot survive as write grants that
+    /// would then fail <see cref="DirectoryIsTrusted"/>.
+    /// </summary>
     public static bool ApplyRestrictiveAcl(string path)
     {
         try
         {
             var info = new DirectoryInfo(path);
-            DirectorySecurity security = info.GetAccessControl();
-
+            // Do NOT start from GetAccessControl(): SetAccessRuleProtection(preserveInheritance:false)
+            // only drops *inherited* ACEs. Explicit Everyone/Users grants (common once TEMP inheritance
+            // has been frozen on CI) would remain and DirectoryIsTrusted would refuse the directory.
+            var security = new DirectorySecurity();
             security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
 
             var currentUser = WindowsIdentity.GetCurrent().User;
             if (currentUser is not null)
             {
+                security.SetOwner(currentUser);
                 security.AddAccessRule(new FileSystemAccessRule(
                     currentUser, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
                     PropagationFlags.None, AccessControlType.Allow));

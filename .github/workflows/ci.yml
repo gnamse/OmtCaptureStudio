@@ -1,0 +1,71 @@
+# Phase 1.1 / 1.2 — CI gate matching AGENTS.md / IMPROVEMENT_PLAN.md:
+#   restore → provision NativePayload+ffmpeg → prerequisites check →
+#   Release|x64 build (embeds NativePayload) → stage ffmpeg → default suite (no soak).
+# Native payload + tools/ffmpeg.exe are gitignored; runners download them via CI_PREREQ_ARCHIVE_URL
+# (workflow default = public portable release; secret overrides — see scripts/README.md).
+# Headless DXGI/GDI paths soft-skip inside the suite.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build + default suite
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+          cache: true
+          cache-dependency-path: |
+            OmtCaptureStudio/OmtCaptureStudio.csproj
+            OmtCaptureStudio.Tests/OmtCaptureStudio.Tests.csproj
+
+      - name: Restore
+        run: dotnet restore OmtCaptureStudio.sln
+
+      # Phase 1.2: must run BEFORE build so EmbeddedResource picks up NativePayload.
+      # Default archive URL is the public portable release (flat 6 DLLs + ffmpeg.exe).
+      # Override with repository secret CI_PREREQ_ARCHIVE_URL for a newer/private zip, or
+      # use CI_NATIVE_PAYLOAD_URL + CI_FFMPEG_URL; optional CI_ARTIFACTS_BEARER_TOKEN for private assets.
+      # Provision fails only if download/extract/validate fails (or no URL at all on GHA).
+      - name: Provision native payload + ffmpeg
+        env:
+          CI_PREREQ_ARCHIVE_URL: ${{ secrets.CI_PREREQ_ARCHIVE_URL != '' && secrets.CI_PREREQ_ARCHIVE_URL || 'https://github.com/gnamse/OmtCaptureStudio/releases/download/v1.0.0.24/OmtCaptureStudio-v1.0.0.24-win-x64.zip' }}
+          CI_NATIVE_PAYLOAD_URL: ${{ secrets.CI_NATIVE_PAYLOAD_URL }}
+          CI_FFMPEG_URL: ${{ secrets.CI_FFMPEG_URL }}
+          CI_ARTIFACTS_BEARER_TOKEN: ${{ secrets.CI_ARTIFACTS_BEARER_TOKEN }}
+        run: ./scripts/ci-provision-artifacts.ps1
+
+      - name: Check native payload + ffmpeg
+        run: ./scripts/ci-prerequisites.ps1
+
+      - name: Build Release x64
+        run: dotnet build OmtCaptureStudio.sln -c Release -p:Platform=x64 --no-restore
+
+      - name: Stage ffmpeg beside test host
+        run: |
+          $out = "OmtCaptureStudio.Tests/bin/x64/Release/net8.0-windows"
+          if (-not (Test-Path -LiteralPath $out)) {
+            throw "Test output directory missing after Release|x64 build: $out"
+          }
+          Copy-Item -LiteralPath "tools/ffmpeg.exe" -Destination (Join-Path $out "ffmpeg.exe") -Force
+          Write-Host "Staged tools/ffmpeg.exe -> $out/ffmpeg.exe"
+
+      - name: Run default OmtCaptureStudio.Tests suite
+        run: dotnet run --project OmtCaptureStudio.Tests -c Release -p:Platform=x64 --no-build

@@ -34,3 +34,21 @@ shipping reflection-sensitive or generic-hot-loop changes.
 ## Commit style
 Conventional Commits, lowercase scope: `fix(recording):`, `fix(build):`,
 `fix(ui):`, `feat(core):`, `refactor(...):`, `docs:`, `chore:`, `test:`.
+
+## Known gaps
+Living improvement work lives in **`docs/IMPROVEMENT_PLAN.md`** (phases, acceptance
+criteria, open decisions). Navigable ADR index: **`docs/adr/README.md`**. Release
+operator sequence: **`docs/RELEASE_CHECKLIST.md`**. Do not invent missing ADRs —
+the numbered series has gaps by design for now:
+
+- Present: `docs/adr/0001`, `0002`, `0003`, `0005`, `0006`, `0010`, `0011`, **`0012`**
+  (recording engine stays FFmpeg; MF gated; PA16 refuse)
+- Missing / not authored yet: **0004**, **0007**, **0008**, **0009** (leave vacant
+  until a real decision needs that slot; do not stub speculative ADRs)
+- Recording: production remains `RecordingSinkSelector` → `FfmpegPipeSink`. The MF
+  spike (`spikes/mf-sinkwriter`) was **deleted** after ADR-0012; evidence lives in that
+  ADR — do **not** revive it into `Services/` until ADR-0012 gates flip. PA16 stays
+  refuse-by-name (`OmtAudioFrameGuard`) until a real sender requires decode.
+
+`CODE_REVIEW_REPORT.md` is a **historical** Oct 2026 audit — point new work at the
+plan + ADR index, not at extending that report.

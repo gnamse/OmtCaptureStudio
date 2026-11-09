@@ -83,15 +83,23 @@ The project is structured as a standard .NET Solution:
 
 ## Quick Start
 
+### 0. Clone prerequisites (required before build/run)
+
+A fresh clone does **not** include redistributable binaries. Populate both paths below **before** building, launching, running the test suite, or packaging a release — otherwise the app dies at startup / recording preflight fails / release scripts refuse.
+
+1. **Native payload** → `OmtCaptureStudio\NativePayload\win-x64\`  
+   Place all six libraries (gitignored; ~22 MB): `libvmx.dll`, `libomt.dll`, `libomtnet.dll`, `libHarfBuzzSharp.dll`, `libSkiaSharp.dll`, `av_libglesv2.dll`.  
+   They are embedded into the assembly and extracted on first run; without this folder the project can still compile, then fails at startup. `scripts/build-release.ps1` refuses to package without it.
+2. **FFmpeg** → `tools\ffmpeg.exe`  
+   Required for recording preflight, the default test suite, and installer/release bundling (`installer/OmtCaptureStudio.iss`). Missing → recording/release refuse. See also `scripts/README.md`.
+
+Hard gate: do not skip step 0 on a clean machine.
+
 ### 1. Building the Solution
 Open `OmtCaptureStudio.sln` in Visual Studio 2022, JetBrains Rider, or VS Code, or build via CLI:
 ```powershell
 dotnet build OmtCaptureStudio.sln -c Release
 ```
-
-> **A fresh clone needs the native payload first:** `OmtCaptureStudio\NativePayload\win-x64\` is gitignored (deliberately — ~22 MB of binaries), so a clean checkout contains none of the six native libraries (`libvmx.dll`, `libomt.dll`, `libomtnet.dll`, `libHarfBuzzSharp.dll`, `libSkiaSharp.dll`, `av_libglesv2.dll`). They are embedded into the assembly and extracted on first run, so populate that folder before building — otherwise the app compiles and then dies at startup, and `scripts/build-release.ps1` refuses to package a release without it.
-
-> **Installer builds need FFmpeg first:** `installer/OmtCaptureStudio.iss` bundles `tools\ffmpeg.exe`, which is gitignored and therefore absent from a fresh clone — place `ffmpeg.exe` in `tools\` before compiling, or a missing one fails the compile (and `scripts/build-release.ps1` throws before iscc is ever invoked).
 
 ### 2. Launching the App
 Double-click `Launch-OmtCaptureStudio.bat` or run:

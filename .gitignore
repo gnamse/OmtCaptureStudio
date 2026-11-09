@@ -38,9 +38,8 @@ Releases/
 NativePayload/
 *.zip
 *.sha256
-*.bat
-*.ps1
-CONTEXT.md
+
+# Local binaries (never commit) — see scripts/README.md
 tools/
 ffmpeg.exe
 *.mp4
