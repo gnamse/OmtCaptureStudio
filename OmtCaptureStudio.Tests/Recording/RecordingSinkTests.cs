@@ -159,6 +159,41 @@ partial class Program
         Expect(selector.HasSurvivingDestination == compositeChosen.HasSurvivingDestination,
             "The selector must forward the composite's answer for the take that is actually running.");
 
+        // NET-020 through the production seam: StreamRecorderService reads DetachedDestinationNames on
+        // the selector (not the inner composite). A shed must surface here or diagnostics stay empty.
+        {
+            var keepsWriting = new ScriptedRecordingSink("primary");
+            var goesAway = new ScriptedRecordingSink("backup")
+            {
+                ThrowOnVideo = new IOException("backup volume vanished")
+            };
+            var liveComposite = new CompositeRecordingSink(
+                new CompositeChild("primary", keepsWriting, "C:/t/a.mp4"),
+                new CompositeChild("backup", goesAway, "D:/t/a.mp4"));
+            using var detachSelector = new RecordingSinkSelector(
+                singleFactory: (_, _) => new ScriptedRecordingSink("unused"),
+                compositeFactory: (_, _) => liveComposite);
+
+            Expect(detachSelector.Initialize(withBackup, format, "C:/t/a.mp4"),
+                "Detach-forward fixture must initialize.");
+            IntPtr frame = Marshal.AllocHGlobal(64);
+            try
+            {
+                detachSelector.WriteVideo(frame, 64);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(frame);
+            }
+
+            Expect(liveComposite.DetachedDestinationNames.Count == 1
+                    && liveComposite.DetachedDestinationNames[0] == "backup",
+                $"Inner composite must detach the failing child; got [{string.Join(",", liveComposite.DetachedDestinationNames)}].");
+            Expect(detachSelector.DetachedDestinationNames.Count == 1
+                    && detachSelector.DetachedDestinationNames[0] == "backup",
+                $"RecordingSinkSelector must forward DetachedDestinationNames; got [{string.Join(",", detachSelector.DetachedDestinationNames)}].");
+        }
+
         // ---- 2. REAL DUAL-DESTINATION TAKE: both files land on disk ---------------------------------
         string sandbox = Path.Combine(Path.GetTempPath(), "omt_dual_" + Guid.NewGuid().ToString("N")[..8]);
         string primaryDir = Path.Combine(sandbox, "primary");

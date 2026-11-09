@@ -4,8 +4,9 @@ using Avalonia.Markup.Xaml;
 namespace OmtCaptureStudio.Views;
 
 /// <summary>
-/// ADR-0011: Capture mode — the record stack. The controls are the originals with their original
-/// bindings; only the container changed. No logic lives here.
+/// ADR-0011: Capture mode — the record stack. Binds the <c>MainWindowViewModel</c> facade
+/// (AppModeShell / CaptureWorkspace / RecordingChrome partials); do not invent a second Capture VM.
+/// No logic lives here.
 /// </summary>
 public partial class CaptureModeView : UserControl
 {
