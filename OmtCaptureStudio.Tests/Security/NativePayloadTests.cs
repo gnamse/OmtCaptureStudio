@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Reflection;
+using System.Security.AccessControl;
 using System.Xml.Linq;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
@@ -118,6 +119,42 @@ partial class Program
         Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(aclDir, product) == false,
             "R22: an ACL'd but empty directory still must not pass the payload check.");
         Directory.Delete(aclDir, recursive: true);
+
+        // ---- R22: explicit Everyone (CI TEMP shape) must not survive ApplyRestrictiveAcl ------------
+        // GitHub Actions often freezes TEMP inheritance so CreateDirectory leaves Everyone as an
+        // *explicit* ACE. The old GetAccessControl()+disable-inheritance path kept that ACE and
+        // DirectoryIsTrusted then refused ExtractVerified (step 0.704 on runners).
+        string explicitEveryoneDir = Path.Combine(Path.GetTempPath(), "omt-acl-explicit-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(explicitEveryoneDir);
+        {
+            var info = new DirectoryInfo(explicitEveryoneDir);
+            DirectorySecurity inherited = info.GetAccessControl();
+            inherited.SetAccessRuleProtection(isProtected: true, preserveInheritance: true);
+            info.SetAccessControl(inherited);
+        }
+        Expect(NativePayloadBootstrapper.ApplyRestrictiveAcl(explicitEveryoneDir),
+            "R22: ApplyRestrictiveAcl must succeed even when Everyone is already an explicit ACE.");
+        {
+            var info = new DirectoryInfo(explicitEveryoneDir);
+            DirectorySecurity after = info.GetAccessControl();
+            bool everyoneWrite = false;
+            foreach (FileSystemAccessRule rule in after.GetAccessRules(true, true, typeof(System.Security.Principal.SecurityIdentifier)))
+            {
+                if (rule.AccessControlType != AccessControlType.Allow) continue;
+                if (rule.IdentityReference.Value != "S-1-1-0") continue;
+                if ((rule.FileSystemRights & (FileSystemRights.Write | FileSystemRights.AppendData
+                                              | FileSystemRights.Delete | FileSystemRights.TakeOwnership)) != 0)
+                    everyoneWrite = true;
+            }
+            Expect(!everyoneWrite,
+                "R22: after ApplyRestrictiveAcl, Everyone must not retain write/delete (clean ACL descriptor).");
+        }
+        // And ExtractVerified on a fresh sibling under this parent must still arm (CI failure site).
+        string extractUnderExplicit = Path.Combine(explicitEveryoneDir, "extract-" + Guid.NewGuid().ToString("N"));
+        NativePayloadBootstrapper.ExtractVerified(extractUnderExplicit, product);
+        Expect(NativePayloadBootstrapper.AllLibrariesPresentAndValid(extractUnderExplicit, product),
+            "R22: ExtractVerified must protect+populate a new directory even when the parent once had explicit Everyone.");
+        Directory.Delete(explicitEveryoneDir, recursive: true);
 
         // ---- R19/R21: the LOAD path, driven through an injectable loader -----------------------------
         // (3) a content-mismatched file must be refused BEFORE the loader is ever called
