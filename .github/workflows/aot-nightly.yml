@@ -1,0 +1,59 @@
+# Phase 1.3 — optional Native AOT publish smoke (not a PR gate).
+# Slow by design; runs on a schedule + manual dispatch. Does not require shipping artifacts.
+# Native payload / ffmpeg secrets are NOT required here — publish compiles the app; runtime
+# payload preflight remains a local/release concern (see CI job for suite prereqs).
+name: AOT nightly
+
+on:
+  schedule:
+    # 06:15 UTC daily — off the peak PR CI window
+    - cron: "15 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: aot-nightly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish-aot:
+    name: PublishAot win-x64
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+          cache: true
+          cache-dependency-path: |
+            OmtCaptureStudio/OmtCaptureStudio.csproj
+            OmtCaptureStudio.Tests/OmtCaptureStudio.Tests.csproj
+
+      - name: Restore
+        run: dotnet restore OmtCaptureStudio/OmtCaptureStudio.csproj
+
+      - name: Publish Native AOT (win-x64)
+        run: >
+          dotnet publish OmtCaptureStudio/OmtCaptureStudio.csproj
+          -c Release
+          -r win-x64
+          /p:PublishAot=true
+          --no-restore
+
+      - name: Confirm publish output
+        run: |
+          $dir = "OmtCaptureStudio/bin/Release/net8.0-windows/win-x64/publish"
+          if (-not (Test-Path -LiteralPath $dir)) {
+            throw "AOT publish directory missing: $dir"
+          }
+          $exe = Get-ChildItem -LiteralPath $dir -Filter "OmtCaptureStudio.exe" -ErrorAction SilentlyContinue
+          if (-not $exe) {
+            throw "OmtCaptureStudio.exe not found under $dir"
+          }
+          Write-Host "AOT publish OK: $($exe.FullName) ($([math]::Round($exe.Length/1MB, 1)) MB)"
