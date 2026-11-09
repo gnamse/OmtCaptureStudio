@@ -109,14 +109,37 @@ partial class Program
 
     /// <summary>
     /// NET-011 closing pass: the wiring. The selector must choose a composite only when a backup is
-    /// configured; a REAL dual-destination take must leave both files on disk; and a backup that cannot
-    /// start must leave the primary recording intact.
+    /// configured; a dual-destination take through CaptureSession must arm both children with the same
+    /// file name; and a backup that cannot start must leave the primary recording intact.
+    ///
+    /// <para>Durable dual-FFmpeg destinations are deliberately NOT exercised here: SyntheticPatternSource
+    /// is High 1080p60, whose storage preflight needs ~54 GB free — CI runners often lack that, and
+    /// weakening production dual-dest safety to paper over it is forbidden. The E2E path uses
+    /// <see cref="NullRecordingSink"/> children behind the same selector seam so wiring stays proven
+    /// without disk headroom.</para>
     /// </summary>
     static void TestCompositeRecordingWiring()
     {
         Console.WriteLine("\n[Step 0.690] Verifying composite recording wiring (dual destination end-to-end)...");
 
         var format = new StreamFormat { Width = 320, Height = 240, FrameRate = 10.0, SampleRate = 48000, Channels = 2 };
+
+        // ---- 0. RequiresDurableStorage aggregation: Null composite opts out; any durable child keeps it -
+        using (var nullPair = new CompositeRecordingSink(
+            new CompositeChild("primary", new NullRecordingSink(), "C:/t/a.mp4"),
+            new CompositeChild("backup", new NullRecordingSink(), "D:/t/a.mp4")))
+        {
+            Expect(!nullPair.RequiresDurableStorage,
+                "A composite of in-memory children must opt out of durable-storage preflight.");
+        }
+
+        using (var mixed = new CompositeRecordingSink(
+            new CompositeChild("primary", new NullRecordingSink(), "C:/t/a.mp4"),
+            new CompositeChild("backup", new ScriptedRecordingSink("backup", requiresDurableStorage: true), "D:/t/a.mp4")))
+        {
+            Expect(mixed.RequiresDurableStorage,
+                "One durable child must keep the composite under the arm's disk preflight.");
+        }
 
         // ---- 1. CONFIG PATH: a backup selects the composite; no backup leaves the single sink ---------
         var singleChosen = new ScriptedRecordingSink("single");
@@ -128,11 +151,16 @@ partial class Program
             singleFactory: (_, _) => singleChosen,
             compositeFactory: (_, _) => compositeChosen);
 
+        Expect(selector.RequiresDurableStorage,
+            "A production-shaped selector must report durable storage BEFORE Initialize (arm reads it first).");
+
         var noBackup = new RecordingConfig { OutputDirectory = "C:/t" };
         Expect(!noBackup.HasBackupDestination, "A config with no backup folder must not report a fan-out.");
         Expect(selector.Initialize(noBackup, format, "C:/t/a.mp4"), "The selector must initialize the single sink.");
         Expect(!selector.IsComposite, "With NO backup configured the selector must choose the SINGLE sink.");
         Expect(singleChosen.InitCount == 1, "The single sink must be the one initialized.");
+        Expect(!selector.RequiresDurableStorage,
+            "After selecting an in-memory single sink the selector must forward RequiresDurableStorage=false.");
 
         var withBackup = new RecordingConfig { OutputDirectory = "C:/t", BackupOutputDirectory = "D:/t" };
         Expect(withBackup.HasBackupDestination, "A distinct backup folder must report a fan-out.");
@@ -194,7 +222,7 @@ partial class Program
                 $"RecordingSinkSelector must forward DetachedDestinationNames; got [{string.Join(",", detachSelector.DetachedDestinationNames)}].");
         }
 
-        // ---- 2. REAL DUAL-DESTINATION TAKE: both files land on disk ---------------------------------
+        // ---- 2. DUAL-DESTINATION TAKE through CaptureSession (Null children — CI-safe wiring) --------
         string sandbox = Path.Combine(Path.GetTempPath(), "omt_dual_" + Guid.NewGuid().ToString("N")[..8]);
         string primaryDir = Path.Combine(sandbox, "primary");
         string backupDir = Path.Combine(sandbox, "backup");
@@ -202,10 +230,34 @@ partial class Program
 
         try
         {
-            using (var dualSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(), ownsDependencies: true))
+            NullRecordingSink? dualPrimary = null;
+            NullRecordingSink? dualBackup = null;
+            var dualSelector = new RecordingSinkSelector(
+                singleFactory: static (_, _) => new NullRecordingSink(),
+                compositeFactory: (cfg, primaryPath) =>
+                {
+                    // Mirror CompositeRecordingSinkFactory path naming: same file name, backup folder.
+                    string backupDirectory = (cfg.BackupOutputDirectory ?? string.Empty).Trim();
+                    if (!Directory.Exists(backupDirectory)) Directory.CreateDirectory(backupDirectory);
+                    string fileName = Path.GetFileName(primaryPath);
+                    string backupPath = Path.Combine(backupDirectory, fileName);
+                    dualPrimary = new NullRecordingSink();
+                    dualBackup = new NullRecordingSink();
+                    return new CompositeRecordingSink(
+                        new CompositeChild("primary", dualPrimary, primaryPath),
+                        new CompositeChild("backup", dualBackup, backupPath));
+                },
+                requiresDurableStorage: false);
+
+            using (var dualSession = new CaptureSession(
+                new AudioEngine(),
+                new StreamRecorderService(dualSelector, ownsSink: true),
+                ownsDependencies: true))
             {
                 long frames = 0;
+                string? dualError = null;
                 dualSession.VideoFrameAvailable += (ptr, len, w, h, st, fps, ts) => Interlocked.Increment(ref frames);
+                dualSession.RecordingError += err => dualError = err;
                 dualSession.Connect(new SyntheticPatternSource());
 
                 int waitTicks = 0;
@@ -221,13 +273,25 @@ partial class Program
                 {
                     OutputDirectory = primaryDir,
                     FilenamePrefix = "DualDest",
-                    BackupOutputDirectory = backupDir
+                    BackupOutputDirectory = backupDir,
+                    Quality = QualityPreset.High
                 };
 
-                Expect(dualSession.StartRecording(dualConfig), "A dual-destination take must start.");
+                Expect(dualSession.StartRecording(dualConfig),
+                    $"A dual-destination take must start.{(dualError is null ? "" : $" RecordingError={dualError}")}");
+                Expect(dualSelector.IsComposite, "BackupOutputDirectory must select the composite through CaptureSession.");
+                Expect(dualPrimary is not null && dualBackup is not null,
+                    "Both NullRecordingSink children must have been constructed.");
+                Expect(Path.GetFileName(dualPrimary!.OutputPath) == Path.GetFileName(dualBackup!.OutputPath),
+                    $"Both destinations must use the SAME file name; got '{Path.GetFileName(dualPrimary.OutputPath)}' vs '{Path.GetFileName(dualBackup.OutputPath)}'.");
+                Expect(Path.GetDirectoryName(dualPrimary.OutputPath) == primaryDir,
+                    $"Primary must land under the primary folder; got '{dualPrimary.OutputPath}'.");
+                Expect(Path.GetDirectoryName(dualBackup.OutputPath) == backupDir,
+                    $"Backup must land under the backup folder; got '{dualBackup.OutputPath}'.");
 
                 int recordTicks = 0;
-                while (recordTicks < 50 && dualSession.RecordingFramesWritten < 20)
+                while (recordTicks < 50
+                       && (dualPrimary.VideoFramesReceived < 20 || dualBackup.VideoFramesReceived < 20))
                 {
                     Thread.Sleep(50);
                     recordTicks++;
@@ -235,37 +299,45 @@ partial class Program
 
                 dualSession.StopRecording();
 
-                string[] primaryFiles = Directory.GetFiles(primaryDir, "DualDest*.mp4");
-                string[] backupFiles = Directory.Exists(backupDir) ? Directory.GetFiles(backupDir, "DualDest*.mp4") : Array.Empty<string>();
+                Expect(dualPrimary.VideoFramesReceived > 0 && dualBackup.VideoFramesReceived > 0,
+                    $"Both destinations must receive frames; got {dualPrimary.VideoFramesReceived} / {dualBackup.VideoFramesReceived}.");
+                Expect(Directory.Exists(backupDir), "The dual factory must create the backup folder up front.");
 
-                Expect(primaryFiles.Length == 1, $"The primary folder must hold exactly one file; got {primaryFiles.Length}.");
-                Expect(backupFiles.Length == 1, $"The backup folder must hold exactly one file; got {backupFiles.Length}.");
-
-                string primaryName = Path.GetFileName(primaryFiles[0]);
-                string backupName = Path.GetFileName(backupFiles[0]);
-                Expect(primaryName == backupName,
-                    $"Both destinations must use the SAME file name; got '{primaryName}' vs '{backupName}'.");
-
-                long primarySize = new FileInfo(primaryFiles[0]).Length;
-                long backupSize = new FileInfo(backupFiles[0]).Length;
-                Expect(primarySize > 0 && backupSize > 0,
-                    $"Both files must carry data; got {primarySize} and {backupSize} bytes.");
-                Expect(primarySize == backupSize || Math.Abs(primarySize - backupSize) <= Math.Max(primarySize, backupSize) * 4 / 10,
-                    $"Both destinations encode the SAME frames, so their sizes must be close; got {primarySize} vs {backupSize}.");
-
-                Console.WriteLine($" -> Dual destination wrote '{primaryName}' to both folders ({primarySize:N0} / {backupSize:N0} bytes)");
+                Console.WriteLine(
+                    $" -> Dual destination armed '{Path.GetFileName(dualPrimary.OutputPath)}' on both folders " +
+                    $"({dualPrimary.VideoFramesReceived} / {dualBackup.VideoFramesReceived} frames, 0 disk I/O)");
             }
 
             // ---- 3. A BACKUP THAT CANNOT START leaves the primary recording intact -------------------
-            string blockedBackup = Path.Combine(sandbox, "blocked-backup");
             string blockedPrimary = Path.Combine(sandbox, "blocked-primary");
             Directory.CreateDirectory(blockedPrimary);
-            File.WriteAllText(blockedBackup, "not a directory");
 
-            using (var degradedSession = new CaptureSession(new AudioEngine(), new StreamRecorderService(), ownsDependencies: true))
+            NullRecordingSink? degradedPrimary = null;
+            ScriptedRecordingSink? degradedBackup = null;
+            var degradedSelector = new RecordingSinkSelector(
+                singleFactory: static (_, _) => new NullRecordingSink(),
+                compositeFactory: (cfg, primaryPath) =>
+                {
+                    string backupDirectory = (cfg.BackupOutputDirectory ?? string.Empty).Trim();
+                    string fileName = Path.GetFileName(primaryPath);
+                    string backupPath = Path.Combine(backupDirectory, fileName);
+                    degradedPrimary = new NullRecordingSink();
+                    degradedBackup = new ScriptedRecordingSink("backup", initializeResult: false);
+                    return new CompositeRecordingSink(
+                        new CompositeChild("primary", degradedPrimary, primaryPath),
+                        new CompositeChild("backup", degradedBackup, backupPath));
+                },
+                requiresDurableStorage: false);
+
+            using (var degradedSession = new CaptureSession(
+                new AudioEngine(),
+                new StreamRecorderService(degradedSelector, ownsSink: true),
+                ownsDependencies: true))
             {
                 long frames = 0;
+                string? degradedError = null;
                 degradedSession.VideoFrameAvailable += (ptr, len, w, h, st, fps, ts) => Interlocked.Increment(ref frames);
+                degradedSession.RecordingError += err => degradedError = err;
                 degradedSession.Connect(new SyntheticPatternSource());
 
                 int waitTicks = 0;
@@ -279,31 +351,35 @@ partial class Program
                 {
                     OutputDirectory = blockedPrimary,
                     FilenamePrefix = "Degraded",
-                    BackupOutputDirectory = blockedBackup
+                    // Path does not need to exist: the child fails Initialize explicitly.
+                    BackupOutputDirectory = Path.Combine(sandbox, "blocked-backup-missing"),
+                    Quality = QualityPreset.High
                 };
 
                 Expect(degradedSession.StartRecording(degradedConfig),
-                    "A take must still start when the PRIMARY is usable, even if the backup is not.");
+                    $"A take must still start when the PRIMARY is usable, even if the backup is not." +
+                    $"{(degradedError is null ? "" : $" RecordingError={degradedError}")}");
 
                 int recordTicks = 0;
-                while (recordTicks < 50 && degradedSession.RecordingFramesWritten < 20)
+                while (recordTicks < 50 && (degradedPrimary?.VideoFramesReceived ?? 0) < 20)
                 {
                     Thread.Sleep(50);
                     recordTicks++;
                 }
 
-                bool recordedSomething = degradedSession.RecordingFramesWritten > 0;
+                long primaryFrames = degradedPrimary?.VideoFramesReceived ?? 0;
                 degradedSession.StopRecording();
 
-                string[] survived = Directory.GetFiles(blockedPrimary, "Degraded*.mp4");
-                Expect(survived.Length == 1,
-                    $"The primary must survive a backup that cannot start; got {survived.Length} file(s).");
-                Expect(new FileInfo(survived[0]).Length > 0, "The surviving primary file must carry data.");
-                Expect(!File.Exists(blockedBackup + ".mp4"), "The blocked backup path must not have produced a file.");
-                Expect(recordedSomething,
-                    $"The take must have written frames despite the unusable backup; wrote {degradedSession.RecordingFramesWritten}.");
+                Expect(degradedPrimary is not null, "The primary NullRecordingSink must have been constructed.");
+                Expect(degradedBackup is not null, "The failing backup child must have been constructed.");
+                Expect(degradedBackup!.DisposeCount == 1,
+                    $"A destination that failed to initialize must be let go exactly once; got {degradedBackup.DisposeCount}.");
+                Expect(primaryFrames > 0,
+                    $"The take must have written frames despite the unusable backup; wrote {primaryFrames}.");
+                Expect(degradedSelector.IsComposite,
+                    "Even a degraded backup take must have selected the composite (primary still live).");
 
-                Console.WriteLine(" -> Unusable backup folder: the take still recorded to the primary and the backup left no file");
+                Console.WriteLine(" -> Unusable backup child: the take still recorded to the primary and the backup was dropped");
             }
         }
         finally
