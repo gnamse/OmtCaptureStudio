@@ -187,6 +187,12 @@ public sealed class SettingsStore
             config.EncoderChoice = encoder;
         }
 
+        // NET-025: absent or unparseable means FFmpeg - the default must survive a missing value.
+        if (Enum.TryParse<SinkEngine>(settings.SinkEngine, ignoreCase: true, out var sinkEngine))
+        {
+            config.SinkEngine = sinkEngine;
+        }
+
         if (Enum.TryParse<QualityPreset>(settings.Quality, ignoreCase: true, out var quality))
         {
             config.Quality = quality;
@@ -274,6 +280,7 @@ public sealed class SettingsStore
             SelectedPreset = presetName,
             ContainerFormat = config.ContainerFormat.ToString(),
             EncoderChoice = config.EncoderChoice.ToString(),
+            SinkEngine = config.SinkEngine.ToString(),
             Quality = config.Quality.ToString(),
             OutputDirectory = config.OutputDirectory,
             BackupOutputDirectory = config.BackupOutputDirectory,
