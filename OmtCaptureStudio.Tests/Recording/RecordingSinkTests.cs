@@ -118,6 +118,21 @@ partial class Program
     /// <see cref="NullRecordingSink"/> children behind the same selector seam so wiring stays proven
     /// without disk headroom.</para>
     /// </summary>
+    /// <summary>True when an MP4 byte image contains the named 4CC atom (a structural, cheap check).</summary>
+    static bool ContainsAtom(byte[] mp4, string fourCc)
+    {
+        if (mp4 == null || mp4.Length < 4) return false;
+        for (int i = 0; i + 4 <= mp4.Length - 4; i++)
+        {
+            if (mp4[i] == (byte)fourCc[0] && mp4[i + 1] == (byte)fourCc[1] &&
+                mp4[i + 2] == (byte)fourCc[2] && mp4[i + 3] == (byte)fourCc[3])
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     static void TestCompositeRecordingWiring()
     {
         Console.WriteLine("\n[Step 0.690] Verifying composite recording wiring (dual destination end-to-end)...");
@@ -385,6 +400,144 @@ partial class Program
         finally
         {
             try { Directory.Delete(sandbox, recursive: true); } catch { }
+        }
+
+        // ========================================================================================
+        // NET-025: Media Foundation is a SELECTABLE sink; FFmpeg remains the shipping default.
+        // These assertions live inside this existing step on purpose - the step count and order are
+        // a fixed contract, so new coverage goes here rather than as a new step.
+        // ========================================================================================
+        {
+            using (var defaultChoice = RecordingSinkSelector.CreateSingleSink(new RecordingConfig()))
+            {
+                Expect(defaultChoice is FfmpegPipeSink,
+                    $"NET-025: the default engine must stay FFmpeg; got {defaultChoice.GetType().Name}.");
+            }
+
+            var mfChoice = RecordingSinkSelector.CreateSingleSink(
+                new RecordingConfig { SinkEngine = SinkEngine.MediaFoundation });
+            Expect(mfChoice is MediaFoundationRecordingSink,
+                $"NET-025: SinkEngine.MediaFoundation must select the MF sink; got {mfChoice.GetType().Name}.");
+
+            var mfSink = (MediaFoundationRecordingSink)mfChoice;
+            string mfDir = Path.Combine(Path.GetTempPath(), "omt-mf-sink-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(mfDir);
+            try
+            {
+                const int MW = 640, MH = 360, MFPS = 30;
+                var mfFormat = new StreamFormat
+                {
+                    Width = MW, Height = MH, FrameRate = MFPS, SampleRate = 48000, Channels = 2
+                };
+                var mfConfig = new RecordingConfig { SinkEngine = SinkEngine.MediaFoundation };
+                string mfPath = Path.Combine(mfDir, "mf-sink.mp4");
+
+                Expect(mfSink.Initialize(mfConfig, mfFormat, mfPath),
+                    "NET-025: the Media Foundation sink must initialize for a 640x360 30fps stream.");
+
+                byte[] bgra = new byte[MW * MH * 4];
+                for (int i = 0; i < bgra.Length; i += 4)
+                {
+                    bgra[i] = (byte)(i & 0xFF); bgra[i + 1] = 90; bgra[i + 2] = 200; bgra[i + 3] = 255;
+                }
+
+                var handle = GCHandle.Alloc(bgra, GCHandleType.Pinned);
+                try
+                {
+                    IntPtr pData = handle.AddrOfPinnedObject();
+                    var audioChunk = new byte[480 * 2 * 4];   // 10 ms of interleaved float32 stereo
+                    for (int f = 0; f < 90; f++)
+                    {
+                        mfSink.WriteVideo(pData, bgra.Length);
+                        mfSink.WriteAudio(audioChunk, 0, audioChunk.Length);
+                        Thread.Sleep(3);
+                    }
+                }
+                finally { handle.Free(); }
+
+                // Captured BEFORE finalize: FinalizeSink tears the host down.
+                double convertMs = mfSink.AudioConversionMillisecondsPerChunk;
+                Expect(convertMs > 0.0,
+                    $"NET-025: the float32->PCM16 conversion cost must be measured; got {convertMs} ms/chunk.");
+
+                mfSink.FinalizeSink(out long mfBytes);
+                Expect(mfBytes > 0 && File.Exists(mfPath),
+                    $"NET-025: a finalized MF take must leave bytes on disk; got {mfBytes}.");
+
+                // FRAGMENTATION IS MANDATORY: with the default MPEG-4 container a hard kill loses the
+                // whole take (no moov, and no re-mux). A fragmented MP4 carries moof/mvex, which is what
+                // makes a killed take salvageable. Dropping TranscodeContainertype=Fmpeg4 removes these
+                // atoms and fails this assertion.
+                byte[] produced = File.ReadAllBytes(mfPath);
+                Expect(ContainsAtom(produced, "moof"),
+                    "NET-025: the MF sink must write a FRAGMENTED MP4 (moof). An unfragmented file loses the entire take on a crash.");
+                Expect(ContainsAtom(produced, "mvex"),
+                    "NET-025: a fragmented MF output must carry mvex.");
+
+                Console.WriteLine($"   [mf] finalized take: {mfBytes:n0} B, fragmented (moof/mvex present), " +
+                                  $"float32->PCM16 {convertMs:F4} ms/chunk");
+            }
+            finally
+            {
+                mfSink.Dispose();
+                try { Directory.Delete(mfDir, recursive: true); } catch { }
+            }
+
+            // ---- kill-the-take: dispose WITHOUT FinalizeSink, so the container is never finalized ----
+            string killedDir = Path.Combine(Path.GetTempPath(), "omt-mf-kill-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(killedDir);
+            try
+            {
+                string killedPath = Path.Combine(killedDir, "killed.mp4");
+
+                // NOTE: the parent deliberately does not open this path. The CHILD owns the file - if
+                // the parent initialized its own sink here, the child would die on a sharing violation
+                // (0x80070020, measured).
+
+                                // Spawn a CHILD process that records through the real MF sink, then hard-kill it.
+                // This is the only faithful crash: the child never finalizes and never releases its
+                // COM objects, exactly like the killed encoder in the field.
+                string self = Environment.ProcessPath ?? string.Empty;
+                Expect(self.Length > 0, "NET-025: could not locate the test executable to spawn the crash harness.");
+
+                var psi = new ProcessStartInfo(self)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+                psi.ArgumentList.Add("--mf-record");
+                psi.ArgumentList.Add(killedPath);
+
+                using (var child = Process.Start(psi))
+                {
+                    Expect(child is not null, "NET-025: the MF crash harness process did not start.");
+                    // Wait for the harness to report frames flowing, then let a real take accumulate.
+                    string? ready = child!.StandardOutput.ReadLine();
+                    Expect(ready is not null && ready.Contains("flowing"),
+                        $"NET-025: the MF crash harness never reported frames flowing (got '{ready}').");
+
+                    Thread.Sleep(5000);
+                    child.Kill(entireProcessTree: true);
+                    child.WaitForExit(15000);
+                }
+
+                Expect(File.Exists(killedPath) && new FileInfo(killedPath).Length > 0,
+                    "NET-025: a hard-killed MF take must still leave a non-empty file on disk.");
+                byte[] salvaged = File.ReadAllBytes(killedPath);
+                Expect(ContainsAtom(salvaged, "moof"),
+                    "NET-025: a HARD-KILLED take must still carry fragments (moof) - this is why Fmpeg4 is mandatory, " +
+                    "and why a COM Dispose is not a valid substitute for a crash.");
+                Console.WriteLine($"   [mf] kill-the-take: {salvaged.Length:n0} B left, fragments (moof) survived without Finalize");
+            }
+            finally
+            {
+
+                try { Directory.Delete(killedDir, recursive: true); } catch { }
+            }
+
+            Console.WriteLine(" -> NET-025: FFmpeg stays the default engine, Media Foundation is selectable, " +
+                              "and the MF take writes a fragmented (salvageable) MP4!");
         }
 
         Console.WriteLine(" -> A backup selects the composite, no backup keeps the single sink, both folders receive the same " +

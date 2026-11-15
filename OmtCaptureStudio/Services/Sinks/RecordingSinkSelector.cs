@@ -55,8 +55,18 @@ public sealed class RecordingSinkSelector : IRecordingSink
     /// shipping place that constructs <see cref="FfmpegPipeSink"/>.
     /// </summary>
     public static RecordingSinkSelector ForProduction() => new(
-        singleFactory: static (_, _) => new FfmpegPipeSink(),
+        singleFactory: static (config, _) => CreateSingleSink(config),
         compositeFactory: static (config, outputPath) => CompositeRecordingSinkFactory.CreateDualDestinationFfmpegSink(config, outputPath));
+
+    /// <summary>
+    /// The single-destination choice, resolved from the operator's transport preference (NET-025).
+    /// FFmpeg is the DEFAULT and the fallback for every existing configuration; Media Foundation is
+    /// selected only when <see cref="RecordingConfig.SinkEngine"/> explicitly asks for it.
+    /// </summary>
+    public static IRecordingSink CreateSingleSink(RecordingConfig config) =>
+        config.SinkEngine == SinkEngine.MediaFoundation
+            ? new MediaFoundationRecordingSink()
+            : new FfmpegPipeSink();
 
     /// <summary>The sink currently selected, for diagnostics. Null before the first Initialize.</summary>
     public IRecordingSink? Current => _inner;

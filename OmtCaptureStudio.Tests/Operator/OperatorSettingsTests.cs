@@ -303,18 +303,28 @@ partial class Program
                 ScheduledStopUtc = new DateTime(2026, 10, 17, 3, 30, 0, DateTimeKind.Utc)
             };
 
+            // NET-026: persist a NON-DEFAULT engine, so a silent revert to the default cannot pass.
+            original.SinkEngine = SinkEngine.MediaFoundation;
+
             Expect(store.Save(SettingsStore.FromConfig(original, "Long event - MKV")),
                 "Saving settings to a writable directory must succeed.");
             Expect(File.Exists(settingsPath), "Save must create the settings file.");
 
             var reloadStore = new SettingsStore(settingsPath);
             OperatorSettings reloaded = reloadStore.Load();
+            Expect(SettingsStore.ToConfig(new OperatorSettings()).SinkEngine == SinkEngine.Ffmpeg,
+                "NET-026: an absent SinkEngine must fail safe to the FFmpeg default.");
+            Expect(SettingsStore.ToConfig(new OperatorSettings { SinkEngine = "not-an-engine" }).SinkEngine == SinkEngine.Ffmpeg,
+                "NET-026: an unparseable SinkEngine must fail safe to the FFmpeg default.");
+
             Expect(reloadStore.LastOutcome == SettingsLoadOutcome.Loaded,
                 "A well-formed file must load as Loaded.");
 
             RecordingConfig rt = SettingsStore.ToConfig(reloaded);
             Expect(rt.ContainerFormat == original.ContainerFormat, "Round trip: container format.");
             Expect(rt.EncoderChoice == original.EncoderChoice, "Round trip: encoder choice.");
+            Expect(rt.SinkEngine == SinkEngine.MediaFoundation,
+                $"NET-026: the recording engine must survive a save/load round trip; got {rt.SinkEngine}.");
             Expect(rt.Quality == original.Quality, "Round trip: quality.");
             Expect(rt.OutputDirectory == original.OutputDirectory, "Round trip: destination.");
             Expect(rt.BackupOutputDirectory == original.BackupOutputDirectory, "Round trip: backup destination.");

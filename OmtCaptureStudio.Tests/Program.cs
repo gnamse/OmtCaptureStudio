@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using OmtCaptureStudio.Services.Sinks;
 using System.Runtime.InteropServices;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
@@ -33,6 +34,15 @@ partial class Program
         if (args.Length >= 1 && args[0] == "--real-sender-soak")
         {
             return RunRealSenderSoak();
+        }
+
+        // NET-025 crash harness: records through the REAL Media Foundation sink until the parent
+        // hard-kills this process. Driven by step 0.690. It must be a separate process: disposing the
+        // sink in-process is NOT equivalent to a crash (measured - a COM release left no moof, while a
+        // killed process left 268 fragments), so the only faithful kill is a real dead process.
+        if (args.Length >= 2 && args[0] == "--mf-record")
+        {
+            return RunMediaFoundationCrashHarness(args[1]);
         }
 
         // NET-005: run a single step by id, e.g. `--step 0.682`, for CI loops. The default suite
@@ -75,6 +85,57 @@ partial class Program
         }
 
         RunDefaultSuite();
+        return 0;
+    }
+
+    /// <summary>
+    /// NET-025 crash harness. Records video+audio through the real MF sink until killed. Writes a
+    /// line to stdout as soon as frames are flowing so the parent knows the writer is live before it
+    /// pulls the plug.
+    /// </summary>
+    static int RunMediaFoundationCrashHarness(string outputPath)
+    {
+        const int W = 640, H = 360;
+        var sink = new MediaFoundationRecordingSink();
+        string why = "(no reason reported)";
+        sink.SinkError += m => why = m;
+        var format = new StreamFormat { Width = W, Height = H, FrameRate = 30, SampleRate = 48000, Channels = 2 };
+        bool started;
+        try
+        {
+            started = sink.Initialize(new RecordingConfig { SinkEngine = SinkEngine.MediaFoundation }, format, outputPath);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("mf-record: Initialize THREW: " + ex);
+            return 3;
+        }
+        if (!started)
+        {
+            Console.Error.WriteLine($"mf-record: the sink did not initialize :: {why} :: cwd={Environment.CurrentDirectory} :: path={outputPath}");
+            return 2;
+        }
+
+        byte[] frame = new byte[W * H * 4];
+        for (int i = 0; i < frame.Length; i += 4) { frame[i] = 120; frame[i + 3] = 255; }
+        var audio = new byte[480 * 2 * 4];
+
+        var handle = System.Runtime.InteropServices.GCHandle.Alloc(
+            frame, System.Runtime.InteropServices.GCHandleType.Pinned);
+        try
+        {
+            IntPtr p = handle.AddrOfPinnedObject();
+            Console.WriteLine("mf-record: flowing");
+            Console.Out.Flush();
+            for (int f = 0; f < 1_000_000; f++)
+            {
+                sink.WriteVideo(p, frame.Length);
+                sink.WriteAudio(audio, 0, audio.Length);
+                Thread.Sleep(2);
+            }
+        }
+        finally { handle.Free(); }
+
         return 0;
     }
 
