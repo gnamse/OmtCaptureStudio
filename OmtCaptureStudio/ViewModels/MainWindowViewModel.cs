@@ -540,6 +540,15 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private VideoEncoderChoice _selectedEncoderChoice = VideoEncoderChoice.AutoHardware;
 
+    /// <summary>
+    /// NET-026: the recording transport. FFmpeg is the default; Media Foundation is an opt-in that is
+    /// not yet soak-proven, so it is surfaced only in the ADVANCED tier rather than in the shell.
+    /// </summary>
+    public IReadOnlyList<SinkEngine> SinkEngines { get; } = Enum.GetValues<SinkEngine>();
+
+    [ObservableProperty]
+    private SinkEngine _selectedSinkEngine = SinkEngine.Ffmpeg;
+
     public IReadOnlyList<QualityPreset> QualityPresets { get; } = Enum.GetValues<QualityPreset>();
 
     [ObservableProperty]
@@ -699,6 +708,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             SelectedContainerFormat = _operatorDefaults.ContainerFormat;
             SelectedEncoderChoice = _operatorDefaults.EncoderChoice;
             SelectedQualityPreset = _operatorDefaults.Quality;
+            SelectedSinkEngine = _operatorDefaults.SinkEngine;
             OutputDirectory = _operatorDefaults.OutputDirectory;
             BackupOutputDirectory = _operatorDefaults.BackupOutputDirectory ?? string.Empty;
 
@@ -737,6 +747,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         config.ContainerFormat = SelectedContainerFormat;
         config.EncoderChoice = SelectedEncoderChoice;
         config.Quality = SelectedQualityPreset;
+        config.SinkEngine = SelectedSinkEngine;
         config.OutputDirectory = OutputDirectory?.Trim() ?? string.Empty;
         config.BackupOutputDirectory = string.IsNullOrWhiteSpace(BackupOutputDirectory)
             ? null
@@ -1430,6 +1441,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         {
             _applyingRecordingPreset = false;
         }
+    }
+
+    partial void OnSelectedSinkEngineChanged(SinkEngine value)
+    {
+        PersistSettings();   // NET-026: the switch must survive a restart, so it persists immediately.
     }
 
     partial void OnSelectedEncoderChoiceChanged(VideoEncoderChoice value)
