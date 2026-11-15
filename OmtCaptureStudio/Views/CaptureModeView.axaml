@@ -166,6 +166,19 @@
                                   ToolTip.Tip="Select video encoding acceleration (Auto Hardware, NVENC, QSV, AMF, CPU x264, ProRes)"/>
                     </StackPanel>
 
+                    <!-- NET-026: the recording transport. ADVANCED tier only - progressive disclosure keeps
+                         the engine choice out of the shell; FFmpeg is the default and MF is a labelled
+                         opt-in. Collapsing is visibility only, exactly like the other advanced pickers. -->
+                    <StackPanel Margin="0,0,16,0">
+                        <TextBlock Text="ENGINE" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbSinkEngine" Width="150"
+                                  ItemsSource="{CompiledBinding SinkEngines}"
+                                  SelectedItem="{CompiledBinding SelectedSinkEngine, Mode=TwoWay}"
+                                  AutomationProperties.Name="Recording Engine"
+                                  ToolTip.Tip="Recording engine. FFmpeg is the default. Media Foundation is an opt-in and is NOT soak-proven: MKV and the ProRes preset remain FFmpeg-only, and the hardware encoder it selects is unverified."/>
+                        <TextBlock Text="MF is opt-in: not soak-proven" Foreground="{DynamicResource StudioTextSecondary}" FontSize="9" Margin="0,3,0,0"/>
+                    </StackPanel>
+
                     <!-- Quality -->
                     <StackPanel>
                         <TextBlock Text="QUALITY" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>

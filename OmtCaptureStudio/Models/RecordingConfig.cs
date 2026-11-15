@@ -17,6 +17,19 @@ public enum VideoEncoderChoice
     ProRes
 }
 
+/// <summary>
+/// Which recording transport a take uses (NET-025). Mirrors how <see cref="VideoEncoderChoice"/> is
+/// chosen and persisted; the selector resolves it at Initialize.
+/// </summary>
+public enum SinkEngine
+{
+    /// <summary>The FFmpeg child process. This is the shipping DEFAULT - unchanged by NET-025.</summary>
+    Ffmpeg,
+
+    /// <summary>The in-process Media Foundation SinkWriter (fragmented MP4). Selectable, not default.</summary>
+    MediaFoundation
+}
+
 public enum QualityPreset
 {
     Ultra,
@@ -29,6 +42,13 @@ public class RecordingConfig
 {
     public OutputContainerFormat ContainerFormat { get; set; } = OutputContainerFormat.MP4;
     public VideoEncoderChoice EncoderChoice { get; set; } = VideoEncoderChoice.AutoHardware;
+
+    /// <summary>
+    /// Recording transport (NET-025). Defaults to <see cref="SinkEngine.Ffmpeg"/>: the hybrid ruling
+    /// makes Media Foundation selectable, never the default. Chosen at Initialize by
+    /// <c>RecordingSinkSelector</c>.
+    /// </summary>
+    public SinkEngine SinkEngine { get; set; } = SinkEngine.Ffmpeg;
     public QualityPreset Quality { get; set; } = QualityPreset.High;
     public string OutputDirectory { get; set; } = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
     public string FilenamePrefix { get; set; } = "OMT_Capture";

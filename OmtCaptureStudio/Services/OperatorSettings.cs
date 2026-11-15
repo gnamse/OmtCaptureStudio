@@ -39,6 +39,9 @@ public sealed class OperatorSettings
 
     public string? ContainerFormat { get; set; }
     public string? EncoderChoice { get; set; }
+
+    /// <summary>Recording transport name (NET-025). Restored by name; absent = FFmpeg default.</summary>
+    public string? SinkEngine { get; set; }
     public string? Quality { get; set; }
 
     public string? OutputDirectory { get; set; }

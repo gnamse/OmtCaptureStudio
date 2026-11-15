@@ -1,6 +1,6 @@
 # ADR-0012: Recording engine stays FFmpeg; Media Foundation gated; PA16 refuse
 
-- **Status:** Accepted (2026-11-09)
+- **Status:** Accepted (2026-11-09); **amended 2026-11-13 by owner ruling** — option **(B) is GO and implemented as a SELECTABLE engine with FFmpeg remaining the default.** See *Amendment* below.
 - **Deciders:** Agent (Phase 3 of `docs/IMPROVEMENT_PLAN.md`) on behalf of the project owner,
   consuming former `spikes/mf-sinkwriter` measurements and plan open-decision defaults
 - **Scope:** Product strategy for the shipping recording engine; PA16 / hostile-peer audio codec
@@ -110,6 +110,52 @@ explicit matrix plan (which presets stay FFmpeg-fallback forever).
 - **Tests / AOT / CI:** no `spikes/` tree in the repo; no production dependency on MF
   spike code. AOT and the headless suite are unaffected by the delete.
 - **PA16:** security posture unchanged; product question closed as refuse-by-default.
+
+## Amendment (2026-11-13) — option (B) implemented as a selectable engine
+
+**Owner ruling:** hybrid. FFmpeg stays the **shipping default**; Media Foundation joins as a
+**selectable** engine. This supersedes the "(A) Stay FFmpeg / do not start Phase 3.2" text above.
+
+**What shipped:** `Services/Sinks/MediaFoundationRecordingSink.cs` implements the existing
+`IRecordingSink` seam (no new interface). `RecordingSinkSelector.ForProduction()` now resolves the
+engine at Initialize from `RecordingConfig.SinkEngine` (new enum, default `Ffmpeg`, persisted through
+`OperatorSettings`/`SettingsStore`). **FFmpeg is the default and the fallback**; MF is chosen only when
+asked for. The "sole `new FfmpegPipeSink()` site" invariant in the selector is preserved.
+
+**Hard gates carried into the implementation:**
+
+1. **Fragmented container is MANDATORY.** `TranscodeContainertype = Fmpeg4`. Measured, hard-killed
+   three ways: plain MPEG-4 leaves **no `moov`**, `ffprobe` reports *Invalid data*, and a re-mux fails
+   — **100% of the take lost** (104,610,526 B unrecoverable). `Fmpeg4` leaves a genuinely fragmented
+   file (`moof` x268, `mvex`), and a hard-killed take **decodes clean**, matching FFmpeg's
+   `+frag_keyframe+empty_moov` behaviour. A suite step now hard-kills a child process and asserts the
+   fragments survive; dropping the attribute removes the atoms and fails it.
+2. **Audio stream is added BEFORE video.** With the video stream first, *every* audio input type is
+   refused with `MF_E_INVALIDMEDIATYPE` — an HRESULT that blames the media type, so it reads as a
+   format problem when it is an ordering problem.
+3. **float32 → PCM16 is required.** The AAC encoder refuses 32-bit float input. Measured conversion
+   cost: **~0.015 ms per 10 ms audio chunk** (~0.15% of the chunk's own duration).
+4. **Fail closed.** A swallowed `SetInputMediaType` failure still lets `WriteSample` run, producing a
+   file whose `aac` stream `ffprobe` reports happily while the decoder emits `Reserved bit set` /
+   `Prediction is not allowed in AAC-LC` on every frame. Setup failure now refuses the take.
+
+**Input format: ARGB32 (BGRA) straight in — no colour conversion.** The sink accepts BGRA natively at
+**1.52 ms/frame**, versus **5.24 ms/frame** when we convert BGRA→NV12 ourselves. The GPU conversion
+slice was therefore re-scoped OUT; the remaining capture-side win (eliminating the
+DXGI→staging→CPU copy in `DesktopFrameCapturer`) is a separate, later change that benefits FFmpeg too.
+
+**Measured in-process take:** 640x360@30, video+audio → **63,580 B finalized, `moof`+`mvex` present**;
+hard-killed child left **10,983 B with `moof` fragments intact**.
+
+**AOT:** `Vortice.MediaFoundation` 3.6.2 is AOT-clean in the product (**0 IL/SYSLIB warnings
+attributable to it**); `PublishAot` publishes green (54,999,552 B exe). No reflection, no dynamic IL.
+
+**Still open (unchanged by this amendment):** HW encoder identity remains unproven
+(`IMFSinkWriter.GetStatistics` → `E_INVALIDARG` even after finalize; the MFT is not enumerated).
+No multi-hour soak exists. MKV and the ProRes preset remain FFmpeg-only. MF is therefore
+**selectable, not default** — the (C) MF-only NO-GO stands.
+
+---
 
 ## Evidence table (load-bearing spike numbers)
 
