@@ -401,6 +401,12 @@ partial class Program
     /// </summary>
     static int RunSingleStep(string id)
     {
+        // SEC-04 (R25/R26), BUG-SOAK-R25: the execution sink consumes ONLY a proven
+        // FfmpegPreflight.ResolvedPath - the bare-name "ffmpeg" PATH fallback was removed by SEC-04b.
+        // RunDefaultSuite establishes that path at its head; a standalone step must do the same or any
+        // take it starts refuses BY DESIGN rather than by accident. Mirrors RunDefaultSuite exactly.
+        FfmpegPreflight.Run(AppContext.BaseDirectory);
+
         switch (id)
         {
             case "0":     TestSourceInfoParsing(); break;

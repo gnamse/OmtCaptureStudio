@@ -98,6 +98,11 @@ partial class Program
     /// </summary>
     static int RunRealSenderSoak()
     {
+        // SEC-04 (R25/R26), BUG-SOAK-R25: production resolves ffmpeg once at startup and the execution
+        // sink consumes only that proven path. This entry point runs STANDALONE (no RunDefaultSuite), so
+        // without this the soak's first StartRecording is refused by design - R25/R26 working correctly.
+        FfmpegPreflight.Run(AppContext.BaseDirectory);
+
         string appHost = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "OmtCaptureStudio.Tests.exe");
         string exePath = File.Exists(appHost) ? appHost : (Environment.ProcessPath ?? appHost);
 
