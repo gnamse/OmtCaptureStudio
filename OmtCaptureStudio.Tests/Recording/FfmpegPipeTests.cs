@@ -48,6 +48,15 @@ partial class Program
             Console.WriteLine(" [SKIP] pipe sources not reachable from the test binary — structural check skipped.");
         }
 
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.WriteLine(" -> [SKIP] named-pipe ACL creation is Windows-only; name and source checks ran.");
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine(" -> Pipe names are full GUIDs and the host goes through FfmpegPipeServer.");
+            Console.ResetColor();
+            return;
+        }
+
         using (var first = FfmpegPipeServer.Create(video, 4096))
         {
             bool rejected = false;

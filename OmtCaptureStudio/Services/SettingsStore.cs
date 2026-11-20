@@ -280,7 +280,8 @@ public sealed class SettingsStore
         RecordingConfig config,
         string? presetName,
         AppMode? lastAppMode = null,
-        RationalFrameRate? broadcastFrameRate = null)
+        RationalFrameRate? broadcastFrameRate = null,
+        CaptureTarget? selectedMonitor = null)
     {
         var settings = new OperatorSettings
         {
@@ -310,6 +311,15 @@ public sealed class SettingsStore
             settings.BroadcastFrameRateNumerator = rate.Numerator;
             settings.BroadcastFrameRateDenominator = rate.Denominator;
             settings.BroadcastFrameRate = rate.Denominator == 1 ? rate.Numerator : null;
+        }
+
+        if (selectedMonitor is { Kind: CaptureTargetKind.Monitor } monitor)
+        {
+            settings.SelectedMonitorAdapterLuid = monitor.AdapterLuid;
+            settings.SelectedMonitorOutputIndex = monitor.OutputIndex;
+            settings.SelectedMonitorDeviceName = monitor.OutputDeviceName;
+            // A secondary-GPU monitor has no meaning as a bare default-adapter index.
+            settings.SelectedMonitorIndex = monitor.IsDefaultAdapter ? monitor.OutputIndex : null;
         }
 
         return settings;

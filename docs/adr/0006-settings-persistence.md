@@ -110,3 +110,9 @@ destination usable".
 integer `BroadcastFrameRate` migrates to `numerator/1` on load. A stored numerator/denominator wins
 over a stale integer, so `60000/1001` is not rewritten as 60. Absent means 30/1, the previous
 hard-coded cadence. Restoring still writes nothing.
+
+**Version 3.** The selected monitor is optional. Identity is adapter LUID + output index and the
+DXGI device name. A file that only has `SelectedMonitorIndex` still means that output index on the
+default adapter — the adapter the old enumerator could see — and is not treated as a flat index
+across every GPU. A monitor on a second GPU does not write a bare index an older build would
+misread. Restoring still writes nothing.

@@ -13,6 +13,36 @@ namespace OmtCaptureStudio.ViewModels;
 public partial class MainWindowViewModel
 {
 
+    partial void OnSelectedCaptureTargetChanged(CaptureTarget? value)
+    {
+        if (_isRestoringSettings) return;
+        if (value is not { Kind: CaptureTargetKind.Monitor } monitor) return;
+        if (_persistedMonitor != null && MonitorIdentity.SameTarget(_persistedMonitor, monitor)) return;
+        _persistedMonitor = monitor;
+        PersistSettings();
+    }
+
+    /// <summary>
+    /// Applies a saved monitor once targets exist. A legacy bare index maps to the default adapter.
+    /// Runs while restoring is still set when called from <c>AttachSettings</c>, so it does not write.
+    /// </summary>
+    private void ApplySavedMonitor()
+    {
+        if (!_settingsAttached || _monitorRestored || CaptureTargets.Count == 0) return;
+        _monitorRestored = true;
+
+        CaptureTarget? match = MonitorIdentity.MatchSaved(
+            CaptureTargets,
+            _savedMonitorLuid,
+            _savedMonitorOutput,
+            _savedMonitorDeviceName,
+            _savedMonitorLegacyIndex);
+        if (match == null) return;
+
+        _persistedMonitor = match;
+        SelectedCaptureTarget = match;
+    }
+
     partial void OnIsCaptureTargetDropDownOpenChanged(bool value)
     {
         // Refresh the window list every time the picker opens (windows come and go);
@@ -68,12 +98,12 @@ public partial class MainWindowViewModel
         CaptureTargets = list;
 
         if (SelectedCaptureTarget == null ||
-            !list.Any(t => t.Kind == SelectedCaptureTarget.Kind &&
-                           t.MonitorIndex == SelectedCaptureTarget.MonitorIndex &&
-                           t.WindowHandle == SelectedCaptureTarget.WindowHandle))
+            !list.Any(t => MonitorIdentity.SameTarget(t, SelectedCaptureTarget)))
         {
             SelectedCaptureTarget = list.FirstOrDefault();
         }
+
+        ApplySavedMonitor();
     }
 
     private void PopulateCaptureAudioOptions()
@@ -346,9 +376,7 @@ public partial class MainWindowViewModel
 
         if (previous != null)
         {
-            var match = list.FirstOrDefault(t => t.Kind == previous.Kind &&
-                                                 t.MonitorIndex == previous.MonitorIndex &&
-                                                 t.WindowHandle == previous.WindowHandle);
+            var match = list.FirstOrDefault(t => MonitorIdentity.SameTarget(t, previous));
             SelectedCaptureTarget = match; // null when the selected window closed
         }
         else
@@ -374,7 +402,10 @@ public partial class MainWindowViewModel
         {
             if (a[i].Kind != b[i].Kind ||
                 a[i].MonitorIndex != b[i].MonitorIndex ||
+                a[i].AdapterLuid != b[i].AdapterLuid ||
+                a[i].OutputIndex != b[i].OutputIndex ||
                 a[i].WindowHandle != b[i].WindowHandle ||
+                !string.Equals(a[i].OutputDeviceName, b[i].OutputDeviceName, StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(a[i].DisplayName, b[i].DisplayName, StringComparison.Ordinal))
             {
                 return false;

@@ -639,6 +639,14 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// <summary>Host-broadcast cadence. 30/1 unless a settings file stored another ratio (or a legacy integer).</summary>
     private RationalFrameRate _broadcastFrameRate = RationalFrameRate.FromInteger(30);
 
+    private bool _settingsAttached;
+    private bool _monitorRestored;
+    private long? _savedMonitorLuid;
+    private int? _savedMonitorOutput;
+    private string? _savedMonitorDeviceName;
+    private int? _savedMonitorLegacyIndex;
+    private CaptureTarget? _persistedMonitor;
+
     /// <summary>While true, changes are APPLIED but not written back - restoring must be silent.</summary>
     private bool _isRestoringSettings;
 
@@ -709,6 +717,12 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             UpdatesAutoInstall = restored.UpdatesAutoInstall ?? false;
             _lastUpdateCheckUtc = restored.LastUpdateCheckUtc;
             _broadcastFrameRate = SettingsStore.ReadBroadcastFrameRate(restored);
+            _savedMonitorLuid = restored.SelectedMonitorAdapterLuid;
+            _savedMonitorOutput = restored.SelectedMonitorOutputIndex;
+            _savedMonitorDeviceName = restored.SelectedMonitorDeviceName;
+            _savedMonitorLegacyIndex = restored.SelectedMonitorIndex;
+            _settingsAttached = true;
+            ApplySavedMonitor();
 
             SelectedContainerFormat = _operatorDefaults.ContainerFormat;
             SelectedEncoderChoice = _operatorDefaults.EncoderChoice;
@@ -777,8 +791,11 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         _operatorDefaults = BuildRecordingConfigFromUi();
         // FromConfig is a shared mapper whose signature other callers depend on, so the update fields are
         // STAMPED onto the result rather than widening it.
+        CaptureTarget? monitorToSave = SelectedCaptureTarget is { Kind: CaptureTargetKind.Monitor } selected
+            ? selected
+            : _persistedMonitor;
         OperatorSettings settings = SettingsStore.FromConfig(
-            _operatorDefaults, SelectedRecordingPreset, _lastUsedAppMode, _broadcastFrameRate);
+            _operatorDefaults, SelectedRecordingPreset, _lastUsedAppMode, _broadcastFrameRate, monitorToSave);
         settings.UpdatesAutoInstall = UpdatesAutoInstall;
         settings.LastUpdateCheckUtc = _lastUpdateCheckUtc;
         _settingsStore.Save(settings);
