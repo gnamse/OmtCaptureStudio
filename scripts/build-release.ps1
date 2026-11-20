@@ -9,10 +9,56 @@
 param(
     [string]$VersionOverride = "",
     [switch]$NoPrompt = $false,
-    [switch]$SkipUpload = $false
+    [switch]$SkipUpload = $false,
+    # Optional. When empty, OMT_CODESIGN_THUMBPRINT is used. When both are empty, signing is skipped.
+    [string]$SignThumbprint = "",
+    [string]$TimestampUrl = "http://timestamp.digicert.com"
 )
 
 $ErrorActionPreference = "Stop"
+
+function Get-SignThumbprint {
+    if (-not [string]::IsNullOrWhiteSpace($SignThumbprint)) { return $SignThumbprint.Trim() }
+    $fromEnv = [Environment]::GetEnvironmentVariable("OMT_CODESIGN_THUMBPRINT")
+    if (-not [string]::IsNullOrWhiteSpace($fromEnv)) { return $fromEnv.Trim() }
+    return ""
+}
+
+function Invoke-OptionalAuthenticodeSign([string]$Path) {
+    $thumb = Get-SignThumbprint
+    $leaf = Split-Path -Path $Path -Leaf
+    if ([string]::IsNullOrWhiteSpace($thumb)) {
+        Write-Host "   [INFO] Authenticode skipped for ${leaf}: no cert (pass -SignThumbprint or set OMT_CODESIGN_THUMBPRINT)." -ForegroundColor DarkGray
+        return
+    }
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Authenticode was requested but '$Path' does not exist."
+    }
+
+    $signtool = $null
+    $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($cmd) { $signtool = $cmd.Source }
+    if (-not $signtool) {
+        $kits = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+        if (Test-Path -LiteralPath $kits) {
+            $hit = Get-ChildItem -Path $kits -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match '\\x64\\signtool.exe$' } |
+                Sort-Object FullName -Descending |
+                Select-Object -First 1
+            if ($hit) { $signtool = $hit.FullName }
+        }
+    }
+    if (-not $signtool) {
+        throw "Authenticode was requested (thumbprint $thumb) but signtool.exe was not found. Install the Windows SDK signing tools, or unset the thumbprint to skip signing."
+    }
+
+    Write-Host "   Signing $leaf with certificate $thumb" -ForegroundColor Cyan
+    & $signtool sign /sha1 $thumb /fd SHA256 /tr $TimestampUrl /td SHA256 $Path
+    if ($LASTEXITCODE -ne 0) {
+        throw "signtool.exe failed (exit $LASTEXITCODE) signing '$Path'."
+    }
+    Write-Host "   [OK] Authenticode signature applied: $leaf" -ForegroundColor Green
+}
 
 $repoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $versionFile = Join-Path $repoRoot "version.txt"
@@ -284,6 +330,12 @@ Write-Host "   [OK] Build log written: $buildLogPath" -ForegroundColor Green
 # Remove debug symbols from release staging
 Get-ChildItem -Path $publishDir -Filter "*.pdb" | Remove-Item -Force -ErrorAction SilentlyContinue
 
+# Sign the published exe before it is zipped or packed into the installer. No thumbprint => skipped.
+$publishedExe = Join-Path $publishDir "OmtCaptureStudio.exe"
+if (Test-Path -LiteralPath $publishedExe) {
+    Invoke-OptionalAuthenticodeSign $publishedExe
+}
+
 # 6. Create ZIP Release Archive
 Write-Host ""
 Write-Host "[Step 3/4] Generating Portable Release ZIP Archive..." -ForegroundColor Cyan
@@ -415,6 +467,8 @@ if ($isccPath) {
             throw "iscc.exe reported success but no usable '$setupExePath' was produced. Aborting release: it would ship without its installer."
         }
 
+        # Sign the installer itself, then hash the signed bytes. No thumbprint => skipped.
+        Invoke-OptionalAuthenticodeSign $setupExePath
         $setupHash = (Get-FileHash -Path $setupExePath -Algorithm SHA256).Hash.ToLowerInvariant()
         Set-Content -Path $setupShaPath -Value "$setupHash  $setupExeName" -NoNewline
         $setupSizeMb = [math]::Round(($setupItem.Length / 1MB), 2)

@@ -29,7 +29,9 @@ Do **not** commit `ffmpeg.exe` or native DLLs into git. Actions downloads them o
 
 `https://github.com/gnamse/OmtCaptureStudio/releases/download/v1.0.0.25/OmtCaptureStudio-v1.0.0.25-win-x64.zip`
 
-That ZIP has the 6 native DLLs + `ffmpeg.exe` at its root; `ci-provision-artifacts.ps1` accepts that flat layout. Forks and same-repo PRs go green without a secret ritual. Provision fails only if the download/extract/validate step fails.
+That ZIP has the 6 native DLLs + `ffmpeg.exe` at its root; `ci-provision-artifacts.ps1` accepts that flat layout. Forks and same-repo PRs go green without a secret ritual. The zip's SHA-256 is pinned in `scripts/ci-artifact-checksums.txt` and checked before extract. Provision fails if the download, the checksum, the extract, or the layout check fails.
+
+A custom URL (secret override, or `CI_NATIVE_PAYLOAD_URL` / `CI_FFMPEG_URL`) must either match a filename in the pin file or set `CI_PREREQ_ARCHIVE_SHA256` / `CI_NATIVE_PAYLOAD_SHA256` / `CI_FFMPEG_SHA256` to the expected 64-hex digest. An override that disagrees with a pin fails.
 
 ### Optional override (newer or private assets)
 

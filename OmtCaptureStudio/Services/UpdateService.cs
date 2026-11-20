@@ -65,10 +65,12 @@ public interface IUpdateTransport
 public sealed class HttpUpdateTransport : IUpdateTransport, IDisposable
 {
     private readonly HttpClient _client;
+    private readonly long _maxDownloadBytes;
 
-    public HttpUpdateTransport(HttpMessageHandler? handler = null, TimeSpan? timeout = null)
+    public HttpUpdateTransport(HttpMessageHandler? handler = null, TimeSpan? timeout = null, long? maxDownloadBytes = null)
     {
         handler ??= new HttpClientHandler();
+        _maxDownloadBytes = maxDownloadBytes is > 0 ? maxDownloadBytes.Value : UpdateService.DefaultMaxInstallerDownloadBytes;
         _client = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = timeout ?? TimeSpan.FromSeconds(20)
@@ -97,9 +99,35 @@ public sealed class HttpUpdateTransport : IUpdateTransport, IDisposable
     {
         try
         {
-            using var response = await _client.GetAsync(url, cancellationToken).ConfigureAwait(false);
+            using var response = await _client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) return null;
-            return await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+
+            long? advertised = response.Content.Headers.ContentLength;
+            if (advertised is > 0 && advertised.Value > _maxDownloadBytes)
+            {
+                AppLogger.LogError($"Update download refused: Content-Length {advertised.Value} exceeds the {_maxDownloadBytes} byte cap.");
+                return null;
+            }
+
+            await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            using var buffer = new MemoryStream(advertised is > 0 and < int.MaxValue ? (int)advertised.Value : 0);
+            var chunk = new byte[81920];
+            long total = 0;
+            while (true)
+            {
+                int read = await stream.ReadAsync(chunk, cancellationToken).ConfigureAwait(false);
+                if (read == 0) break;
+                total += read;
+                if (total > _maxDownloadBytes)
+                {
+                    AppLogger.LogError($"Update download refused: body exceeded the {_maxDownloadBytes} byte cap.");
+                    return null;
+                }
+
+                buffer.Write(chunk, 0, read);
+            }
+
+            return buffer.Length == 0 ? null : buffer.ToArray();
         }
         catch (Exception) when (!cancellationToken.IsCancellationRequested)
         {
@@ -141,6 +169,12 @@ public sealed class UpdateService
     /// <summary>The version file stamped by <c>build-release.ps1</c> and copied beside the executable.</summary>
     public const string VersionFileName = "version.txt";
 
+    /// <summary>
+    /// Hard cap on an installer download. The published setup is tens of megabytes; anything larger is
+    /// refused before it is buffered. Tests inject a smaller cap.
+    /// </summary>
+    public const long DefaultMaxInstallerDownloadBytes = 512L * 1024 * 1024;
+
     private readonly IUpdateTransport _transport;
     private readonly Func<string> _currentVersion;
     private readonly Func<string> _executablePath;
@@ -152,6 +186,9 @@ public sealed class UpdateService
     private bool _checkedThisLaunch;
     private readonly Func<string> _stagingDirectory;
     private readonly Func<string, bool> _launchElevated;
+    private readonly UpdateSignaturePolicy _signaturePolicy;
+    private readonly Func<string, AuthenticodeVerdict> _verifySignature;
+    private readonly long _maxDownloadBytes;
     private string? _stagedInstallerPath;
     private string? _stagedInstallerHash;
 
@@ -164,7 +201,10 @@ public sealed class UpdateService
         Func<DateTime>? utcNow = null,
         Func<string, string?>? environment = null,
         Func<string>? stagingDirectory = null,
-        Func<string, bool>? launchElevated = null)
+        Func<string, bool>? launchElevated = null,
+        UpdateSignaturePolicy? signaturePolicy = null,
+        Func<string, AuthenticodeVerdict>? verifySignature = null,
+        long? maxDownloadBytes = null)
     {
         _transport = transport;
         _currentVersion = currentVersion ?? (() => ResolveInstalledVersion());
@@ -180,6 +220,10 @@ public sealed class UpdateService
         // where a predictable name could be pre-created or swapped. Injectable so tests stay off the real one.
         _stagingDirectory = stagingDirectory ?? DefaultStagingDirectory;
         _launchElevated = launchElevated ?? LaunchElevatedDefault;
+        // Default is "allow unsigned". Opt in with OMT_UPDATE_REQUIRE_SIGNATURE or a publisher/thumbprint.
+        _signaturePolicy = signaturePolicy ?? UpdateSignaturePolicy.FromEnvironment(_environment);
+        _verifySignature = verifySignature ?? AuthenticodeVerifier.VerifyFile;
+        _maxDownloadBytes = maxDownloadBytes is > 0 ? maxDownloadBytes.Value : DefaultMaxInstallerDownloadBytes;
     }
 
     /// <summary>True once this instance has spent its one permitted network check.</summary>
@@ -517,11 +561,11 @@ public sealed class UpdateService
     /// may execute it, staging it in the per-user protected directory under a non-predictable name.
     /// Returns the verified path, or null with a loud log line.
     ///
-    /// <para><b>What this check is and is NOT (R28).</b> It is an INTEGRITY check against corruption,
+    /// <para><b>What the hash check is and is NOT.</b> It is an INTEGRITY check against corruption,
     /// truncation and a mangled transfer. It is <b>not</b> tamper detection: the artifact and its expected
-    /// hash are taken from the same release, so an actor who can publish - or who holds a token that can -
-    /// replaces both and passes this check. Binding to a publisher requires an Authenticode signature,
-    /// which is an open decision (unsigned releases are an ACCEPTED RISK, on the record).</para>
+    /// hash are taken from the same release, so an actor who can publish replaces both and passes this
+    /// check. Binding to a publisher is the Authenticode gate (ADR-0013). It is off unless the owner
+    /// opts in, because today's releases are unsigned.</para>
     /// A hash mismatch deletes the download: an unverified installer is not left on disk for a later
     /// accident to run.
     /// </summary>
@@ -539,10 +583,24 @@ public sealed class UpdateService
             return null;
         }
 
+        if (release.SetupSize > _maxDownloadBytes)
+        {
+            AppLogger.LogError(
+                $"Update download refused: '{release.SetupAssetName}' is {release.SetupSize} bytes, over the {_maxDownloadBytes} byte cap.");
+            return null;
+        }
+
         byte[]? payload = await _transport.GetBytesAsync(release.SetupDownloadUrl, cancellationToken).ConfigureAwait(false);
         if (payload is null || payload.Length == 0)
         {
             AppLogger.LogError($"Update download failed: no bytes returned for '{release.SetupAssetName}'.");
+            return null;
+        }
+
+        if (payload.Length > _maxDownloadBytes)
+        {
+            AppLogger.LogError(
+                $"Update download refused: '{release.SetupAssetName}' returned {payload.Length} bytes, over the {_maxDownloadBytes} byte cap.");
             return null;
         }
 
@@ -650,6 +708,30 @@ public sealed class UpdateService
             AppLogger.LogError($"Update install refused: {why}");
             detail = "The downloaded update changed on disk after verification and was refused.";
             return false;
+        }
+
+        // ADR-0013: Authenticode is enforced only when the owner opts in. Unsigned releases stay installable.
+        if (_signaturePolicy.Enforce)
+        {
+            AuthenticodeVerdict verdict;
+            try
+            {
+                verdict = _verifySignature(verifiedInstallerPath);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.LogError("Update install refused: Authenticode verification threw.", ex);
+                detail = "The installer signature could not be verified and was refused.";
+                return false;
+            }
+
+            string? rejection = _signaturePolicy.RejectionReason(verdict);
+            if (rejection != null)
+            {
+                AppLogger.LogError($"Update install refused: {rejection}");
+                detail = "The installer signature was refused: " + rejection;
+                return false;
+            }
         }
 
         try

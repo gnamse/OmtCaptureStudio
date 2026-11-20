@@ -21,6 +21,11 @@
     Auth: if CI_ARTIFACTS_BEARER_TOKEN is set, it is sent as Authorization: Bearer <token>
     (for private release assets). Leave unset for public HTTPS.
 
+    Checksums: every download is checked against scripts/ci-artifact-checksums.txt (matched by
+    the URL's file name) or, for an unpinned URL, CI_PREREQ_ARCHIVE_SHA256 /
+    CI_NATIVE_PAYLOAD_SHA256 / CI_FFMPEG_SHA256. A missing checksum fails. An override that
+    disagrees with a pin fails. See ADR-0013.
+
     Exit codes:
       0  — provisioned successfully, OR nothing configured and not running on GitHub Actions
            (local no-op; caller still runs ci-prerequisites.ps1)
@@ -83,6 +88,46 @@ function Invoke-Download([string]$Url, [string]$OutFile) {
     }
 }
 
+function Get-PinnedSha256([string]$FileName) {
+    $pinFile = Join-Path $PSScriptRoot "ci-artifact-checksums.txt"
+    if (-not (Test-Path -LiteralPath $pinFile)) { return $null }
+    foreach ($line in Get-Content -LiteralPath $pinFile) {
+        $trim = $line.Trim()
+        if ($trim.Length -eq 0 -or $trim.StartsWith("#")) { continue }
+        if ($trim -match '^([0-9a-fA-F]{64})\s+\*?(.+)$') {
+            if ($Matches[2].Trim() -eq $FileName) { return $Matches[1].ToLowerInvariant() }
+        }
+    }
+    return $null
+}
+
+function Assert-Sha256([string]$Path, [string]$Url, [string]$OverrideEnvName) {
+    $name = [IO.Path]::GetFileName(($Url -split '\?')[0])
+    $pinned = Get-PinnedSha256 $name
+    $override = [Environment]::GetEnvironmentVariable($OverrideEnvName)
+    if (-not [string]::IsNullOrWhiteSpace($override)) {
+        $override = $override.Trim().ToLowerInvariant()
+        if ($override -notmatch '^[0-9a-f]{64}$') {
+            throw "$OverrideEnvName must be 64 hex characters."
+        }
+    } else {
+        $override = $null
+    }
+    if ($pinned -and $override -and $pinned -ne $override) {
+        throw "$OverrideEnvName ($override) does not match the pinned SHA-256 for $name ($pinned)."
+    }
+    $expected = $pinned
+    if (-not $expected) { $expected = $override }
+    if ([string]::IsNullOrWhiteSpace($expected)) {
+        throw "No SHA-256 for '$name'. Add it to scripts/ci-artifact-checksums.txt or set $OverrideEnvName."
+    }
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        throw "SHA-256 mismatch for '$name': expected $expected, got $actual. The download was not used."
+    }
+    Write-Host "[ci-provision-artifacts] SHA-256 OK $name $actual"
+}
+
 function Expand-ZipSafe([string]$ZipPath, [string]$DestDir) {
     if (Test-Path -LiteralPath $DestDir) {
         Remove-Item -LiteralPath $DestDir -Recurse -Force
@@ -131,6 +176,7 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($archiveUrl)) {
         $zip = Join-Path $work "prereq.zip"
         Invoke-Download $archiveUrl $zip
+        Assert-Sha256 $zip $archiveUrl "CI_PREREQ_ARCHIVE_SHA256"
         $extract = Join-Path $work "prereq"
         Expand-ZipSafe $zip $extract
 
@@ -180,6 +226,7 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($payloadUrl)) {
         $zip = Join-Path $work "payload.zip"
         Invoke-Download $payloadUrl $zip
+        Assert-Sha256 $zip $payloadUrl "CI_NATIVE_PAYLOAD_SHA256"
         $extract = Join-Path $work "payload"
         Expand-ZipSafe $zip $extract
 
@@ -208,6 +255,7 @@ try {
         if ($ffmpegUrl -match '\.zip(\?|$)') {
             $zip = Join-Path $tmp "ffmpeg.zip"
             Invoke-Download $ffmpegUrl $zip
+            Assert-Sha256 $zip $ffmpegUrl "CI_FFMPEG_SHA256"
             Expand-ZipSafe $zip (Join-Path $tmp "out")
             $hit = Get-ChildItem -LiteralPath (Join-Path $tmp "out") -Filter "ffmpeg.exe" -Recurse -File |
                 Select-Object -First 1
@@ -215,6 +263,7 @@ try {
             Copy-Item -LiteralPath $hit.FullName -Destination $ffmpegDest -Force
         } else {
             Invoke-Download $ffmpegUrl $ffmpegDest
+            Assert-Sha256 $ffmpegDest $ffmpegUrl "CI_FFMPEG_SHA256"
         }
         Write-Host "[ci-provision-artifacts] ffmpeg.exe provisioned from CI_FFMPEG_URL."
     }

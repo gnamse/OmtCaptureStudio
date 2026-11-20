@@ -98,6 +98,61 @@ partial class Program
         Expect(fellBack == "1.0.0+deadbeef", $"With no version file the assembly value is the fallback; got {fellBack}.");
         Directory.Delete(vdir, recursive: true);
 
+        // ---- 3b. Authenticode policy and WINTRUST layout (no Windows path, no WinVerifyTrust call). ----
+        var fromEnv = UpdateSignaturePolicy.FromEnvironment(k => k == "OMT_UPDATE_SIGN_THUMBPRINT" ? "AA:BB" : null);
+        Expect(fromEnv.Enforce && fromEnv.ExpectedThumbprint == "aabb",
+            "A thumbprint in the environment opts enforcement in and normalises the hex.");
+        Expect(!UpdateSignaturePolicy.FromEnvironment(_ => null).Enforce,
+            "No signature environment variables means unsigned releases stay installable.");
+        var publisherOnly = UpdateSignaturePolicy.FromEnvironment(k => k == "OMT_UPDATE_SIGN_PUBLISHER" ? "Odogwu" : null);
+        Expect(publisherOnly.Enforce && publisherOnly.ExpectedPublisher == "Odogwu",
+            "A publisher string opts enforcement in.");
+        Expect(new UpdateSignaturePolicy { Enforce = true, ExpectedPublisher = "Odogwu" }
+                .RejectionReason(new AuthenticodeVerdict(true, true, "CN=Odogwu", "ab", "ok")) is null,
+            "A matching publisher must not be a rejection.");
+        Expect(new UpdateSignaturePolicy { Enforce = true }
+                .RejectionReason(new AuthenticodeVerdict(false, false, null, null, "unsigned")) is not null,
+            "Enforcement on must reject an unsigned verdict.");
+        Expect(UpdateSignaturePolicy.AllowUnsigned.RejectionReason(
+                new AuthenticodeVerdict(false, false, null, null, "unsigned")) is null,
+            "Enforcement off must accept an unsigned verdict.");
+        Expect(AuthenticodeVerifier.WinTrustDataBytes == 88,
+            $"WINTRUST_DATA must be 88 bytes on x64; got {AuthenticodeVerifier.WinTrustDataBytes}.");
+        Expect(AuthenticodeVerifier.WinTrustFileInfoBytes == 32,
+            $"WINTRUST_FILE_INFO must be 32 bytes on x64; got {AuthenticodeVerifier.WinTrustFileInfoBytes}.");
+
+        // Download cap does not need a Windows path. Advertised size over the cap is not fetched.
+        var hugeFeed = new FakeUpdateTransport();
+        hugeFeed.Strings[UpdateService.ReleasesApiUrl] = FakeReleaseJson("v9.0.0.1", "OmtCaptureStudio-v9.0.0.1-Setup.exe", 800L * 1024 * 1024, "OmtCaptureStudio-v9.0.0.1-Setup.exe.sha256");
+        var hugeSvc = new UpdateService(hugeFeed, currentVersion: () => "1.0.0.22", maxDownloadBytes: 1024);
+        var hugeRel = hugeSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release;
+        Expect(hugeRel is not null, "A huge asset must still parse as a release so the cap can refuse it.");
+        Expect(hugeSvc.DownloadAndVerifyAsync(hugeRel!).GetAwaiter().GetResult() is null,
+            "An installer whose published size exceeds the cap must be refused.");
+        Expect(hugeFeed.ByteCalls == 0, "An over-cap published size must not download the body.");
+
+        string capDir = Path.Combine(Path.GetTempPath(), "omt-cap-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(capDir);
+        try
+        {
+            byte[] fatEarly = new byte[32];
+            string fatEarlyHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fatEarly)).ToLowerInvariant();
+            var fatEarlyFeed = new FakeUpdateTransport();
+            fatEarlyFeed.Strings[UpdateService.ReleasesApiUrl] = FakeReleaseJson("v9.0.0.2", "OmtCaptureStudio-v9.0.0.2-Setup.exe", fatEarly.Length, "OmtCaptureStudio-v9.0.0.2-Setup.exe.sha256");
+            fatEarlyFeed.Bytes["https://dl.example/OmtCaptureStudio-v9.0.0.2-Setup.exe"] = fatEarly;
+            fatEarlyFeed.Strings["https://dl.example/OmtCaptureStudio-v9.0.0.2-Setup.exe.sha256"] = fatEarlyHash + "  OmtCaptureStudio-v9.0.0.2-Setup.exe";
+            var fatEarlySvc = new UpdateService(fatEarlyFeed, currentVersion: () => "1.0.0.22", tempDirectory: () => capDir, stagingDirectory: () => capDir, maxDownloadBytes: 8);
+            var fatEarlyRel = fatEarlySvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!;
+            Expect(fatEarlySvc.DownloadAndVerifyAsync(fatEarlyRel).GetAwaiter().GetResult() is null,
+                "A body larger than the cap must be discarded even when its hash would have matched.");
+            Expect(Directory.GetFiles(capDir, "*.exe").Length == 0,
+                "An over-cap body must not be left staged on disk.");
+        }
+        finally
+        {
+            try { Directory.Delete(capDir, recursive: true); } catch { }
+        }
+
         // ---- 4. CHANNEL DETECTION --------------------------------------------------------------------
         var env = new Func<string, string?>(k => k switch
         {
@@ -373,6 +428,59 @@ partial class Program
 
         // no verified installer -> refused
         Expect(!onSvc.TryStartInstall(null, out _), "An install with no verified installer must be refused.");
+
+        // ---- Authenticode is off unless the owner opts in (ADR-0013). Unsigned releases still install.
+        int verifyCalls = 0;
+        var allowUnsigned = new UpdateService(onTransport, currentVersion: () => "1.0.0.22",
+            executablePath: () => @"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe",
+            launchProcess: _ => true,
+            launchElevated: _ => true,
+            tempDirectory: () => dlDir,
+            environment: env,
+            stagingDirectory: () => dlDir,
+            signaturePolicy: UpdateSignaturePolicy.AllowUnsigned,
+            verifySignature: _ => { verifyCalls++; return default; });
+        Expect(allowUnsigned.TryStartInstall(staged, out _),
+            "With enforcement off, an already-verified installer must still launch.");
+        Expect(verifyCalls == 0, "WinVerifyTrust must not run unless the owner opted in.");
+
+        var pinned = new UpdateSignaturePolicy { Enforce = true, ExpectedPublisher = "Odogwu", ExpectedThumbprint = "ab" };
+        var goodSign = new UpdateService(onTransport, currentVersion: () => "1.0.0.22",
+            executablePath: () => @"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe",
+            launchProcess: _ => true,
+            launchElevated: _ => true,
+            tempDirectory: () => dlDir,
+            environment: env,
+            stagingDirectory: () => dlDir,
+            signaturePolicy: pinned,
+            verifySignature: _ => new AuthenticodeVerdict(true, true, "CN=Odogwu", "AB", "trusted"));
+        Expect(goodSign.TryStartInstall(staged, out _),
+            "A trusted signature whose publisher and thumbprint match must be allowed.");
+
+        var badSign = new UpdateService(onTransport, currentVersion: () => "1.0.0.22",
+            executablePath: () => @"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe",
+            launchProcess: _ => true,
+            launchElevated: _ => true,
+            tempDirectory: () => dlDir,
+            environment: env,
+            stagingDirectory: () => dlDir,
+            signaturePolicy: pinned,
+            verifySignature: _ => new AuthenticodeVerdict(false, false, null, null, "the installer has no Authenticode signature."));
+        Expect(!badSign.TryStartInstall(staged, out string signDetail),
+            "Enforcement on must refuse an unsigned installer.");
+        Expect(signDetail.Contains("signature", StringComparison.OrdinalIgnoreCase),
+            $"The refusal must name the signature; got '{signDetail}'.");
+
+        byte[] fat = new byte[32];
+        string fatHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fat)).ToLowerInvariant();
+        var fatFeed = new FakeUpdateTransport();
+        fatFeed.Strings[UpdateService.ReleasesApiUrl] = FakeReleaseJson("v9.0.0.2", "OmtCaptureStudio-v9.0.0.2-Setup.exe", fat.Length, "OmtCaptureStudio-v9.0.0.2-Setup.exe.sha256");
+        fatFeed.Bytes["https://dl.example/OmtCaptureStudio-v9.0.0.2-Setup.exe"] = fat;
+        fatFeed.Strings["https://dl.example/OmtCaptureStudio-v9.0.0.2-Setup.exe.sha256"] = fatHash + "  OmtCaptureStudio-v9.0.0.2-Setup.exe";
+        var fatSvc = new UpdateService(fatFeed, currentVersion: () => "1.0.0.22", tempDirectory: () => dlDir, stagingDirectory: () => dlDir, maxDownloadBytes: 8);
+        var fatRel = fatSvc.CheckForUpdateAsync().GetAwaiter().GetResult().Release!;
+        Expect(fatSvc.DownloadAndVerifyAsync(fatRel).GetAwaiter().GetResult() is null,
+            "A body larger than the cap must be discarded even when its hash would have matched.");
 
         Directory.Delete(dlDir, recursive: true);
         Directory.Delete(badDir, recursive: true);

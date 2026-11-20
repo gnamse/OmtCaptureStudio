@@ -33,7 +33,10 @@ the operator sequence.
    powershell -File scripts/build-release.ps1
    ```
    Use `-SkipUpload` to package without `gh` upload; `-NoPrompt` for non-interactive;
-   `-VersionOverride 1.0.0.N` to pin the stamp. Script updates `version.txt`,
+   `-VersionOverride 1.0.0.N` to pin the stamp. Authenticode is optional: pass
+   `-SignThumbprint` or set `OMT_CODESIGN_THUMBPRINT` and the script signs the exe (before
+   the zip) and the setup exe (before its `.sha256`) with `signtool`. With no thumbprint,
+   signing is skipped and unsigned releases stay valid. Script updates `version.txt`,
    `installer/OmtCaptureStudio.iss` `MyAppVersion`, publishes AOT into `Publish_AOT/`,
    and writes ZIP + SHA-256 under `Releases/`.
 5. **Installer** — compile `installer/OmtCaptureStudio.iss` with Inno Setup (script

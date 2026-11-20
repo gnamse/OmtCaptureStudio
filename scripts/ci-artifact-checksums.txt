@@ -1,0 +1,9 @@
+# SHA-256 pins for files downloaded by scripts/ci-provision-artifacts.ps1.
+# Format matches sha256sum: "<64 hex>  <filename>".
+# The filename is the last path segment of the download URL (query string stripped).
+# An unpinned URL is refused unless the matching CI_*_SHA256 environment variable is set,
+# and that variable must equal the pin when both exist.
+#
+# Default CI archive (v1.0.0.25 portable zip, .github/workflows/ci.yml):
+# https://github.com/gnamse/OmtCaptureStudio/releases/download/v1.0.0.25/OmtCaptureStudio-v1.0.0.25-win-x64.zip
+00854837a75f4b97e17c70d001f5db54401eb56d139cecad8755c96c524a2e31  OmtCaptureStudio-v1.0.0.25-win-x64.zip
