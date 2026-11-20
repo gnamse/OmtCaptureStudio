@@ -27,7 +27,7 @@ Do **not** commit `ffmpeg.exe` or native DLLs into git. Actions downloads them o
 
 `.github/workflows/ci.yml` already defaults `CI_PREREQ_ARCHIVE_URL` to the public portable release when the repository secret is unset:
 
-`https://github.com/gnamse/OmtCaptureStudio/releases/download/v1.0.0.24/OmtCaptureStudio-v1.0.0.24-win-x64.zip`
+`https://github.com/gnamse/OmtCaptureStudio/releases/download/v1.0.0.25/OmtCaptureStudio-v1.0.0.25-win-x64.zip`
 
 That ZIP has the 6 native DLLs + `ffmpeg.exe` at its root; `ci-provision-artifacts.ps1` accepts that flat layout. Forks and same-repo PRs go green without a secret ritual. Provision fails only if the download/extract/validate step fails.
 
