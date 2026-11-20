@@ -272,6 +272,28 @@ partial class Program
         if (monitors.Count < 1)
             throw new Exception("MonitorEnumerator.Enumerate() returned no monitors.");
         Console.WriteLine($" -> {monitors.Count} monitor(s) enumerated; first = '{monitors[0].DisplayName}'");
+        if (monitors[0].Kind != CaptureTargetKind.Monitor
+            || (monitors[0].AdapterLuid == 0 && string.IsNullOrEmpty(monitors[0].OutputDeviceName)))
+        {
+            throw new Exception("Enumerated monitors must carry an adapter LUID or a device name, not only a bare index.");
+        }
+
+        CaptureTarget? legacy = MonitorIdentity.ResolveLegacyIndex(monitors[0].IsDefaultAdapter ? monitors[0].OutputIndex : 0, monitors);
+        if (monitors[0].IsDefaultAdapter && (legacy == null || !MonitorIdentity.SameTarget(legacy, monitors[0])))
+        {
+            throw new Exception("Legacy index resolution must still find the default adapter's output.");
+        }
+
+        CaptureTarget? indexZero = MonitorIdentity.ResolveLegacyIndex(0, monitors);
+        if (indexZero != null)
+        {
+            using var legacyCapturer = new DesktopFrameCapturer(0);
+            if (legacyCapturer.Monitor.AdapterLuid != indexZero.AdapterLuid)
+            {
+                throw new Exception(
+                    $"DesktopFrameCapturer(0) bound adapter {legacyCapturer.Monitor.AdapterLuid:X}, expected the default adapter {indexZero.AdapterLuid:X}.");
+            }
+        }
 
         // (b) Windows: GDI window enumeration; capture the top-most window when available.
         var windows = WindowEnumerator.Enumerate();

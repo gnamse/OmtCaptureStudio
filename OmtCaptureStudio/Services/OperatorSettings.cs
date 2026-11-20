@@ -22,8 +22,14 @@ namespace OmtCaptureStudio.Services;
 /// </summary>
 public sealed class OperatorSettings
 {
-    /// <summary>Schema version, so a future format change can be migrated rather than guessed at.</summary>
-    public const int CurrentVersion = 1;
+    /// <summary>
+    /// Schema version, so a future format change can be migrated rather than guessed at.
+    /// Version 2 adds the broadcast frame rate. A version 1 file that stored only the legacy integer
+    /// <see cref="BroadcastFrameRate"/> still loads: that integer becomes numerator/1.
+    /// Version 3 adds the selected monitor's adapter LUID, output index and device name. A file that
+    /// only has <see cref="SelectedMonitorIndex"/> still means that output index on the default adapter.
+    /// </summary>
+    public const int CurrentVersion = 3;
 
     public int Version { get; set; } = CurrentVersion;
 
@@ -86,6 +92,34 @@ public sealed class OperatorSettings
     /// it is a timestamp only, never an authorisation.
     /// </summary>
     public DateTime? LastUpdateCheckUtc { get; set; }
+
+    /// <summary>
+    /// Legacy integer broadcast fps. Read on load when the ratio fields are absent; an integer N
+    /// migrates to N/1. Not the authority once <see cref="BroadcastFrameRateNumerator"/> is set.
+    /// </summary>
+    public int? BroadcastFrameRate { get; set; }
+
+    /// <summary>Broadcast frame-rate numerator. 59.94 is 60000 with denominator 1001.</summary>
+    public int? BroadcastFrameRateNumerator { get; set; }
+
+    /// <summary>Broadcast frame-rate denominator. An integer rate uses 1.</summary>
+    public int? BroadcastFrameRateDenominator { get; set; }
+
+    /// <summary>
+    /// Legacy monitor selection: output index on the default adapter only. Ignored once
+    /// <see cref="SelectedMonitorDeviceName"/> or <see cref="SelectedMonitorAdapterLuid"/> is set,
+    /// except as a fallback when that identity is no longer present.
+    /// </summary>
+    public int? SelectedMonitorIndex { get; set; }
+
+    /// <summary>Packed DXGI adapter LUID of the selected monitor. Null means the file has no identity yet.</summary>
+    public long? SelectedMonitorAdapterLuid { get; set; }
+
+    /// <summary>Output index on <see cref="SelectedMonitorAdapterLuid"/>.</summary>
+    public int? SelectedMonitorOutputIndex { get; set; }
+
+    /// <summary>DXGI device name of the selected monitor, for example <c>\\.\DISPLAY1</c>.</summary>
+    public string? SelectedMonitorDeviceName { get; set; }
 }
 
 /// <summary>

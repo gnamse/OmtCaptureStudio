@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using libomtnet;
+using OmtCaptureStudio.Models;
 
 namespace OmtCaptureStudio.Services;
 
@@ -12,7 +13,7 @@ public class OmtTestPatternGenerator : IDisposable
     private readonly string _sourceName;
     private readonly int _width = 1920;
     private readonly int _height = 1080;
-    private readonly int _fps = 60;
+    private readonly RationalFrameRate _frameRate;
     private readonly int _sampleRate = 48000;
     private readonly int _channels = 2;
 
@@ -22,9 +23,12 @@ public class OmtTestPatternGenerator : IDisposable
     public string? Address => _sender?.Address;
     public int Port => _sender?.Port ?? 0;
 
-    public OmtTestPatternGenerator(string sourceName = "OmtCaptureStudio_TestPattern")
+    public OmtTestPatternGenerator(string sourceName = "OmtCaptureStudio_TestPattern", RationalFrameRate? frameRate = null)
     {
         _sourceName = sourceName;
+        _frameRate = frameRate is { IsValid: true } explicitRate
+            ? explicitRate
+            : RationalFrameRate.FromInteger(60);
     }
 
     public void Start()
@@ -79,14 +83,12 @@ public class OmtTestPatternGenerator : IDisposable
         GCHandle videoHandle = GCHandle.Alloc(videoBuffer, GCHandleType.Pinned);
         IntPtr pVideo = videoHandle.AddrOfPinnedObject();
 
-        // 48000 Hz / 60 fps = 800 samples per channel per frame
-        int samplesPerFrame = _sampleRate / _fps;
-        int audioSamplesTotal = _channels * samplesPerFrame;
+        int maxSamples = Math.Max(1, _frameRate.MaxSamplesPerFrame(_sampleRate));
+        int audioSamplesTotal = _channels * maxSamples;
         float[] audioBuffer = new float[audioSamplesTotal];
         GCHandle audioHandle = GCHandle.Alloc(audioBuffer, GCHandleType.Pinned);
         IntPtr pAudio = audioHandle.AddrOfPinnedObject();
 
-        long frameIndex = 0;
         double audioPhaseL = 0;
         double audioPhaseR = 0;
         double freqL = 440.0;
@@ -105,22 +107,16 @@ public class OmtTestPatternGenerator : IDisposable
             0xFF000000  // Black
         };
 
-        Stopwatch sw = Stopwatch.StartNew();
+        using var pacer = new FramePacer(_frameRate);
 
         try
         {
             while (_isRunning && _sender != null)
             {
-                long targetTimeMs = frameIndex * 1000 / _fps;
-                long elapsedMs = sw.ElapsedMilliseconds;
-
-                if (elapsedMs < targetTimeMs)
-                {
-                    int delay = (int)(targetTimeMs - elapsedMs);
-                    if (delay > 0) Thread.Sleep(delay);
-                }
-
-                frameIndex++;
+                long frameIndex = pacer.WaitNext();
+                int samplesPerFrame = _frameRate.SamplesForFrame(frameIndex, _sampleRate);
+                if (samplesPerFrame < 1) samplesPerFrame = 1;
+                if (samplesPerFrame > maxSamples) samplesPerFrame = maxSamples;
 
                 // 1. Draw SMPTE Color Bars into Video Buffer
                 fixed (byte* pBytes = videoBuffer)
@@ -183,8 +179,8 @@ public class OmtTestPatternGenerator : IDisposable
                     Width = _width,
                     Height = _height,
                     Stride = stride,
-                    FrameRateN = _fps,
-                    FrameRateD = 1,
+                    FrameRateN = _frameRate.Numerator,
+                    FrameRateD = _frameRate.Denominator,
                     Data = pVideo,
                     DataLength = videoBufferBytes,
                     Timestamp = -1 // Automatic timestamp throttling
@@ -200,7 +196,7 @@ public class OmtTestPatternGenerator : IDisposable
                     SampleRate = _sampleRate,
                     SamplesPerChannel = samplesPerFrame,
                     Data = pAudio,
-                    DataLength = audioSamplesTotal * sizeof(float),
+                    DataLength = _channels * samplesPerFrame * sizeof(float),
                     Timestamp = -1
                 };
                 _sender.Send(aFrame);

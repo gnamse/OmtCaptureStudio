@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using libomtnet;
 
+using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services.Audio;
 using OmtCaptureStudio.Services.Forensics;
 
@@ -37,7 +38,7 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
     public const int DefaultCaptureStallTimeoutMs = 10_000;
 
     private readonly string _sourceName;
-    private readonly int _fps;
+    private readonly RationalFrameRate _frameRate;
     private readonly IFrameSource _frameSource;
     private readonly object _lock = new();
     private readonly List<Socket> _interfaceBlockerSockets = new();
@@ -101,11 +102,16 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         IHostAudioSource? audioSource = null,
         string? bindIpAddress = null,
         int firstFrameTimeoutMs = DefaultFirstFrameTimeoutMs,
-        int captureStallTimeoutMs = DefaultCaptureStallTimeoutMs)
+        int captureStallTimeoutMs = DefaultCaptureStallTimeoutMs,
+        RationalFrameRate? frameRate = null)
     {
         _frameSource = frameSource ?? throw new ArgumentNullException(nameof(frameSource));
         _sourceName = sourceName;
-        _fps = fps > 0 ? fps : 30;
+        // An explicit ratio wins. Otherwise the historical integer fps is N/1, so existing callers
+        // (and a settings file that only stored an integer) keep the rate they asked for.
+        _frameRate = frameRate is { IsValid: true } explicitRate
+            ? explicitRate
+            : RationalFrameRate.FromInteger(fps > 0 ? fps : 30);
         _audioSource = audioSource ?? new SilentHostAudioSource();
         _bindIpAddress = string.IsNullOrWhiteSpace(bindIpAddress) ? null : bindIpAddress;
         _firstFrameTimeoutMs = firstFrameTimeoutMs > 0 ? firstFrameTimeoutMs : DefaultFirstFrameTimeoutMs;
@@ -343,35 +349,30 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
     {
         const int sampleRate = HostAudioFormat.TargetSampleRate;
         const int channels = HostAudioFormat.TargetChannels;
-        int samplesPerFrame = sampleRate / _fps;
-        int audioSamplesTotal = channels * samplesPerFrame;
+        int maxSamples = Math.Max(1, _frameRate.MaxSamplesPerFrame(sampleRate));
+        int audioSamplesTotal = channels * maxSamples;
 
         float[] audioBuffer = new float[audioSamplesTotal];
         GCHandle audioHandle = GCHandle.Alloc(audioBuffer, GCHandleType.Pinned);
         IntPtr pAudio = audioHandle.AddrOfPinnedObject();
 
-        Stopwatch sw = Stopwatch.StartNew();
-        // Separate from `sw` on purpose: `sw` is the PACING clock, so reusing it for a diagnostic would
-        // change when frames go out.
+        using var pacer = new FramePacer(_frameRate);
+        // The pacer owns the frame clock. This watch is only the first-frame diagnostic and must not
+        // be the thing the send loop sleeps on.
         Stopwatch firstFrameWatch = Stopwatch.StartNew();
         bool stallReported = false;
         bool sessionStallReported = false;
         long unhealthySince = -1;
-        long frameIndex = 0;
         bool hasFrame = false;
 
         try
         {
             while (_isRunning && ReferenceEquals(_capturer, capturer) && ReferenceEquals(_sender, sender))
             {
-                long targetMs = frameIndex * 1000 / _fps;
-                long elapsedMs = sw.ElapsedMilliseconds;
-                if (elapsedMs < targetMs)
-                {
-                    int delay = (int)(targetMs - elapsedMs);
-                    if (delay > 0) Thread.Sleep(delay);
-                }
-                frameIndex++;
+                long frameIndex = pacer.WaitNext();
+                int samplesPerFrame = _frameRate.SamplesForFrame(frameIndex, sampleRate);
+                if (samplesPerFrame < 1) samplesPerFrame = 1;
+                if (samplesPerFrame > maxSamples) samplesPerFrame = maxSamples;
 
                 // Desktop Duplication only yields a frame when the screen changes, so a static
                 // desktop would otherwise starve receivers. Once one real frame is captured,
@@ -432,8 +433,8 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
                     Width = capturer.Width,
                     Height = capturer.Height,
                     Stride = capturer.Stride,
-                    FrameRateN = _fps,
-                    FrameRateD = 1,
+                    FrameRateN = _frameRate.Numerator,
+                    FrameRateD = _frameRate.Denominator,
                     Data = capturer.BufferPtr,
                     DataLength = capturer.Stride * capturer.Height,
                     Timestamp = -1 // automatic timestamp throttling
@@ -459,7 +460,7 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
                     SampleRate = sampleRate,
                     SamplesPerChannel = samplesPerFrame,
                     Data = pAudio,
-                    DataLength = audioSamplesTotal * sizeof(float),
+                    DataLength = channels * samplesPerFrame * sizeof(float),
                     Timestamp = -1
                 };
                 sender.Send(aFrame);

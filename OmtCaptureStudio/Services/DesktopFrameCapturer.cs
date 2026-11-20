@@ -6,11 +6,12 @@ using Vortice.Direct3D11;
 using Vortice.DXGI;
 
 using OmtCaptureStudio.Interop;
+using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.Services;
 
 /// <summary>
-/// Captures the primary monitor via DXGI Desktop Duplication and copies each frame
+/// Captures one monitor via DXGI Desktop Duplication and copies each frame
 /// into a reusable pinned BGRA buffer (tight stride = width * 4) suitable for OMTSend.
 /// Single-threaded: <see cref="TryCaptureFrame"/> is called from one sender thread.
 /// </summary>
@@ -22,7 +23,7 @@ public sealed class DesktopFrameCapturer : IFrameSource
     /// <summary>Recovery is logged at most this often. The attempt itself still runs on the backoff above.</summary>
     private const int RecoveryLogIntervalMs = 5_000;
 
-    private readonly int _monitorIndex;
+    private MonitorRef _monitor;
     private int _left;
     private int _top;
     private ID3D11Device? _device;
@@ -35,6 +36,9 @@ public sealed class DesktopFrameCapturer : IFrameSource
     private bool _sessionHealthy = true;
     private long _nextRecoveryTicks;
     private long _lastRecoveryLogTicks;
+
+    /// <summary>The output this capturer is bound to, including after a device reset recreates the device.</summary>
+    public MonitorRef Monitor => _monitor;
 
     public int Width { get; private set; }
     public int Height { get; private set; }
@@ -53,16 +57,35 @@ public sealed class DesktopFrameCapturer : IFrameSource
     public bool IsCaptureSessionHealthy => _sessionHealthy;
 
     public DesktopFrameCapturer(int monitorIndex = 0)
+        : this(MonitorRef.Legacy(monitorIndex))
     {
-        _monitorIndex = monitorIndex;
+    }
 
+    public DesktopFrameCapturer(CaptureTarget target)
+        : this(MonitorRef.FromTarget(target))
+    {
+    }
+
+    private DesktopFrameCapturer(MonitorRef requested)
+    {
         try
         {
+            MonitorDescriptor? match = MonitorIdentity.Find(DxgiOutputCatalog.Enumerate(), requested);
+            if (match is not MonitorDescriptor found)
+            {
+                throw new InvalidOperationException(requested.IsLegacyIndex
+                    ? $"Desktop capture: monitor index {requested.OutputIndex} not found."
+                    : $"Desktop capture: monitor '{requested.DeviceName}' on adapter {requested.AdapterLuid:X} output {requested.OutputIndex} not found.");
+            }
+
+            _monitor = MonitorRef.FromDescriptor(found);
             _device = CreateDevice();
             BoundsRead bounds = TryReadBounds(out int left, out int top, out int width, out int height);
             if (bounds == BoundsRead.Missing)
             {
-                throw new InvalidOperationException($"Desktop capture: monitor index {_monitorIndex} not found.");
+                throw new InvalidOperationException(requested.IsLegacyIndex
+                    ? $"Desktop capture: monitor index {requested.OutputIndex} not found."
+                    : $"Desktop capture: monitor '{_monitor.DeviceName}' not found on its adapter.");
             }
 
             if (bounds == BoundsRead.Invalid)
@@ -291,6 +314,8 @@ public sealed class DesktopFrameCapturer : IFrameSource
             _duplication = null;
             try { _device?.Dispose(); } catch { }
             _device = null;
+            // Same adapter LUID as the output we were duplicating. A hardware-default device can
+            // come back on the other GPU of a hybrid laptop and then fail to duplicate this output.
             _device = CreateDevice();
             return _device != null;
         }
@@ -315,12 +340,7 @@ public sealed class DesktopFrameCapturer : IFrameSource
         top = 0;
         width = 0;
         height = 0;
-        if (_device == null) return BoundsRead.Missing;
-
-        using IDXGIDevice dxgiDevice = _device.QueryInterface<IDXGIDevice>();
-        using IDXGIAdapter adapter = dxgiDevice.GetAdapter();
-        var enumResult = adapter.EnumOutputs((uint)_monitorIndex, out IDXGIOutput output);
-        if (enumResult.Failure || output == null) return BoundsRead.Missing;
+        if (!TryGetOutput(out IDXGIOutput? output) || output == null) return BoundsRead.Missing;
 
         using (output)
         {
@@ -338,14 +358,10 @@ public sealed class DesktopFrameCapturer : IFrameSource
     {
         try { _duplication?.Dispose(); } catch { }
         _duplication = null;
-        if (_device == null) return;
-
-        using IDXGIDevice dxgiDevice = _device.QueryInterface<IDXGIDevice>();
-        using IDXGIAdapter adapter = dxgiDevice.GetAdapter();
-        var enumResult = adapter.EnumOutputs((uint)_monitorIndex, out IDXGIOutput output);
-        if (enumResult.Failure || output == null)
+        if (!TryGetOutput(out IDXGIOutput? output) || output == null)
         {
-            throw new InvalidOperationException($"Desktop capture: monitor index {_monitorIndex} not found.");
+            throw new InvalidOperationException(
+                $"Desktop capture: monitor '{_monitor.DeviceName}' (output {_monitor.OutputIndex}) not found.");
         }
 
         using (output)
@@ -353,6 +369,40 @@ public sealed class DesktopFrameCapturer : IFrameSource
             using IDXGIOutput1 output1 = output.QueryInterface<IDXGIOutput1>();
             _duplication = output1.DuplicateOutput(_device);
         }
+    }
+
+    /// <summary>
+    /// The output on the device's adapter. Device-name match wins over the output index so a mode
+    /// change that reorders outputs still reopens the same monitor after ACCESS_LOST or a device reset.
+    /// </summary>
+    private bool TryGetOutput(out IDXGIOutput? output)
+    {
+        output = null;
+        if (_device == null) return false;
+
+        using IDXGIDevice dxgiDevice = _device.QueryInterface<IDXGIDevice>();
+        using IDXGIAdapter adapter = dxgiDevice.GetAdapter();
+        if (!string.IsNullOrEmpty(_monitor.DeviceName))
+        {
+            for (uint i = 0; ; i++)
+            {
+                Result result = adapter.EnumOutputs(i, out IDXGIOutput candidate);
+                if (result.Failure || candidate == null) break;
+                string name = candidate.Description.DeviceName.TrimEnd('\0').Trim();
+                if (string.Equals(name, _monitor.DeviceName, StringComparison.OrdinalIgnoreCase))
+                {
+                    output = candidate;
+                    return true;
+                }
+
+                candidate.Dispose();
+            }
+        }
+
+        Result byIndex = adapter.EnumOutputs((uint)_monitor.OutputIndex, out IDXGIOutput indexed);
+        if (byIndex.Failure || indexed == null) return false;
+        output = indexed;
+        return true;
     }
 
     private void EnsureBuffer()
@@ -383,11 +433,52 @@ public sealed class DesktopFrameCapturer : IFrameSource
         });
     }
 
-    private static ID3D11Device CreateDevice()
-        => D3D11.D3D11CreateDevice(
-            DriverType.Hardware,
-            DeviceCreationFlags.BgraSupport,
-            new[] { FeatureLevel.Level_11_0 });
+    private ID3D11Device CreateDevice()
+    {
+        using IDXGIFactory1 factory = DXGI.CreateDXGIFactory1<IDXGIFactory1>();
+        IDXGIAdapter1? match = null;
+        try
+        {
+            for (uint i = 0; ; i++)
+            {
+                Result result = factory.EnumAdapters1(i, out IDXGIAdapter1 adapter);
+                if (result.Failure || adapter == null) break;
+                if (DxgiOutputCatalog.PackLuid(adapter.Description1.Luid) == _monitor.AdapterLuid)
+                {
+                    match = adapter;
+                    break;
+                }
+
+                adapter.Dispose();
+            }
+
+            if (match == null)
+            {
+                throw new InvalidOperationException(
+                    $"Desktop capture: adapter {_monitor.AdapterLuid:X} is no longer present.");
+            }
+
+            // DriverType must be Unknown when the device is created on a specific adapter.
+            Result created = D3D11.D3D11CreateDevice(
+                match,
+                DriverType.Unknown,
+                DeviceCreationFlags.BgraSupport,
+                new[] { FeatureLevel.Level_11_0 },
+                out ID3D11Device? device);
+            if (created.Failure || device == null)
+            {
+                try { device?.Dispose(); } catch { }
+                throw new InvalidOperationException(
+                    $"Desktop capture: D3D11 device creation failed (0x{created.Code:X8}).");
+            }
+
+            return device;
+        }
+        finally
+        {
+            match?.Dispose();
+        }
+    }
 
     private void LogRecovery(string message)
     {

@@ -405,14 +405,25 @@ public class CaptureSession : IDisposable
         double effectiveFps = _fpsMeter.HasReliableEstimate ? _fpsMeter.Fps : fmt.FrameRate;
         if (effectiveFps <= 1.0) effectiveFps = fmt.FrameRate;
 
+        RationalFrameRate stamped = _fpsMeter.HasReliableEstimate
+            ? _fpsMeter.MeasuredRational
+            : fmt.FrameRateRational;
+        if (!stamped.IsValid) stamped = RationalFrameRate.FromDouble(effectiveFps);
+        double stampedFps = stamped.IsValid ? stamped.FramesPerSecond : effectiveFps;
+
         AppLogger.LogInfo(
             $"Recording A/V clock: reported {fmt.FrameRate:F2} fps, measured {_fpsMeter.Fps:F2} fps, " +
-            $"stamping video at {effectiveFps:F2} fps.");
+            $"stamping video at {stampedFps:F4} fps ({stamped}).");
 
         // The arm order — reset the A/V clock, then initialize the sink, then flip the gate — is now
         // enforced inside RecordingArm.Arm (ADR-0005) rather than being an ordering convention that
         // lived here as a comment. The clock reset happens before the gate can flip, by construction.
-        var effectiveFormat = fmt with { FrameRate = effectiveFps };
+        var effectiveFormat = fmt with
+        {
+            FrameRate = stampedFps,
+            FrameRateNumerator = stamped.Numerator,
+            FrameRateDenominator = stamped.Denominator
+        };
         bool started = _recorder.StartRecording(config, effectiveFormat);
         if (started)
         {

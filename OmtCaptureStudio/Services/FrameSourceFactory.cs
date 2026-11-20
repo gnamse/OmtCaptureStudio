@@ -12,7 +12,7 @@ public static class FrameSourceFactory
     public static IFrameSource Create(CaptureTarget target)
     {
         return target.Kind == CaptureTargetKind.Monitor
-            ? new DesktopFrameCapturer(target.MonitorIndex)
+            ? new DesktopFrameCapturer(target)
             : new WindowFrameCapturer(target.WindowHandle);
     }
 }

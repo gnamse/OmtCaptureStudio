@@ -167,6 +167,9 @@ partial class Program
         TestInMemorySeams();
 
         TestAudioClockResampler();
+        TestFramePacing();
+        TestFfmpegPipes();
+        TestMonitorIdentity();
         TestDesktopCapture();
         TestCaptureTargets();
         TestReceiverServiceTelemetry();
@@ -419,6 +422,9 @@ partial class Program
             case "0":     TestSourceInfoParsing(); break;
             case "0.5":   TestInMemorySeams(); break;
             case "0.6":   TestAudioClockResampler(); break;
+            case "0.705": TestFramePacing(); break;
+            case "0.706": TestFfmpegPipes(); break;
+            case "0.707": TestMonitorIdentity(); break;
             case "0.65":  TestDesktopCapture(); break;
             case "0.7":   TestCaptureTargets(); break;
             case "0.71":  TestReceiverServiceTelemetry(); break;
