@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using OmtCaptureStudio.Models;
+using OmtCaptureStudio.Services;
 
 namespace OmtCaptureStudio.Services.Sources;
 
@@ -14,10 +15,17 @@ public class SyntheticPatternSource : IMediaSource
     private volatile bool _isRunning;
     private readonly int _width = 1920;
     private readonly int _height = 1080;
-    private readonly int _fps = 60;
+    private readonly RationalFrameRate _frameRate;
     private readonly int _sampleRate = 48000;
     private readonly int _channels = 2;
     private bool _disposed;
+
+    public SyntheticPatternSource(RationalFrameRate? frameRate = null)
+    {
+        _frameRate = frameRate is { IsValid: true } explicitRate
+            ? explicitRate
+            : RationalFrameRate.FromInteger(60);
+    }
 
     public string Name => "Local Synthetic Test Pattern";
     public string Address => "internal://test-pattern";
@@ -80,13 +88,11 @@ public class SyntheticPatternSource : IMediaSource
         GCHandle videoHandle = GCHandle.Alloc(videoBuffer, GCHandleType.Pinned);
         IntPtr pVideo = videoHandle.AddrOfPinnedObject();
 
-        int samplesPerFrame = _sampleRate / _fps;
-        int audioSamplesTotal = _channels * samplesPerFrame;
-        float[] audioBuffer = new float[audioSamplesTotal];
+        int maxSamples = Math.Max(1, _frameRate.MaxSamplesPerFrame(_sampleRate));
+        float[] audioBuffer = new float[_channels * maxSamples];
         GCHandle audioHandle = GCHandle.Alloc(audioBuffer, GCHandleType.Pinned);
         IntPtr pAudio = audioHandle.AddrOfPinnedObject();
 
-        long frameIndex = 0;
         double audioPhaseL = 0;
         double audioPhaseR = 0;
         double freqL = 440.0;
@@ -105,8 +111,7 @@ public class SyntheticPatternSource : IMediaSource
         };
 
         var stopwatch = Stopwatch.StartNew();
-        double frameIntervalMs = 1000.0 / _fps;
-        double nextFrameTimeMs = 0;
+        using var pacer = new FramePacer(_frameRate);
 
         DateTime lastTelemetryTime = DateTime.UtcNow;
 
@@ -114,7 +119,10 @@ public class SyntheticPatternSource : IMediaSource
         {
             while (_isRunning)
             {
-                frameIndex++;
+                long frameIndex = pacer.WaitNext();
+                int samplesPerFrame = _frameRate.SamplesForFrame(frameIndex, _sampleRate);
+                if (samplesPerFrame < 1) samplesPerFrame = 1;
+                if (samplesPerFrame > maxSamples) samplesPerFrame = maxSamples;
                 long timestampUs = stopwatch.ElapsedTicks * 1_000_000 / Stopwatch.Frequency;
 
                 // 1. Render SMPTE Color Bars
@@ -144,7 +152,7 @@ public class SyntheticPatternSource : IMediaSource
                     }
                 }
 
-                VideoFrameReceived?.Invoke(pVideo, videoBufferBytes, _width, _height, stride, _fps, timestampUs);
+                VideoFrameReceived?.Invoke(pVideo, videoBufferBytes, _width, _height, stride, _frameRate.FramesPerSecond, timestampUs);
 
                 // 2. Synthesize Stereo Audio Sine Waves
                 for (int s = 0; s < samplesPerFrame; s++)
@@ -174,24 +182,17 @@ public class SyntheticPatternSource : IMediaSource
                         IsConnected = true,
                         Width = _width,
                         Height = _height,
-                        FrameRate = _fps,
+                        FrameRate = _frameRate.FramesPerSecond,
                         VideoFormat = "BGRA 8-bit",
                         AudioChannels = _channels,
                         SampleRate = _sampleRate,
-                        BitrateMbps = (videoBufferBytes * _fps * 8.0) / 1_000_000.0,
+                        BitrateMbps = (videoBufferBytes * _frameRate.FramesPerSecond * 8.0) / 1_000_000.0,
                         VideoFramesReceived = frameIndex,
                         AudioFramesReceived = frameIndex,
                         FramesDropped = 0
                     });
                 }
 
-                // Timing regulation
-                nextFrameTimeMs += frameIntervalMs;
-                double waitMs = nextFrameTimeMs - stopwatch.Elapsed.TotalMilliseconds;
-                if (waitMs > 1)
-                {
-                    Thread.Sleep((int)waitMs);
-                }
             }
         }
         catch (Exception ex)

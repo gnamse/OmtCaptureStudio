@@ -112,6 +112,7 @@ public sealed class SettingsStore
             }
 
             LastOutcome = SettingsLoadOutcome.Loaded;
+            NormalizeBroadcastFrameRate(loaded);
             ValidatePaths(loaded);
             return loaded;
         }
@@ -275,9 +276,13 @@ public sealed class SettingsStore
     /// highlights nothing.
     /// </para>
     /// </summary>
-    public static OperatorSettings FromConfig(RecordingConfig config, string? presetName, AppMode? lastAppMode = null)
+    public static OperatorSettings FromConfig(
+        RecordingConfig config,
+        string? presetName,
+        AppMode? lastAppMode = null,
+        RationalFrameRate? broadcastFrameRate = null)
     {
-        return new OperatorSettings
+        var settings = new OperatorSettings
         {
             Version = OperatorSettings.CurrentVersion,
             LastAppMode = lastAppMode,
@@ -299,6 +304,42 @@ public sealed class SettingsStore
             ScheduledStopUtc = config.ScheduledStopUtc,
             ScheduledStopAfterMinutes = config.ScheduledStopAfterMinutes
         };
+
+        if (broadcastFrameRate is { IsValid: true } rate)
+        {
+            settings.BroadcastFrameRateNumerator = rate.Numerator;
+            settings.BroadcastFrameRateDenominator = rate.Denominator;
+            settings.BroadcastFrameRate = rate.Denominator == 1 ? rate.Numerator : null;
+        }
+
+        return settings;
+    }
+
+    /// <summary>
+    /// Fills the ratio from a legacy integer fps when the file has no ratio yet. A stored ratio
+    /// wins over a stale integer, so 60000/1001 is not rewritten as 60.
+    /// </summary>
+    public static void NormalizeBroadcastFrameRate(OperatorSettings settings)
+    {
+        RationalFrameRate rate = RationalFrameRate.FromStored(
+            settings.BroadcastFrameRate,
+            settings.BroadcastFrameRateNumerator,
+            settings.BroadcastFrameRateDenominator);
+        if (!rate.IsValid) return;
+
+        settings.BroadcastFrameRateNumerator = rate.Numerator;
+        settings.BroadcastFrameRateDenominator = rate.Denominator;
+        settings.BroadcastFrameRate = rate.Denominator == 1 ? rate.Numerator : null;
+    }
+
+    /// <summary>The broadcast rate to arm, or 30/1 when the file never set one.</summary>
+    public static RationalFrameRate ReadBroadcastFrameRate(OperatorSettings settings)
+    {
+        RationalFrameRate rate = RationalFrameRate.FromStored(
+            settings.BroadcastFrameRate,
+            settings.BroadcastFrameRateNumerator,
+            settings.BroadcastFrameRateDenominator);
+        return rate.IsValid ? rate : RationalFrameRate.FromInteger(30);
     }
 
     /// <summary>

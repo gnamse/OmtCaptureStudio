@@ -145,6 +145,33 @@ internal static class NativeMethods
     [DllImport("kernel32.dll", ExactSpelling = true)]
     internal static extern int CloseHandle(IntPtr hObject);
 
+    /// <summary><c>CREATE_WAITABLE_TIMER_HIGH_RESOLUTION</c>. Falls back to a normal timer when the OS rejects it.</summary>
+    internal const uint CreateWaitableTimerHighResolution = 0x00000002;
+
+    /// <summary><c>TIMER_MODIFY_STATE</c>, the right needed to arm a waitable timer.</summary>
+    internal const uint TimerModifyState = 0x00000002;
+
+    /// <summary><c>SYNCHRONIZE</c>, the right needed to wait on the timer.</summary>
+    internal const uint Synchronize = 0x00100000;
+
+    internal const uint InfiniteWait = 0xFFFFFFFFu;
+
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    internal static extern IntPtr CreateWaitableTimerExW(
+        IntPtr lpTimerAttributes,
+        IntPtr lpTimerName,
+        uint dwFlags,
+        uint dwDesiredAccess);
+
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    internal static extern int SetWaitableTimer(
+        IntPtr hTimer,
+        ref long lpDueTime,
+        int lPeriod,
+        IntPtr pfnCompletionRoutine,
+        IntPtr lpArgToCompletionRoutine,
+        int fResume);
+
     // ---------------------------------------------------------------- ole32
 
     [DllImport("ole32.dll", ExactSpelling = true)]

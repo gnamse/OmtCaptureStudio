@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Threading;
+using OmtCaptureStudio.Models;
 
 namespace OmtCaptureStudio.Services;
 
@@ -42,6 +43,12 @@ public sealed class FrameRateMeter
     }
 
     public bool HasReliableEstimate => Interlocked.Read(ref _frames) >= MinFramesForReliable && Fps > 1.0;
+
+    /// <summary>
+    /// The measured rate as a ratio. Known broadcast fractions are recovered (a delivery of ~59.94
+    /// becomes 60000/1001) and a drifted rate is NOT collapsed to a nearby integer.
+    /// </summary>
+    public RationalFrameRate MeasuredRational => RationalFrameRate.FromDouble(Fps);
 
     public void OnVideoFrame()
     {

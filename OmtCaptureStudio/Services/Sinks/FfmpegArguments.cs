@@ -78,8 +78,7 @@ public static class FfmpegArguments
         string? audioPipeName,
         VideoEncoderChoice resolvedEncoder)
     {
-        double fps = format.FrameRate > 0 ? format.FrameRate : 60.0;
-        string fpsStr = fps.ToString("0.###", CultureInfo.InvariantCulture);
+        string fpsStr = FormatRate(format);
 
         var args = new List<string>
         {
@@ -128,6 +127,22 @@ public static class FfmpegArguments
 
         args.Add(outputPath);
         return args.ToArray();
+    }
+
+    /// <summary>
+    /// Rate token for <c>-r</c>. An explicit ratio is passed through (<c>60000/1001</c>), which ffmpeg
+    /// accepts and which does not round 59.94. A legacy format that only stored a double keeps the
+    /// invariant-culture decimal (<c>59.94</c>, never a locale comma).
+    /// </summary>
+    public static string FormatRate(StreamFormat format)
+    {
+        if (format.FrameRateNumerator > 0 && format.FrameRateDenominator > 0)
+        {
+            return $"{format.FrameRateNumerator.ToString(CultureInfo.InvariantCulture)}/{format.FrameRateDenominator.ToString(CultureInfo.InvariantCulture)}";
+        }
+
+        double fps = format.FrameRate > 0 ? format.FrameRate : 60.0;
+        return fps.ToString("0.###", CultureInfo.InvariantCulture);
     }
 
     /// <summary>Splits a codec fragment on whitespace. The fragments this class builds contain no quoted tokens.</summary>

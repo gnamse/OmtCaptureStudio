@@ -22,8 +22,12 @@ namespace OmtCaptureStudio.Services;
 /// </summary>
 public sealed class OperatorSettings
 {
-    /// <summary>Schema version, so a future format change can be migrated rather than guessed at.</summary>
-    public const int CurrentVersion = 1;
+    /// <summary>
+    /// Schema version, so a future format change can be migrated rather than guessed at.
+    /// Version 2 adds the broadcast frame rate. A version 1 file that stored only the legacy integer
+    /// <see cref="BroadcastFrameRate"/> still loads: that integer becomes numerator/1.
+    /// </summary>
+    public const int CurrentVersion = 2;
 
     public int Version { get; set; } = CurrentVersion;
 
@@ -86,6 +90,18 @@ public sealed class OperatorSettings
     /// it is a timestamp only, never an authorisation.
     /// </summary>
     public DateTime? LastUpdateCheckUtc { get; set; }
+
+    /// <summary>
+    /// Legacy integer broadcast fps. Read on load when the ratio fields are absent; an integer N
+    /// migrates to N/1. Not the authority once <see cref="BroadcastFrameRateNumerator"/> is set.
+    /// </summary>
+    public int? BroadcastFrameRate { get; set; }
+
+    /// <summary>Broadcast frame-rate numerator. 59.94 is 60000 with denominator 1001.</summary>
+    public int? BroadcastFrameRateNumerator { get; set; }
+
+    /// <summary>Broadcast frame-rate denominator. An integer rate uses 1.</summary>
+    public int? BroadcastFrameRateDenominator { get; set; }
 }
 
 /// <summary>

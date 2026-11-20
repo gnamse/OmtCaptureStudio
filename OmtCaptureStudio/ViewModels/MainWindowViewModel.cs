@@ -636,6 +636,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
     private SettingsStore? _settingsStore;
 
+    /// <summary>Host-broadcast cadence. 30/1 unless a settings file stored another ratio (or a legacy integer).</summary>
+    private RationalFrameRate _broadcastFrameRate = RationalFrameRate.FromInteger(30);
+
     /// <summary>While true, changes are APPLIED but not written back - restoring must be silent.</summary>
     private bool _isRestoringSettings;
 
@@ -705,6 +708,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             // hand-edited file restores to false rather than to whatever the enum-less bool defaults to.
             UpdatesAutoInstall = restored.UpdatesAutoInstall ?? false;
             _lastUpdateCheckUtc = restored.LastUpdateCheckUtc;
+            _broadcastFrameRate = SettingsStore.ReadBroadcastFrameRate(restored);
 
             SelectedContainerFormat = _operatorDefaults.ContainerFormat;
             SelectedEncoderChoice = _operatorDefaults.EncoderChoice;
@@ -773,7 +777,8 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         _operatorDefaults = BuildRecordingConfigFromUi();
         // FromConfig is a shared mapper whose signature other callers depend on, so the update fields are
         // STAMPED onto the result rather than widening it.
-        OperatorSettings settings = SettingsStore.FromConfig(_operatorDefaults, SelectedRecordingPreset, _lastUsedAppMode);
+        OperatorSettings settings = SettingsStore.FromConfig(
+            _operatorDefaults, SelectedRecordingPreset, _lastUsedAppMode, _broadcastFrameRate);
         settings.UpdatesAutoInstall = UpdatesAutoInstall;
         settings.LastUpdateCheckUtc = _lastUpdateCheckUtc;
         _settingsStore.Save(settings);

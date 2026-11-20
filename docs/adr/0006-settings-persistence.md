@@ -105,3 +105,8 @@ notifications, which is why restoring is explicitly guarded against writing back
 session is caught by the existing recording storage guard (ADR-0004/0005), not here — settings
 persistence is a startup concern, and duplicating that policy would create a second answer to "is this
 destination usable".
+
+**Version 2.** The broadcast frame rate is optional and nullable. A file that only has the legacy
+integer `BroadcastFrameRate` migrates to `numerator/1` on load. A stored numerator/denominator wins
+over a stale integer, so `60000/1001` is not rewritten as 60. Absent means 30/1, the previous
+hard-coded cadence. Restoring still writes nothing.

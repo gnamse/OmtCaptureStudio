@@ -96,7 +96,8 @@ public partial class MainWindowViewModel
                         sourceName: "OmtCaptureStudio_DesktopCapture",
                         fps: 30,
                         audioSource: audioSource,
-                        bindIpAddress: bindIp);
+                        bindIpAddress: bindIp,
+                        frameRate: _broadcastFrameRate);
                     // DIAG-BROADCAST: the generator has no error funnel of its own (no event existed at
                     // all before this pass), so the stall report is subscribed here and marshalled to the
                     // UI thread - the event is raised on the SEND thread.
