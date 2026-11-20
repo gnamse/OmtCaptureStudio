@@ -16,11 +16,10 @@ namespace OmtCaptureStudio.Services.Sinks;
 /// the token the ffmpeg child inherits. An explicit <c>PipeSecurity</c> cannot be combined with
 /// that flag (the runtime throws), so the flag is the restriction.</para>
 ///
-/// <para>The pipe is created through <see cref="NamedPipeServerStreamAcl.Create"/> only so the
-/// server handle can also request <see cref="PipeAccessRights.ReadAttributes"/>. The ordinary
-/// constructor has no access-rights parameter, and <c>GetNamedPipeClientProcessId</c> needs that
-/// right to confirm the client is the ffmpeg process we spawned. Direct calls only — no
-/// reflection — so the construction stays Native AOT safe.</para>
+/// <para><c>CreateNamedPipe</c> rejects <c>FILE_READ_ATTRIBUTES</c> in <c>dwOpenMode</c>
+/// (<c>ERROR_INVALID_PARAMETER</c>, "The parameter is incorrect"), so the server is created with
+/// the ordinary constructor. <c>GetNamedPipeClientProcessId</c> is called on the handle that
+/// constructor returns to the creator. Direct calls only — no reflection — so this stays Native AOT safe.</para>
 /// </summary>
 public static class FfmpegPipeServer
 {
@@ -35,17 +34,14 @@ public static class FfmpegPipeServer
             | PipeOptions.CurrentUserOnly
             | PipeOptions.FirstPipeInstance;
 
-        return NamedPipeServerStreamAcl.Create(
+        return new NamedPipeServerStream(
             pipeName,
             PipeDirection.Out,
             maxNumberOfServerInstances: 1,
             PipeTransmissionMode.Byte,
             options,
-            inBufferSize: bufferBytes,
-            outBufferSize: bufferBytes,
-            pipeSecurity: null,
-            inheritability: HandleInheritability.None,
-            additionalAccessRights: PipeAccessRights.ReadAttributes);
+            bufferBytes,
+            bufferBytes);
     }
 
     public static bool TryGetClientProcessId(NamedPipeServerStream pipe, out int processId)

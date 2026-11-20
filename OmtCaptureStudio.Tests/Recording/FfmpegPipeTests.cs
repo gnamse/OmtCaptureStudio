@@ -28,12 +28,12 @@ partial class Program
                 "The pipe server must request FirstPipeInstance.");
             Expect(helper.Contains("PipeOptions.CurrentUserOnly", StringComparison.Ordinal),
                 "The pipe server must restrict the DACL to the current user via CurrentUserOnly.");
-            Expect(helper.Contains("NamedPipeServerStreamAcl.Create", StringComparison.Ordinal),
-                "The server must be created through NamedPipeServerStreamAcl so ReadAttributes can be requested.");
+            Expect(helper.Contains("new NamedPipeServerStream", StringComparison.Ordinal),
+                "The server must be created with the ordinary constructor. CreateNamedPipe rejects FILE_READ_ATTRIBUTES.");
+            Expect(!helper.Contains("NamedPipeServerStreamAcl.Create", StringComparison.Ordinal),
+                "The ACL factory must not be used to smuggle FILE_READ_ATTRIBUTES into dwOpenMode.");
             Expect(helper.Contains("maxNumberOfServerInstances: 1", StringComparison.Ordinal),
                 "The pipe server must allow only one instance.");
-            Expect(helper.Contains("PipeAccessRights.ReadAttributes", StringComparison.Ordinal),
-                "The server handle needs ReadAttributes so the client process id can be read.");
             Expect(!helper.Contains("new PipeSecurity", StringComparison.Ordinal),
                 "An explicit PipeSecurity cannot be combined with CurrentUserOnly — the runtime throws.");
             Expect(host.Contains("FfmpegPipeServer.Create", StringComparison.Ordinal),
