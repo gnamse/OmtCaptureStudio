@@ -12,15 +12,68 @@ param(
     [switch]$SkipUpload = $false,
     # Optional. When empty, OMT_CODESIGN_THUMBPRINT is used. When both are empty, signing is skipped.
     [string]$SignThumbprint = "",
+    # Opt-in self-signed code signing: create-or-reuse a code-signing certificate in
+    # Cert:\CurrentUser\My and sign with it. Default behaviour is unchanged - without this
+    # switch and without a thumbprint, signing is still skipped.
+    [switch]$SelfSign = $false,
     [string]$TimestampUrl = "http://timestamp.digicert.com"
 )
 
 $ErrorActionPreference = "Stop"
 
+# Subject of the opt-in self-signed certificate. Kept constant on purpose: it is the signer
+# identity users see, and it is how the certificate is found again on later runs.
+$selfSignedSubject = "CN=OMT Capture Studio (self-signed)"
+
+function Get-OrCreateSelfSignedCodeSigningCertificate {
+    # Reuse an existing self-signed code-signing certificate so the thumbprint stays STABLE across
+    # releases. Minting a fresh one per release would change the signer identity every time and
+    # silently invalidate the trust a user granted to the previous certificate.
+    $existing = Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
+        Where-Object { $_.Subject -eq $selfSignedSubject -and $_.HasPrivateKey } |
+        Sort-Object NotAfter -Descending |
+        Select-Object -First 1
+    if ($existing) {
+        Write-Host "   [INFO] Reusing self-signed code-signing certificate $($existing.Thumbprint) (expires $($existing.NotAfter.ToString('yyyy-MM-dd')))." -ForegroundColor DarkGray
+        return $existing.Thumbprint
+    }
+
+    Write-Host "   [INFO] Creating a self-signed code-signing certificate '$selfSignedSubject' in Cert:\CurrentUser\My ..." -ForegroundColor DarkGray
+    $created = New-SelfSignedCertificate `
+        -Type CodeSigningCert `
+        -Subject $selfSignedSubject `
+        -CertStoreLocation "Cert:\CurrentUser\My" `
+        -KeyUsage DigitalSignature `
+        -KeyExportPolicy Exportable `
+        -NotAfter (Get-Date).AddYears(5)
+    if (-not $created) {
+        throw "Failed to create a self-signed code-signing certificate in Cert:\CurrentUser\My."
+    }
+    Write-Host "   [OK] Self-signed code-signing certificate created: $($created.Thumbprint)" -ForegroundColor Green
+    return $created.Thumbprint
+}
+
+# Resolved once per run: the certificate is looked up (or created) a single time, so the log is
+# not repeated per signed file and the thumbprint cannot drift between the exe and the installer.
+$script:resolvedSignThumbprint = $null
+
 function Get-SignThumbprint {
-    if (-not [string]::IsNullOrWhiteSpace($SignThumbprint)) { return $SignThumbprint.Trim() }
+    if ($null -ne $script:resolvedSignThumbprint) { return $script:resolvedSignThumbprint }
+    # Precedence: an explicit thumbprint, then an explicit -SelfSign request, then the ambient
+    # OMT_CODESIGN_THUMBPRINT variable. Nothing specified => empty string => signing is skipped.
+    if (-not [string]::IsNullOrWhiteSpace($SignThumbprint)) {
+        $script:resolvedSignThumbprint = $SignThumbprint.Trim()
+        return $script:resolvedSignThumbprint
+    }
+    if ($SelfSign) {
+        $script:resolvedSignThumbprint = Get-OrCreateSelfSignedCodeSigningCertificate
+        return $script:resolvedSignThumbprint
+    }
     $fromEnv = [Environment]::GetEnvironmentVariable("OMT_CODESIGN_THUMBPRINT")
-    if (-not [string]::IsNullOrWhiteSpace($fromEnv)) { return $fromEnv.Trim() }
+    if (-not [string]::IsNullOrWhiteSpace($fromEnv)) {
+        $script:resolvedSignThumbprint = $fromEnv.Trim()
+        return $script:resolvedSignThumbprint
+    }
     return ""
 }
 
