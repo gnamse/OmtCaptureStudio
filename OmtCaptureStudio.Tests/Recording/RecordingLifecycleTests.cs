@@ -373,17 +373,18 @@ partial class Program
             Thread.Sleep(80);
             now += 6000;
 
+            var poll = new InputHealthPoll(session);
             var started = Stopwatch.StartNew();
-            Task first = session.CheckInputHealthAsync();
+            Task first = poll.Run();
             long returnedMs = started.ElapsedMilliseconds;
             if (returnedMs > 1000)
             {
                 block.Set();
-                throw new Exception($"CheckInputHealthAsync blocked the caller for {returnedMs} ms; finalize must run off the caller.");
+                throw new Exception($"InputHealthPoll.Run blocked the caller for {returnedMs} ms; finalize must run off the caller.");
             }
 
             WaitFor(() => Volatile.Read(ref sink.FinalizeEntered) > 0, "background finalize entered");
-            Task second = session.CheckInputHealthAsync();
+            Task second = poll.Run();
             if (!second.IsCompleted)
             {
                 block.Set();

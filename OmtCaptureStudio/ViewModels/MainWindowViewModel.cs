@@ -35,6 +35,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     public static readonly IBrush RecordStopBrush = StudioPalette.RecordStop;
 
     private readonly CaptureSession _session;
+    private readonly InputHealthPoll _inputHealthPoll;
     private readonly OmtDiscoveryService _discoveryService;
     private readonly DispatcherTimer? _recordUiTimer;
     private readonly DispatcherTimer? _captureTargetsTimer;
@@ -871,6 +872,7 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         UpdateService? updateService = null)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
+        _inputHealthPoll = new InputHealthPoll(_session);
         _discoveryService = discoveryService ?? throw new ArgumentNullException(nameof(discoveryService));
         // Optional so existing construction sites (tests, the parameterless ctor) keep compiling. A
         // standalone instance starts in ModeSelection, which is the ADR-0011 open state anyway.
@@ -1215,13 +1217,15 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     /// Periodic input-health poll driving the ADR-0002 watchdog. The tick itself returns immediately.
     /// Finalize (segment rollover, input-loss, max duration) runs on the thread pool — the same hop
     /// as a manual stop — because <c>FfmpegProcessHost.Stop</c> can join for up to 180s. A tick that
-    /// arrives while that work is still running is dropped inside <see cref="CaptureSession.CheckInputHealthAsync"/>.
+    /// arrives while that work is still running is dropped inside <see cref="InputHealthPoll"/>.
     /// State changes the poll raises are marshalled back onto the dispatcher by the session handlers.
+    /// The hop lives in <see cref="InputHealthPoll"/>, not in <see cref="CaptureSession"/>: the session
+    /// is allowed no thread hop of its own (NET-018).
     /// </summary>
     private void InputHealthTimer_Tick(object? sender, EventArgs e)
     {
         if (_disposed) return;
-        _ = _session.CheckInputHealthAsync();
+        _ = _inputHealthPoll.Run();
     }
 
 

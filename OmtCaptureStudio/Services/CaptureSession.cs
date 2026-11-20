@@ -43,9 +43,6 @@ public class CaptureSession : IDisposable
     private readonly Action _onMaxDurationReached;
     private readonly Action _onScheduledStopReached;
 
-    /// <summary>1 while <see cref="CheckInputHealthAsync"/> is inside <see cref="TakeSupervisor.Tick"/>.</summary>
-    private int _healthTickInFlight;
-
     public StreamFormat CurrentFormat { get; private set; } = StreamFormat.Empty;
     public bool IsConnected => _currentSource != null && _currentSource.IsConnected;
     public string? CurrentAddress => _currentSource?.Address;
@@ -463,41 +460,6 @@ public class CaptureSession : IDisposable
     {
         if (_disposed) return;
         _supervisor.Tick();
-    }
-
-    /// <summary>
-    /// The UI-timer entry. <see cref="TakeSupervisor.Tick"/> finalizes through the arm, and that
-    /// finalize joins the ffmpeg process (up to the 180s stop budget). Running it on the UI thread
-    /// freezes the shell for the whole stop. This hops to the thread pool, the same shape as
-    /// <see cref="StopRecordingAsync"/>, and drops a tick that arrives while one is still in flight
-    /// so two stops cannot overlap.
-    ///
-    /// <para><see cref="CheckInputHealth"/> stays synchronous. The headless suite calls that and
-    /// asserts the segment is finalized before the method returns.</para>
-    /// </summary>
-    public Task CheckInputHealthAsync()
-    {
-        if (_disposed) return Task.CompletedTask;
-        if (Interlocked.CompareExchange(ref _healthTickInFlight, 1, 0) != 0)
-        {
-            return Task.CompletedTask;
-        }
-
-        return Task.Run(() =>
-        {
-            try
-            {
-                if (!_disposed) _supervisor.Tick();
-            }
-            catch (Exception ex)
-            {
-                AppLogger.LogError($"Input-health poll failed: {ex.Message}");
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _healthTickInFlight, 0);
-            }
-        });
     }
 
     public void Dispose()
