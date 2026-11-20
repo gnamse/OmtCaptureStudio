@@ -85,6 +85,11 @@ debounce would add a timer, a flush-on-exit path, and a window in which a crash 
 change, which is the exact scenario this ADR exists for. **Writes are exception-tolerant**: a failed
 write is logged and never interrupts the operator. Restoring settings writes nothing (guarded).
 
+The write is atomic: the JSON is flushed to a uniquely named temp file in the same directory, then
+`File.Replace` swaps it over the existing `settings.json` (or `File.Move` when no file exists yet,
+the first-run case). A crash during the write leaves the previous file intact. A failed replace
+deletes the temp and reports failure; it does not truncate the original.
+
 ## Consequences
 
 **Good.** A crash-and-relaunch costs nothing. Presets become genuinely "one action". A field report

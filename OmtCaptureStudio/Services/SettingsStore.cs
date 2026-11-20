@@ -138,7 +138,9 @@ public sealed class SettingsStore
                 Directory.CreateDirectory(dir);
             }
 
-            File.WriteAllText(
+            // Temp file in the same directory, flush, then Replace (or Move when this is the first
+            // save). A crash mid-write must not leave a half-truncated settings.json (ADR-0006).
+            AtomicFile.WriteAllText(
                 Path,
                 JsonSerializer.Serialize(settings, SettingsJsonContext.Default.OperatorSettings));
             return true;
