@@ -1036,14 +1036,15 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
-    /// ADR-0002 outage transitions. Raised from the UI health tick, so the state change (and the
-    /// banner projection it triggers) already happens on the UI thread.
+    /// ADR-0002 outage transitions. The health tick that raises these runs off the UI thread
+    /// (<see cref="InputHealthTimer_Tick"/>), so the state change is posted back before it projects
+    /// onto observable properties. Headless callers with no dispatcher run the projection inline.
     /// </summary>
-    private void OnSessionInputLost() => _broadcastState.BeginReconnecting();
+    private void OnSessionInputLost() => PostToUIThreadSafely(() => _broadcastState.BeginReconnecting());
 
-    private void OnSessionInputRecovered() => _broadcastState.EndReconnecting();
+    private void OnSessionInputRecovered() => PostToUIThreadSafely(() => _broadcastState.EndReconnecting());
 
-    private void OnSessionInputRecoveryFailed() => _broadcastState.MarkInputLost();
+    private void OnSessionInputRecoveryFailed() => PostToUIThreadSafely(() => _broadcastState.MarkInputLost());
 
     public void SetAudioMonitoring(bool enabled)
     {
@@ -1211,20 +1212,16 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
 
 
     /// <summary>
-    /// Periodic input-health poll driving the ADR-0002 watchdog. On the UI thread, so the state and
-    /// banner mutations it triggers need no extra marshaling.
+    /// Periodic input-health poll driving the ADR-0002 watchdog. The tick itself returns immediately.
+    /// Finalize (segment rollover, input-loss, max duration) runs on the thread pool — the same hop
+    /// as a manual stop — because <c>FfmpegProcessHost.Stop</c> can join for up to 180s. A tick that
+    /// arrives while that work is still running is dropped inside <see cref="CaptureSession.CheckInputHealthAsync"/>.
+    /// State changes the poll raises are marshalled back onto the dispatcher by the session handlers.
     /// </summary>
     private void InputHealthTimer_Tick(object? sender, EventArgs e)
     {
         if (_disposed) return;
-        try
-        {
-            _session.CheckInputHealth();
-        }
-        catch (Exception ex)
-        {
-            AppLogger.LogError($"Input-health poll failed: {ex.Message}");
-        }
+        _ = _session.CheckInputHealthAsync();
     }
 
 
