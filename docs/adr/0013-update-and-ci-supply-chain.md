@@ -39,10 +39,11 @@ Released installers are unsigned today. Refusing them would turn the update chan
    The verifier is P/Invoke only (no `X509Certificate.CreateFromSignedFile`), so it stays Native AOT
    compatible. The headless suite injects the verdict; it does not call WinVerifyTrust.
 
-3. **CI artifacts are pinned.** `scripts/ci-artifact-checksums.txt` holds the SHA-256 of the default
-   portable zip (`v1.0.0.25`). Provision verifies the download before extract. A URL with no pin is
-   refused unless `CI_PREREQ_ARCHIVE_SHA256`, `CI_NATIVE_PAYLOAD_SHA256`, or `CI_FFMPEG_SHA256` is
-   set, and an override that disagrees with a pin fails.
+3. **CI artifacts are pinned.** `scripts/ci-artifact-checksums.txt` holds the SHA-256 of each
+   portable zip provision is known to download: the workflow fallback (`v1.0.0.25`) and the zip the
+   repository secret currently selects (`v1.0.0.24`). Provision verifies the download before extract.
+   A URL with no pin is refused unless `CI_PREREQ_ARCHIVE_SHA256`, `CI_NATIVE_PAYLOAD_SHA256`, or
+   `CI_FFMPEG_SHA256` is set, and an override that disagrees with a pin fails.
 
 4. **GitHub Actions are pinned to commit SHAs** (`actions/checkout` v4.4.0, `actions/setup-dotnet`
    v4.3.1), the commits the `v4` tags resolved to when this decision was made.
