@@ -247,9 +247,16 @@ public sealed class RecordingArm : IDisposable
                 // Segment 1 uses the take's timestamped base name; later segments suffix the same stem
                 // with _partNN so a post-outage gap is a named discontinuity, never an invisible stitch.
                 bool startNewTake = isNewTake || _takeBasePath == null;
+                DateTime namedAt = DateTime.Now;
+                string takeFile = RecordingFileNames.TakeFileName(config.FilenamePrefix, namedAt, ext);
                 string takeBasePath = startNewTake
-                    ? Path.Combine(config.OutputDirectory, $"{config.FilenamePrefix}_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}{ext}")
+                    ? Path.Combine(config.OutputDirectory, takeFile)
                     : _takeBasePath!;
+                if (startNewTake && !IsInsideDirectory(config.OutputDirectory, takeBasePath))
+                {
+                    RecordingError?.Invoke("Cannot record: the file name is not inside the destination folder.");
+                    return false;
+                }
                 int segmentIndex = startNewTake ? 1 : _segmentIndex + 1;
 
                 string candidatePath = RecordingSegments.SegmentFilePath(takeBasePath, segmentIndex);
@@ -468,6 +475,31 @@ public sealed class RecordingArm : IDisposable
     }
 
     /// <summary>Reads a sink property that may itself throw once the transport is dead.</summary>
+    /// <summary>
+    /// True when <paramref name="filePath"/> is the destination directory or a file inside it.
+    /// Compared after <see cref="Path.GetFullPath"/> so a prefix that survived sanitising still
+    /// cannot walk out via a weird combine.
+    /// </summary>
+    private static bool IsInsideDirectory(string directory, string filePath)
+    {
+        try
+        {
+            string root = Path.GetFullPath(directory);
+            string full = Path.GetFullPath(filePath);
+            if (!root.EndsWith(Path.DirectorySeparatorChar) && !root.EndsWith(Path.AltDirectorySeparatorChar))
+            {
+                root += Path.DirectorySeparatorChar;
+            }
+
+            return full.StartsWith(root, StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(Path.GetDirectoryName(full), Path.GetFullPath(directory), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     private static string Snapshot(Func<string> read, string fallback)
     {
         try { return read() ?? fallback; } catch { return fallback; }

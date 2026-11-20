@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using OmtCaptureStudio.Models;
 
 namespace OmtCaptureStudio.Services.Sinks;
@@ -61,4 +63,84 @@ public static class FfmpegArguments
     /// </summary>
     public static VideoEncoderChoice Resolve(VideoEncoderChoice encoder, Func<VideoEncoderChoice> detectHardware) =>
         encoder == VideoEncoderChoice.AutoHardware ? detectHardware() : encoder;
+
+    /// <summary>
+    /// The full ffmpeg argument vector for one take, one element per argv token. The output path is
+    /// the final element and is NOT quoted: <see cref="System.Diagnostics.ProcessStartInfo.ArgumentList"/>
+    /// passes it through as a single argument, so a space or a quote in the path cannot break out into
+    /// another flag. Callers must not also set <c>ProcessStartInfo.Arguments</c>.
+    /// </summary>
+    public static string[] BuildArgumentList(
+        RecordingConfig config,
+        StreamFormat format,
+        string outputPath,
+        string videoPipeName,
+        string? audioPipeName,
+        VideoEncoderChoice resolvedEncoder)
+    {
+        double fps = format.FrameRate > 0 ? format.FrameRate : 60.0;
+        string fpsStr = fps.ToString("0.###", CultureInfo.InvariantCulture);
+
+        var args = new List<string>
+        {
+            "-nostdin", "-y",
+            "-thread_queue_size", "128",
+            "-f", "rawvideo",
+            "-vcodec", "rawvideo",
+            "-pix_fmt", "bgra",
+            "-s", $"{format.Width}x{format.Height}",
+            "-r", fpsStr,
+            "-i", $@"\\.\pipe\{videoPipeName}"
+        };
+
+        if (!string.IsNullOrEmpty(audioPipeName))
+        {
+            args.Add("-thread_queue_size");
+            args.Add("512");
+            args.Add("-f");
+            args.Add("f32le");
+            args.Add("-ar");
+            args.Add(format.SampleRate.ToString(CultureInfo.InvariantCulture));
+            args.Add("-ac");
+            args.Add(format.Channels.ToString(CultureInfo.InvariantCulture));
+            args.Add("-i");
+            args.Add($@"\\.\pipe\{audioPipeName}");
+        }
+
+        args.Add("-max_interleave_delta");
+        args.Add("5000000");
+        AddTokens(args, VideoCodecArguments(resolvedEncoder, config.Quality));
+
+        if (!string.IsNullOrEmpty(audioPipeName))
+        {
+            AddTokens(args, AudioCodecArguments(config.ContainerFormat, resolvedEncoder));
+        }
+        else
+        {
+            args.Add("-an");
+        }
+
+        if (config.ContainerFormat is OutputContainerFormat.MP4 or OutputContainerFormat.MOV)
+        {
+            args.Add("-movflags");
+            args.Add("+frag_keyframe+empty_moov");
+        }
+
+        args.Add(outputPath);
+        return args.ToArray();
+    }
+
+    /// <summary>Splits a codec fragment on whitespace. The fragments this class builds contain no quoted tokens.</summary>
+    private static void AddTokens(List<string> args, string fragment)
+    {
+        int i = 0;
+        while (i < fragment.Length)
+        {
+            while (i < fragment.Length && char.IsWhiteSpace(fragment[i])) i++;
+            if (i >= fragment.Length) break;
+            int start = i;
+            while (i < fragment.Length && !char.IsWhiteSpace(fragment[i])) i++;
+            args.Add(fragment.Substring(start, i - start));
+        }
+    }
 }

@@ -210,7 +210,9 @@ public sealed class SettingsStore
 
         if (!string.IsNullOrWhiteSpace(settings.FilenamePrefix))
         {
-            config.FilenamePrefix = settings.FilenamePrefix!;
+            // A bad stem falls back to the default rather than reaching the ffmpeg command line.
+            // The arm sanitises again at use time; this is the load-time half.
+            config.FilenamePrefix = RecordingFileNames.SanitizePrefix(settings.FilenamePrefix);
         }
 
         if (settings.InputLossThresholdSeconds is { } loss && loss > 0)

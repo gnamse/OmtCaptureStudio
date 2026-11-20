@@ -1,7 +1,6 @@
 using System;
 using System.Buffers;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
 using System.Text;
@@ -123,42 +122,20 @@ public class FfmpegProcessHost : IDisposable
             _audioPipeConnectTask = _audioPipe.WaitForConnectionAsync();
         }
 
-        double fps = format.FrameRate > 0 ? format.FrameRate : 60.0;
-        string fpsStr = fps.ToString("0.###", CultureInfo.InvariantCulture);
-
         // Resolve AutoHardware first (via the injectable detector), then hand the CONCRETE encoder to the
         // pure argv table. The table never consults the registry, so it is a testable matrix (NET-004 AC3).
+        // MP4/MOV are fragmented (-frag_keyframe+empty_moov) instead of a single moov-at-end (faststart):
+        // a non-fragmented MP4 rewrites a multi-GB moov only at Stop, and a kill mid-take leaves the file
+        // unplayable. Fragmented output writes moof/mdat incrementally. MKV/TS are left untouched.
+        // The output path is one ArgumentList entry, never a quoted substring of a single Arguments string.
         ResolvedEncoder = FfmpegArguments.Resolve(config.EncoderChoice, _detectHardware);
-        string vCodecArgs = FfmpegArguments.VideoCodecArguments(ResolvedEncoder, config.Quality);
-
-        string aInputArgs = "";
-        string aCodecArgs = "-an ";
-
-        if (hasAudio)
-        {
-            aInputArgs = $"-thread_queue_size 512 -f f32le -ar {format.SampleRate} -ac {format.Channels} -i \\\\.\\pipe\\{audioPipeName} ";
-            aCodecArgs = FfmpegArguments.AudioCodecArguments(config.ContainerFormat, ResolvedEncoder);
-        }
-
-        // MP4/MOV are fragmented (-frag_keyframe+empty_moov) instead of a
-        // single moov-at-end (faststart). Rationale: a non-fragmented MP4
-        // streams mdat first and rewrites a multi-GB moov/index only at Stop,
-        // which (a) blows the finalize time budget on slow disks and (b) makes
-        // the whole file 100% unplayable if FFmpeg is killed/crashes mid-take.
-        // Fragmented output writes playable moof/mdat incrementally, so a mid-
-        // session crash still leaves a salvageable file and Stop finalizes in
-        // ~O(1). No faststart needed: the index is already online per fragment.
-        // MKV/TS are already crash-tolerant and are left untouched.
-        string containerFlags = (config.ContainerFormat == OutputContainerFormat.MP4 || config.ContainerFormat == OutputContainerFormat.MOV)
-            ? "-movflags +frag_keyframe+empty_moov "
-            : "";
-
-        string args = $"-nostdin -y " +
-            $"-thread_queue_size 128 " +
-            $"-f rawvideo -vcodec rawvideo -pix_fmt bgra -s {format.Width}x{format.Height} -r {fpsStr} -i \\\\.\\pipe\\{videoPipeName} " +
-            aInputArgs +
-            $"-max_interleave_delta 5000000 " +
-            $"{vCodecArgs} {aCodecArgs}{containerFlags}\"{_outputPath}\"";
+        string[] ffmpegArgs = FfmpegArguments.BuildArgumentList(
+            config,
+            format,
+            _outputPath ?? string.Empty,
+            videoPipeName,
+            hasAudio ? audioPipeName : null,
+            ResolvedEncoder);
 
         // R25 (SEC-04b): this used to fall back to the BARE NAME "ffmpeg", which Windows resolves through
         // the current directory and PATH - the textbook uncontrolled-search-path sink (CWE-427). Any
@@ -182,17 +159,22 @@ public class FfmpegProcessHost : IDisposable
                 $"FFmpeg resolution produced a non-absolute path ('{ffmpegBinary}'). Refusing to start a search-resolved process.");
         }
 
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = ffmpegBinary,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = false
+        };
+        foreach (string arg in ffmpegArgs)
+        {
+            startInfo.ArgumentList.Add(arg);
+        }
+
         _ffmpegProcess = new Process
         {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = ffmpegBinary,
-                Arguments = args,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardError = true,
-                RedirectStandardOutput = false
-            },
+            StartInfo = startInfo,
             EnableRaisingEvents = true
         };
 
