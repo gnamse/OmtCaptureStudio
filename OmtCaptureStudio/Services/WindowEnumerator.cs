@@ -1,5 +1,5 @@
-using System.Runtime.InteropServices;
 using System.Text;
+using OmtCaptureStudio.Interop;
 using OmtCaptureStudio.Models;
 
 namespace OmtCaptureStudio.Services;
@@ -27,10 +27,10 @@ public static class WindowEnumerator
         {
             var results = new List<CaptureTarget>();
             _results = results;
-            _currentProcessId = GetCurrentProcessId();
+            _currentProcessId = NativeMethods.GetCurrentProcessId();
             try
             {
-                EnumWindows(Callback, IntPtr.Zero);
+                NativeMethods.EnumWindows(Callback, IntPtr.Zero);
             }
             finally
             {
@@ -45,20 +45,20 @@ public static class WindowEnumerator
         var results = _results;
         if (results == null) return false;
 
-        if (!IsWindowVisible(hWnd)) return true;
-        if (IsIconic(hWnd)) return true;
-        if (GetWindowTextLengthW(hWnd) == 0) return true;
-        if ((GetWindowLong(hWnd, GwlExStyle) & WsExToolWindow) != 0) return true;
+        if (!NativeMethods.IsWindowVisible(hWnd)) return true;
+        if (NativeMethods.IsIconic(hWnd)) return true;
+        if (NativeMethods.GetWindowTextLengthW(hWnd) == 0) return true;
+        if ((NativeMethods.GetWindowLong(hWnd, GwlExStyle) & WsExToolWindow) != 0) return true;
 
-        if (!GetWindowRect(hWnd, out RECT rect)) return true;
+        if (!NativeMethods.GetWindowRect(hWnd, out NativeMethods.Rect rect)) return true;
         if (rect.Right - rect.Left <= 0 || rect.Bottom - rect.Top <= 0) return true;
 
-        GetWindowThreadProcessId(hWnd, out uint pid);
+        NativeMethods.GetWindowThreadProcessId(hWnd, out uint pid);
         if (pid == _currentProcessId) return true;
 
-        int length = GetWindowTextLengthW(hWnd);
+        int length = NativeMethods.GetWindowTextLengthW(hWnd);
         var sb = new StringBuilder(length + 1);
-        GetWindowTextW(hWnd, sb, length + 1);
+        NativeMethods.GetWindowTextW(hWnd, sb, length + 1);
 
         results.Add(new CaptureTarget
         {
@@ -68,43 +68,5 @@ public static class WindowEnumerator
         });
 
         return true;
-    }
-
-    [DllImport("user32.dll")]
-    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    private static extern bool IsWindowVisible(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    private static extern bool IsIconic(IntPtr hWnd);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetWindowTextLengthW(IntPtr hWnd);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
-    [DllImport("user32.dll")]
-    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-
-    [DllImport("user32.dll")]
-    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-    [DllImport("kernel32.dll")]
-    private static extern uint GetCurrentProcessId();
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT
-    {
-        public int Left;
-        public int Top;
-        public int Right;
-        public int Bottom;
     }
 }

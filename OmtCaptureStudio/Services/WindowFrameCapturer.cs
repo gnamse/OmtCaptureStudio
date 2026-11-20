@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using OmtCaptureStudio.Interop;
 
 namespace OmtCaptureStudio.Services;
 
@@ -30,7 +31,7 @@ public sealed class WindowFrameCapturer : IFrameSource
 
     public WindowFrameCapturer(IntPtr hwnd)
     {
-        if (!GetWindowRect(hwnd, out RECT rect))
+        if (!NativeMethods.GetWindowRect(hwnd, out NativeMethods.Rect rect))
         {
             throw new InvalidOperationException("Window capture: GetWindowRect failed.");
         }
@@ -74,84 +75,57 @@ public sealed class WindowFrameCapturer : IFrameSource
 
     private unsafe bool CaptureViaPrintWindow()
     {
-        IntPtr hdcScreen = IntPtr.Zero, hdcMem = IntPtr.Zero, hbm = IntPtr.Zero, old = IntPtr.Zero;
-        try
+        if (!GdiSurface.TryCreate(Width, Height, out GdiSurface surface)) return false;
+        using (surface)
         {
-            hdcScreen = GetDC(IntPtr.Zero);
-            if (hdcScreen == IntPtr.Zero) return false;
-
-            hdcMem = CreateCompatibleDC(hdcScreen);
-            hbm = CreateCompatibleBitmap(hdcScreen, Width, Height);
-            if (hdcMem == IntPtr.Zero || hbm == IntPtr.Zero) return false;
-
-            old = SelectObject(hdcMem, hbm);
-
-            bool ok = PrintWindow(_hwnd, hdcMem, PwRenderFullContent);
+            bool ok = NativeMethods.PrintWindow(_hwnd, surface.MemoryHandle, NativeMethods.PwRenderFullContent);
             if (!ok)
             {
                 // Some windows refuse PW_RENDERFULLCONTENT; retry with no flags.
-                ok = PrintWindow(_hwnd, hdcMem, 0);
+                ok = NativeMethods.PrintWindow(_hwnd, surface.MemoryHandle, 0);
             }
             if (!ok) return false;
 
-            return ReadDibIntoBuffer(hdcMem, hbm);
-        }
-        finally
-        {
-            if (old != IntPtr.Zero && hdcMem != IntPtr.Zero) SelectObject(hdcMem, old);
-            if (hbm != IntPtr.Zero) DeleteObject(hbm);
-            if (hdcMem != IntPtr.Zero) DeleteDC(hdcMem);
-            if (hdcScreen != IntPtr.Zero) ReleaseDC(IntPtr.Zero, hdcScreen);
+            return ReadDibIntoBuffer(surface.MemoryHandle, surface.BitmapHandle);
         }
     }
 
     private unsafe bool CaptureViaScreenRegion()
     {
-        if (!IsWindowVisible(_hwnd)) return false;
-        if (!GetWindowRect(_hwnd, out RECT rect)) return false;
+        if (!NativeMethods.IsWindowVisible(_hwnd)) return false;
+        if (!NativeMethods.GetWindowRect(_hwnd, out NativeMethods.Rect rect)) return false;
         if (rect.Right - rect.Left <= 0 || rect.Bottom - rect.Top <= 0) return false;
 
-        IntPtr hdcScreen = IntPtr.Zero, hdcMem = IntPtr.Zero, hbm = IntPtr.Zero, old = IntPtr.Zero;
-        try
+        if (!GdiSurface.TryCreate(Width, Height, out GdiSurface surface)) return false;
+        using (surface)
         {
-            hdcScreen = GetDC(IntPtr.Zero);
-            if (hdcScreen == IntPtr.Zero) return false;
-
-            hdcMem = CreateCompatibleDC(hdcScreen);
-            hbm = CreateCompatibleBitmap(hdcScreen, Width, Height);
-            if (hdcMem == IntPtr.Zero || hbm == IntPtr.Zero) return false;
-
-            old = SelectObject(hdcMem, hbm);
-
             // Copy the window's screen region (GDI clips anything off-screen). CAPTUREBLT
             // includes layered windows; the destination bitmap is buffer-sized so the
             // readback stride always matches the pinned buffer.
-            if (!BitBlt(hdcMem, 0, 0, Width, Height, hdcScreen, rect.Left, rect.Top, SrcCopy | CaptureBlt))
+            if (!NativeMethods.BitBlt(
+                    surface.MemoryHandle, 0, 0, Width, Height,
+                    surface.ScreenHandle, rect.Left, rect.Top,
+                    NativeMethods.SrcCopy | NativeMethods.CaptureBlt))
+            {
                 return false;
+            }
 
-            return ReadDibIntoBuffer(hdcMem, hbm);
-        }
-        finally
-        {
-            if (old != IntPtr.Zero && hdcMem != IntPtr.Zero) SelectObject(hdcMem, old);
-            if (hbm != IntPtr.Zero) DeleteObject(hbm);
-            if (hdcMem != IntPtr.Zero) DeleteDC(hdcMem);
-            if (hdcScreen != IntPtr.Zero) ReleaseDC(IntPtr.Zero, hdcScreen);
+            return ReadDibIntoBuffer(surface.MemoryHandle, surface.BitmapHandle);
         }
     }
 
     /// <summary>Reads an in-memory 32bpp DIB into the pinned buffer and forces opaque alpha.</summary>
     private unsafe bool ReadDibIntoBuffer(IntPtr hdcMem, IntPtr hbm)
     {
-        var bmi = new BITMAPINFO();
-        bmi.Header.Size = (uint)sizeof(BitmapInfoHeader);
+        var bmi = new NativeMethods.BitmapInfo();
+        bmi.Header.Size = (uint)sizeof(NativeMethods.BitmapInfoHeader);
         bmi.Header.Width = Width;
         bmi.Header.Height = -Height; // negative => top-down
         bmi.Header.Planes = 1;
         bmi.Header.BitCount = 32;
-        bmi.Header.Compression = BiRgb;
+        bmi.Header.Compression = NativeMethods.BiRgb;
 
-        if (GetDIBits(hdcMem, hbm, 0, (uint)Height, BufferPtr, ref bmi, DibRgbColors) == 0)
+        if (NativeMethods.GetDIBits(hdcMem, hbm, 0, (uint)Height, BufferPtr, ref bmi, NativeMethods.DibRgbColors) == 0)
             return false;
 
         // GDI 32bpp DIBs are BGRX; make alpha opaque for OMT BGRA.
@@ -192,77 +166,4 @@ public sealed class WindowFrameCapturer : IFrameSource
     }
 
     private const byte BlackThreshold = 8;
-    private const uint PwRenderFullContent = 0x00000002;
-    private const uint DibRgbColors = 0;
-    private const uint BiRgb = 0;
-    private const uint SrcCopy = 0x00CC0020;
-    private const uint CaptureBlt = 0x40000000;
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr GetDC(IntPtr hWnd);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool IsWindowVisible(IntPtr hWnd);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern bool BitBlt(IntPtr hdcDest, int x, int y, int w, int h, IntPtr hdcSrc, int x1, int y1, uint rop);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int w, int h);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern bool DeleteDC(IntPtr hdc);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern bool DeleteObject(IntPtr h);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern int GetDIBits(IntPtr hdc, IntPtr hbm, uint start, uint lines, IntPtr bits, ref BITMAPINFO bmi, uint usage);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT
-    {
-        public int Left;
-        public int Top;
-        public int Right;
-        public int Bottom;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BitmapInfoHeader
-    {
-        public uint Size;
-        public int Width;
-        public int Height;
-        public ushort Planes;
-        public ushort BitCount;
-        public uint Compression;
-        public uint SizeImage;
-        public int XPelsPerMeter;
-        public int YPelsPerMeter;
-        public uint ClrUsed;
-        public uint ClrImportant;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BITMAPINFO
-    {
-        public BitmapInfoHeader Header;
-        public uint Colors;
-    }
 }

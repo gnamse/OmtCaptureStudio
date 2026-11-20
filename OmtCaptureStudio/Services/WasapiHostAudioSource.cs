@@ -2,6 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+using OmtCaptureStudio.Interop;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services.Audio;
 
@@ -265,7 +266,7 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
 
     private void CaptureThreadMain()
     {
-        int coInitHr = CoInitializeEx(IntPtr.Zero, CoInitMultithreaded);
+        int coInitHr = NativeMethods.CoInitializeEx(IntPtr.Zero, CoInitMultithreaded);
         bool shouldUninit = coInitHr >= 0;
 
         IntPtr pEnumerator = IntPtr.Zero;
@@ -292,7 +293,7 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
             {
                 Guid clsidEnumerator = ClsidMMDeviceEnumerator;
                 Guid iidEnumerator = IidIMMDeviceEnumerator;
-                int hr = CoCreateInstance(&clsidEnumerator, IntPtr.Zero, ClsctxAll, &iidEnumerator, &pEnumerator);
+                int hr = NativeMethods.CoCreateInstance(&clsidEnumerator, IntPtr.Zero, ClsctxAll, &iidEnumerator, &pEnumerator);
                 if (hr < 0 || pEnumerator == IntPtr.Zero) return;
 
                 int dataFlow = _isLoopback ? ERender : ECapture;
@@ -429,7 +430,7 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
             }
             if (pMixFormat != null)
             {
-                CoTaskMemFree((IntPtr)pMixFormat);
+                NativeMethods.CoTaskMemFree((IntPtr)pMixFormat);
             }
             ReleaseComObject(pCaptureClient);
             ReleaseComObject(pAudioClient);
@@ -438,7 +439,7 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
 
             if (shouldUninit)
             {
-                CoUninitialize();
+                NativeMethods.CoUninitialize();
             }
         }
     }
@@ -557,7 +558,7 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
 
         try
         {
-            IntPtr hEvent = CreateEventW(IntPtr.Zero, bManualReset: 1, bInitialState: 0, IntPtr.Zero);
+            IntPtr hEvent = NativeMethods.CreateEventW(IntPtr.Zero, bManualReset: 1, bInitialState: 0, IntPtr.Zero);
             if (hEvent == IntPtr.Zero) return IntPtr.Zero;
 
             handler = (CompletionHandlerNative*)NativeMemory.AllocZeroed((nuint)sizeof(CompletionHandlerNative));
@@ -582,10 +583,10 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
             };
 
             Guid iidAudioClient = IidIAudioClient;
-            int hr = ActivateAudioInterfaceAsync(
+            int hr = NativeMethods.ActivateAudioInterfaceAsync(
                 "VAD\\Process_Loopback",
                 ref iidAudioClient,
-                ref propVariant,
+                (IntPtr)(&propVariant),
                 (IntPtr)handler,
                 out operation);
 
@@ -594,7 +595,7 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
                 return IntPtr.Zero;
             }
 
-            uint waitRes = WaitForSingleObject(hEvent, 1500);
+            uint waitRes = NativeMethods.WaitForSingleObject(hEvent, 1500);
             if (waitRes != 0 || handler->ActivateHr < 0 || handler->AudioClientPtr == IntPtr.Zero)
             {
                 return IntPtr.Zero;
@@ -703,7 +704,7 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
         {
             if (self->CompletionEvent != IntPtr.Zero)
             {
-                CloseHandle(self->CompletionEvent);
+                NativeMethods.CloseHandle(self->CompletionEvent);
                 self->CompletionEvent = IntPtr.Zero;
             }
             if (self->AudioClientPtr != IntPtr.Zero)
@@ -732,7 +733,7 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
 
         if (self->CompletionEvent != IntPtr.Zero)
         {
-            SetEvent(self->CompletionEvent);
+            NativeMethods.SetEvent(self->CompletionEvent);
         }
         return 0; // S_OK
     }
@@ -896,37 +897,6 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
         return fn(pCaptureClient, pNumFramesInNextPacket);
     }
 
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern int CoInitializeEx(IntPtr pvReserved, int dwCoInit);
-
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern void CoUninitialize();
-
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern int CoCreateInstance(Guid* rclsid, IntPtr pUnkOuter, uint dwClsContext, Guid* riid, IntPtr* ppv);
-
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern void CoTaskMemFree(IntPtr pv);
-
-    [DllImport("Mmdevapi.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
-    private static extern int ActivateAudioInterfaceAsync(
-        [MarshalAs(UnmanagedType.LPWStr)] string deviceInterfacePath,
-        ref Guid riid,
-        ref PropVariantBlob activationParams,
-        IntPtr completionHandler,
-        out IntPtr activationOperation);
-
-    [DllImport("kernel32.dll", ExactSpelling = true)]
-    private static extern IntPtr CreateEventW(IntPtr lpEventAttributes, int bManualReset, int bInitialState, IntPtr lpName);
-
-    [DllImport("kernel32.dll", ExactSpelling = true)]
-    private static extern int SetEvent(IntPtr hEvent);
-
-    [DllImport("kernel32.dll", ExactSpelling = true)]
-    private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
-
-    [DllImport("kernel32.dll", ExactSpelling = true)]
-    private static extern int CloseHandle(IntPtr hObject);
 }
 
 /// <summary>
@@ -998,7 +968,7 @@ public static unsafe class AudioDeviceEnumerator
         string prefix,
         System.Collections.Generic.List<HostAudioCaptureOption> targetList)
     {
-        int coInitHr = CoInitializeEx(IntPtr.Zero, CoInitMultithreaded);
+        int coInitHr = NativeMethods.CoInitializeEx(IntPtr.Zero, CoInitMultithreaded);
         bool shouldUninit = coInitHr >= 0;
 
         IntPtr pEnumerator = IntPtr.Zero;
@@ -1008,7 +978,7 @@ public static unsafe class AudioDeviceEnumerator
         {
             Guid clsid = ClsidMMDeviceEnumerator;
             Guid iid = IidIMMDeviceEnumerator;
-            int hr = CoCreateInstance(&clsid, IntPtr.Zero, ClsctxAll, &iid, &pEnumerator);
+            int hr = NativeMethods.CoCreateInstance(&clsid, IntPtr.Zero, ClsctxAll, &iid, &pEnumerator);
             if (hr < 0 || pEnumerator == IntPtr.Zero) return;
 
             void** enumVtbl = *(void***)pEnumerator;
@@ -1057,7 +1027,7 @@ public static unsafe class AudioDeviceEnumerator
             ReleaseCom(pEnumerator);
             if (shouldUninit)
             {
-                CoUninitialize();
+                NativeMethods.CoUninitialize();
             }
         }
     }
@@ -1075,7 +1045,7 @@ public static unsafe class AudioDeviceEnumerator
         }
         finally
         {
-            CoTaskMemFree(pStr);
+            NativeMethods.CoTaskMemFree(pStr);
         }
     }
 
@@ -1106,7 +1076,7 @@ public static unsafe class AudioDeviceEnumerator
             }
             finally
             {
-                PropVariantClear(&pv);
+                NativeMethods.PropVariantClear((IntPtr)(&pv));
             }
         }
         finally
@@ -1125,18 +1095,4 @@ public static unsafe class AudioDeviceEnumerator
         }
     }
 
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern int CoInitializeEx(IntPtr pvReserved, int dwCoInit);
-
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern void CoUninitialize();
-
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern int CoCreateInstance(Guid* rclsid, IntPtr pUnkOuter, uint dwClsContext, Guid* riid, IntPtr* ppv);
-
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern void CoTaskMemFree(IntPtr pv);
-
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern int PropVariantClear(PropVariantValue* pvar);
 }

@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using OmtCaptureStudio.Interop;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
 
@@ -55,7 +56,7 @@ public readonly record struct CrashState(
 /// may throw, and a dump failure must never mask the original exception. All paths are wrapped, and
 /// <see cref="HandleException"/> returns the report path (or null) instead of throwing.</para>
 ///
-/// <para><b>AOT-safe.</b> One plain <c>DllImport</c>, no reflection, no dynamic code.</para>
+/// <para><b>AOT-safe.</b> The minidump import lives in <c>NativeMethods</c> (System32 search path), no reflection, no dynamic code.</para>
 /// </summary>
 public static class CrashForensics
 {
@@ -531,7 +532,7 @@ public static class CrashForensics
             string path = Path.Combine(_dumpDir, $"crash-{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.dmp");
             using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
 
-            bool written = MiniDumpWriteDump(
+            bool written = NativeMethods.MiniDumpWriteDump(
                 Process.GetCurrentProcess().Handle,
                 (uint)Environment.ProcessId,
                 stream.SafeFileHandle.DangerousGetHandle(),
@@ -561,14 +562,4 @@ public static class CrashForensics
         try { File.Delete(path); } catch { }
     }
 
-    [DllImport("Dbghelp.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool MiniDumpWriteDump(
-        IntPtr hProcess,
-        uint processId,
-        IntPtr hFile,
-        uint dumpType,
-        IntPtr exceptionParam,
-        IntPtr userStreamParam,
-        IntPtr callbackParam);
 }
