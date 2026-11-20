@@ -440,8 +440,13 @@ partial class Program
             stagingDirectory: () => dlDir,
             signaturePolicy: UpdateSignaturePolicy.AllowUnsigned,
             verifySignature: _ => { verifyCalls++; return default; });
-        Expect(allowUnsigned.TryStartInstall(staged, out _),
-            "With enforcement off, an already-verified installer must still launch.");
+        // The launch gate re-checks the file THIS session verified. A sibling service's staged
+        // path is refused even when signature enforcement is off, so each case stages its own copy.
+        string? allowPath = allowUnsigned.DownloadAndVerifyAsync(
+            allowUnsigned.CheckForUpdateAsync().GetAwaiter().GetResult().Release!).GetAwaiter().GetResult();
+        Expect(allowPath is not null, "Enforcement off must still download and hash-check the installer.");
+        Expect(allowUnsigned.TryStartInstall(allowPath, out string allowDetail),
+            $"With enforcement off, an installer this session verified must still launch; got '{allowDetail}'.");
         Expect(verifyCalls == 0, "WinVerifyTrust must not run unless the owner opted in.");
 
         var pinned = new UpdateSignaturePolicy { Enforce = true, ExpectedPublisher = "Odogwu", ExpectedThumbprint = "ab" };
@@ -454,8 +459,11 @@ partial class Program
             stagingDirectory: () => dlDir,
             signaturePolicy: pinned,
             verifySignature: _ => new AuthenticodeVerdict(true, true, "CN=Odogwu", "AB", "trusted"));
-        Expect(goodSign.TryStartInstall(staged, out _),
-            "A trusted signature whose publisher and thumbprint match must be allowed.");
+        string? goodPath = goodSign.DownloadAndVerifyAsync(
+            goodSign.CheckForUpdateAsync().GetAwaiter().GetResult().Release!).GetAwaiter().GetResult();
+        Expect(goodPath is not null, "A trusted-signature case still hash-checks before the Authenticode gate.");
+        Expect(goodSign.TryStartInstall(goodPath, out string goodDetail),
+            $"A trusted signature whose publisher and thumbprint match must be allowed; got '{goodDetail}'.");
 
         var badSign = new UpdateService(onTransport, currentVersion: () => "1.0.0.22",
             executablePath: () => @"C:\Users\op\AppData\Local\Programs\OMT Capture Studio\OmtCaptureStudio.exe",
@@ -466,7 +474,10 @@ partial class Program
             stagingDirectory: () => dlDir,
             signaturePolicy: pinned,
             verifySignature: _ => new AuthenticodeVerdict(false, false, null, null, "the installer has no Authenticode signature."));
-        Expect(!badSign.TryStartInstall(staged, out string signDetail),
+        string? badPath = badSign.DownloadAndVerifyAsync(
+            badSign.CheckForUpdateAsync().GetAwaiter().GetResult().Release!).GetAwaiter().GetResult();
+        Expect(badPath is not null, "An unsigned installer is still hash-checked; the signature gate is what refuses it.");
+        Expect(!badSign.TryStartInstall(badPath, out string signDetail),
             "Enforcement on must refuse an unsigned installer.");
         Expect(signDetail.Contains("signature", StringComparison.OrdinalIgnoreCase),
             $"The refusal must name the signature; got '{signDetail}'.");
