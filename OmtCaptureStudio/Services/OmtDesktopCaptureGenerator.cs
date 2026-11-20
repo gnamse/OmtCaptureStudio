@@ -28,6 +28,14 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
     /// </summary>
     public const int DefaultFirstFrameTimeoutMs = 10_000;
 
+    /// <summary>
+    /// How long a capture session may stay unhealthy AFTER frames have already arrived before the
+    /// stall alarm fires. A static desktop (DXGI timeout on a live duplication) is not unhealthy and
+    /// does not start this clock. Same generosity as the first-frame window: recreating a duplication
+    /// after a mode change or UAC prompt can take a few seconds.
+    /// </summary>
+    public const int DefaultCaptureStallTimeoutMs = 10_000;
+
     private readonly string _sourceName;
     private readonly int _fps;
     private readonly IFrameSource _frameSource;
@@ -46,6 +54,9 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
 
     /// <summary>The first-frame window; injectable so a headless test does not have to wait 10 s.</summary>
     private readonly int _firstFrameTimeoutMs;
+
+    /// <summary>The post-frame unhealthy window; injectable so a headless test does not have to wait 10 s.</summary>
+    private readonly int _captureStallTimeoutMs;
 
     public bool IsRunning => _isRunning;
 
@@ -89,7 +100,8 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         int fps = 30,
         IHostAudioSource? audioSource = null,
         string? bindIpAddress = null,
-        int firstFrameTimeoutMs = DefaultFirstFrameTimeoutMs)
+        int firstFrameTimeoutMs = DefaultFirstFrameTimeoutMs,
+        int captureStallTimeoutMs = DefaultCaptureStallTimeoutMs)
     {
         _frameSource = frameSource ?? throw new ArgumentNullException(nameof(frameSource));
         _sourceName = sourceName;
@@ -97,6 +109,7 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         _audioSource = audioSource ?? new SilentHostAudioSource();
         _bindIpAddress = string.IsNullOrWhiteSpace(bindIpAddress) ? null : bindIpAddress;
         _firstFrameTimeoutMs = firstFrameTimeoutMs > 0 ? firstFrameTimeoutMs : DefaultFirstFrameTimeoutMs;
+        _captureStallTimeoutMs = captureStallTimeoutMs > 0 ? captureStallTimeoutMs : DefaultCaptureStallTimeoutMs;
     }
 
     /// <summary>
@@ -241,6 +254,27 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
                "sent either, because the send loop skips both streams until the first frame arrives.";
     }
 
+    /// <summary>
+    /// DIAG-BROADCAST: the operator-facing text once frames HAD been flowing and the session then
+    /// went unhealthy (lost duplication that did not recover). Distinct from
+    /// <see cref="BuildNoFramesMessage"/> because audio is still being sent and the last picture is
+    /// still on the wire — it is frozen, not absent.
+    /// </summary>
+    public string BuildSessionStallMessage(IFrameSource capturer)
+    {
+        string provider;
+        try { provider = capturer.GetType().Name; }
+        catch (Exception) { provider = "the capture provider"; }
+
+        string degradation = capturer.IsUsingFallbackCapture
+            ? " (DXGI Desktop Duplication unavailable, using GDI fallback)"
+            : string.Empty;
+
+        return $"Broadcast capture stalled: no fresh frame for {_captureStallTimeoutMs / 1000} s after frames had been flowing. " +
+               $"'{provider}' reports the capture session is unhealthy{degradation}. " +
+               $"The last picture is still being repeated so receivers stay connected to '{_sourceName}', but it is frozen until capture recovers.";
+    }
+
     private void ApplyInterfaceBlockerSocketsLocked(int port, string? allowedIp)
     {
         ReleaseInterfaceBlockerSocketsLocked();
@@ -321,6 +355,8 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         // change when frames go out.
         Stopwatch firstFrameWatch = Stopwatch.StartNew();
         bool stallReported = false;
+        bool sessionStallReported = false;
+        long unhealthySince = -1;
         long frameIndex = 0;
         bool hasFrame = false;
 
@@ -340,10 +376,14 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
                 // Desktop Duplication only yields a frame when the screen changes, so a static
                 // desktop would otherwise starve receivers. Once one real frame is captured,
                 // keep re-broadcasting the latest buffer to hold the stream at the paced rate.
-                if (capturer.TryCaptureFrame())
+                bool fresh = capturer.TryCaptureFrame();
+                bool sessionHealthy = capturer.IsCaptureSessionHealthy;
+                if (fresh)
                 {
                     hasFrame = true;
                     Volatile.Write(ref _hasProducedFrames, 1);
+                    unhealthySince = -1;
+                    sessionStallReported = false;
                 }
                 else if (!hasFrame)
                 {
@@ -361,6 +401,27 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
                     }
 
                     continue; // no frame captured yet
+                }
+                else if (!sessionHealthy)
+                {
+                    // Frames already flowed, then the session died (DXGI access-lost that did not
+                    // recover). A static desktop stays sessionHealthy and does not enter here, so a
+                    // still slide does not raise a false stall. The last buffer is still sent below.
+                    long now = Environment.TickCount64;
+                    if (unhealthySince < 0) unhealthySince = now;
+                    if (!sessionStallReported && now - unhealthySince >= _captureStallTimeoutMs)
+                    {
+                        sessionStallReported = true;
+                        string stalled = BuildSessionStallMessage(capturer);
+                        AppLogger.LogError(stalled);
+                        try { CaptureStalled?.Invoke(stalled); }
+                        catch (Exception ex) { AppLogger.LogError("A CaptureStalled subscriber threw.", ex); }
+                    }
+                }
+                else
+                {
+                    unhealthySince = -1;
+                    sessionStallReported = false;
                 }
 
                 // 1. Send Video Frame
