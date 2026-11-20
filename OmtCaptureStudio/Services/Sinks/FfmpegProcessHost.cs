@@ -92,33 +92,17 @@ public class FfmpegProcessHost : IDisposable
             _ffmpegErrorLog.Clear();
         }
 
-        string pipeSuffix = Guid.NewGuid().ToString("N")[..8];
-        string videoPipeName = $"omt_video_{pipeSuffix}";
-        string audioPipeName = $"omt_audio_{pipeSuffix}";
+        // Full GUID, first instance, current-user ACL. See FfmpegPipeServer.
+        string videoPipeName = FfmpegPipeServer.CreatePipeName("video");
+        string audioPipeName = FfmpegPipeServer.CreatePipeName("audio");
 
-        // Create asynchronous named pipe for high-throughput video (64 MB buffer)
-        _videoPipe = new NamedPipeServerStream(
-            videoPipeName,
-            PipeDirection.Out,
-            1,
-            PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous,
-            1024 * 1024 * 64, // 64 MB buffer
-            1024 * 1024 * 64);
-
+        // Asynchronous named pipe for high-throughput video (64 MB buffer).
+        _videoPipe = FfmpegPipeServer.Create(videoPipeName, 1024 * 1024 * 64);
         _videoPipeConnectTask = _videoPipe.WaitForConnectionAsync();
 
         if (hasAudio)
         {
-            _audioPipe = new NamedPipeServerStream(
-                audioPipeName,
-                PipeDirection.Out,
-                1,
-                PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous,
-                1024 * 1024 * 8,  // 8 MB buffer
-                1024 * 1024 * 8);
-
+            _audioPipe = FfmpegPipeServer.Create(audioPipeName, 1024 * 1024 * 8);
             _audioPipeConnectTask = _audioPipe.WaitForConnectionAsync();
         }
 
@@ -298,7 +282,8 @@ public class FfmpegProcessHost : IDisposable
             return $"pipe handshake error: {ex.Message}";
         }
 
-        return _videoPipe == null || !_videoPipe.IsConnected ? "pipe failed to connect." : null;
+        if (_videoPipe == null || !_videoPipe.IsConnected) return "pipe failed to connect.";
+        return VerifyPipeClient(_videoPipe, "video");
     }
 
     private string? ConnectAudioPipe()
@@ -313,7 +298,32 @@ public class FfmpegProcessHost : IDisposable
             return $"pipe handshake error: {ex.Message}";
         }
 
-        return _audioPipe == null || !_audioPipe.IsConnected ? "pipe failed to connect." : null;
+        if (_audioPipe == null || !_audioPipe.IsConnected) return "pipe failed to connect.";
+        return VerifyPipeClient(_audioPipe, "audio");
+    }
+
+    /// <summary>
+    /// The connected client must be the ffmpeg process this host spawned. A mismatch disconnects
+    /// the impostor and fails the take; an unreadable client id fails closed the same way.
+    /// </summary>
+    private string? VerifyPipeClient(NamedPipeServerStream pipe, string label)
+    {
+        int expected = _ffmpegProcess?.Id ?? 0;
+        if (FfmpegPipeServer.IsExpectedClient(pipe, expected)) return null;
+
+        FfmpegPipeServer.TryGetClientProcessId(pipe, out int client);
+        try
+        {
+            if (pipe.IsConnected) pipe.Disconnect();
+        }
+        catch
+        {
+            // The pipe is being torn down either way.
+        }
+
+        return client == 0
+            ? $"{label} pipe client process could not be verified."
+            : $"{label} pipe was connected by process {client}, not ffmpeg ({expected}).";
     }
 
     private PipeWriteResult WriteVideoPacket(byte[] buffer, int length)
