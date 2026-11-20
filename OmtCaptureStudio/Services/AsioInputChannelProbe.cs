@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using OmtCaptureStudio.Interop;
 using OmtCaptureStudio.Models;
 
 namespace OmtCaptureStudio.Services;
@@ -128,12 +129,12 @@ public static unsafe class AsioInputChannelProbe
 
         try
         {
-            int coHr = CoInitializeEx(IntPtr.Zero, CoInitApartmentThreaded);
+            int coHr = NativeMethods.CoInitializeEx(IntPtr.Zero, CoInitApartmentThreaded);
             apartmentOwned = coHr == 0; // S_FALSE => the runtime already owns it here; do not balance it.
 
             Guid clsid = driver.Clsid;
             Guid riid = IidIUnknown;
-            int hr = CoCreateInstance(&clsid, IntPtr.Zero, ClsCtxInprocServer, &riid, &pUnknown);
+            int hr = NativeMethods.CoCreateInstance(&clsid, IntPtr.Zero, ClsCtxInprocServer, &riid, &pUnknown);
             if (hr < 0 || pUnknown == IntPtr.Zero)
             {
                 return $"the driver could not be instantiated (0x{hr:X8}); check that a 64-bit build is registered.";
@@ -217,7 +218,7 @@ public static unsafe class AsioInputChannelProbe
 
             if (apartmentOwned)
             {
-                try { CoUninitialize(); } catch { }
+                try { NativeMethods.CoUninitialize(); } catch { }
             }
         }
     }
@@ -324,7 +325,7 @@ public static unsafe class AsioInputChannelProbe
             if (slot == IntPtr.Zero) return false;
 
             MemoryBasicInformation mbi;
-            if (VirtualQuery(slot, &mbi, (nuint)sizeof(MemoryBasicInformation)) == 0) return false;
+            if (NativeMethods.VirtualQuery(slot, &mbi, (nuint)sizeof(MemoryBasicInformation)) == 0) return false;
 
             bool committed = mbi.State == MemCommit;
             bool image = mbi.Type == MemImage;
@@ -403,15 +404,4 @@ public static unsafe class AsioInputChannelProbe
         public fixed byte Name[MaxChannelNameBytes];
     }
 
-    [DllImport("kernel32.dll", ExactSpelling = true)]
-    private static extern nuint VirtualQuery(IntPtr lpAddress, MemoryBasicInformation* lpBuffer, nuint dwLength);
-
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern int CoInitializeEx(IntPtr pvReserved, int dwCoInit);
-
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern void CoUninitialize();
-
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern int CoCreateInstance(Guid* rclsid, IntPtr pUnkOuter, uint dwClsContext, Guid* riid, IntPtr* ppv);
 }

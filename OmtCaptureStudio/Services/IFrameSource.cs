@@ -23,6 +23,15 @@ public interface IFrameSource : IDisposable
     bool TryCaptureFrame();
 
     /// <summary>
+    /// False only when the capture session is lost and the last attempt produced no frame
+    /// (DXGI access-lost that has not been recreated, and the GDI fallback failed too).
+    /// A static desktop — duplication still alive, acquire timed out — stays true: the last
+    /// buffer is valid and must not raise a stall. Defaults to true so a synthetic provider
+    /// is never reported stalled merely because <see cref="TryCaptureFrame"/> returned false.
+    /// </summary>
+    bool IsCaptureSessionHealthy => true;
+
+    /// <summary>
     /// DIAG-BROADCAST: whether this provider is running on a DEGRADED fallback path - specifically DXGI
     /// Desktop Duplication being unavailable so GDI capture is in use.
     ///

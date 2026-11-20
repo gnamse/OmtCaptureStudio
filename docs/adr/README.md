@@ -20,6 +20,7 @@ Living improvement work (phased roadmap, open product calls) lives in
 | Host ↔ OMT audio rate conversion | [0003](0003-audio-rate-conversion.md) |
 | FFmpeg vs Media Foundation recording engine | [0012](0012-recording-engine-strategy.md) — stay FFmpeg; MF gated |
 | PA16 / hostile-peer decode policy | [0012](0012-recording-engine-strategy.md) §3 — refuse until product requires decode |
+| Update installer + CI artifact supply chain | [0013](0013-update-and-ci-supply-chain.md) — size cap, opt-in Authenticode, pinned checksums |
 
 Security bootstrap (native payload hash), frame guards, and FFmpeg preflight are
 enforced in code + the headless suite (`SecurityRegressionTable`); they are not
@@ -42,10 +43,11 @@ a numbered ADR. Recording sink selection for production takes is
 | [0010](0010-recording-fan-out.md) | Recording fan-out / composite sink | Accepted |
 | [0011](0011-mode-based-shell.md) | Mode-based application shell (picker → Capture \| Broadcast) | Accepted |
 | [0012](0012-recording-engine-strategy.md) | Recording engine stays FFmpeg; MF gated; PA16 refuse | Accepted |
+| [0013](0013-update-and-ci-supply-chain.md) | Update and CI supply chain (size cap, opt-in Authenticode, pinned checksums) | Accepted |
 
 Do **not** invent stub ADRs for gaps 0004 / 0007–0009. Fill a number only when
-shipping a real decision (see `AGENTS.md` Known gaps). Next free after 0012 is
-**0013**.
+shipping a real decision (see `AGENTS.md` Known gaps). Next free after 0013 is
+**0014**.
 
 ## Authoring a new ADR
 

@@ -8,12 +8,19 @@ namespace OmtCaptureStudio.Tests;
 
 partial class Program
 {
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern bool SetDllDirectory(string lpPathName);
 
     static int Main(string[] args)
     {
-        SetDllDirectory(AppDomain.CurrentDomain.BaseDirectory);
+        // Windows-only: puts the test output directory on the native search path for libomt.
+        // On any other OS the import cannot resolve, and the pure steps (settings, argv, update
+        // policy) must still be able to start.
+        if (OperatingSystem.IsWindows())
+        {
+            SetDllDirectory(AppDomain.CurrentDomain.BaseDirectory);
+        }
 
         // SOAK-01 opt-in modes. The default suite (no args) is unchanged and fast; the soak mode runs
         // ONLY when explicitly requested because it takes ~65-70 s of real wall clock and spawns child

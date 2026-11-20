@@ -348,7 +348,67 @@ partial class Program
             session.StopRecording();
         }
 
+        // --- (c) The UI-timer entry must not block the caller on finalize, and must not overlap ticks. ---
+        using (var block = new ManualResetEventSlim(false))
+        try
+        {
+            var sink = new SignalRecordingSink { BlockFinalize = block };
+            using var recorder = new StreamRecorderService(sink);
+            using var audio = new AudioEngine();
+            using var session = new CaptureSession(audio, recorder, ownsDependencies: false, healthClock: clock);
+            var source = new RecoverableTestSource();
+            long frames = 0;
+            session.VideoFrameAvailable += (p, l, w, h, s, fps, ts) => Interlocked.Increment(ref frames);
+            session.Connect(source);
+            WaitForFormat(session, "async health source");
+            long before = Interlocked.Read(ref frames);
+            WaitFor(() => Interlocked.Read(ref frames) > before, "frames before the async outage");
+            now += 1000;
+            if (!session.StartRecording(config))
+            {
+                throw new Exception("Failed to start recording for the async health-tick test.");
+            }
+
+            source.Suspend();
+            Thread.Sleep(80);
+            now += 6000;
+
+            var poll = new InputHealthPoll(session);
+            var started = Stopwatch.StartNew();
+            Task first = poll.Run();
+            long returnedMs = started.ElapsedMilliseconds;
+            if (returnedMs > 1000)
+            {
+                block.Set();
+                throw new Exception($"InputHealthPoll.Run blocked the caller for {returnedMs} ms; finalize must run off the caller.");
+            }
+
+            WaitFor(() => Volatile.Read(ref sink.FinalizeEntered) > 0, "background finalize entered");
+            Task second = poll.Run();
+            if (!second.IsCompleted)
+            {
+                block.Set();
+                throw new Exception("An overlapping health tick must be dropped while a finalize is in flight.");
+            }
+
+            block.Set();
+            if (!first.Wait(TimeSpan.FromSeconds(5)))
+            {
+                throw new Exception("The in-flight health tick did not finish after finalize was released.");
+            }
+
+            if (session.IsRecording)
+            {
+                throw new Exception("The async outage path must still finalize the segment.");
+            }
+        }
+        finally
+        {
+            block.Set();
+        }
+
         Console.WriteLine(" -> Outage finalize-before-alarm, backoff reconnect, and _part02 resume verified!");
+        Console.WriteLine(" -> Health-tick finalize returns to the caller immediately and does not overlap.");
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> Input-loss watchdog, auto-reconnect, and segment-per-outage verified!");
         Console.ResetColor();

@@ -329,6 +329,26 @@ partial class Program
             Expect(rt.OutputDirectory == original.OutputDirectory, "Round trip: destination.");
             Expect(rt.BackupOutputDirectory == original.BackupOutputDirectory, "Round trip: backup destination.");
             Expect(rt.FilenamePrefix == original.FilenamePrefix, "Round trip: filename prefix.");
+            Expect(Directory.GetFiles(root, "*.tmp", SearchOption.AllDirectories).Length == 0,
+                "A successful settings save must not leave its temp file behind.");
+
+            // Filename stem: path traversal and quote-breakout fall back to the default. A normal name does not.
+            Expect(RecordingFileNames.SanitizePrefix("MORNING_SHOW") == "MORNING_SHOW",
+                "A plain prefix must be kept.");
+            Expect(RecordingFileNames.SanitizePrefix("Morning Show") == "Morning Show",
+                "A space is a legal Windows file name and must be kept.");
+            Expect(RecordingFileNames.SanitizePrefix(@"..\..\Windows\System32\cmd") == RecordingFileNames.DefaultPrefix,
+                "A traversing prefix must fall back to the default stem.");
+            Expect(RecordingFileNames.SanitizePrefix("foo\" -filter evil") == RecordingFileNames.DefaultPrefix,
+                "A prefix with a quote must not be usable as a filename stem.");
+            Expect(RecordingFileNames.SanitizePrefix("C:evil") == RecordingFileNames.DefaultPrefix,
+                "A drive-qualified prefix must fall back to the default stem.");
+            Expect(RecordingFileNames.TakeFileName(@"..\evil", new DateTime(2026, 1, 2, 3, 4, 5), ".mp4")
+                   == "OMT_Capture_2026-01-02_03-04-05.mp4",
+                "The arm's file name must use the sanitised stem.");
+            Expect(SettingsStore.ToConfig(new OperatorSettings { FilenamePrefix = @"..\..\secret" }).FilenamePrefix
+                   == RecordingFileNames.DefaultPrefix,
+                "Load must sanitise the prefix, not copy it through.");
             Expect(rt.InputLossThresholdSeconds == original.InputLossThresholdSeconds,
                 "Round trip: ADR-0002 input-loss threshold (a field the UI does not expose).");
             Expect(rt.InputRecoveryGraceSeconds == original.InputRecoveryGraceSeconds,

@@ -7,6 +7,7 @@ using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
+using OmtCaptureStudio.Interop;
 using OmtCaptureStudio.Services.Forensics;
 
 namespace OmtCaptureStudio;
@@ -33,9 +34,7 @@ public static class NativePayloadBootstrapper
 {
     // R24: no SetDllDirectory at all. Loading by absolute path makes the process search path irrelevant
     // for these libraries, so widening it - especially to a writable location - buys nothing and is the
-    // documented CWE-427 sink this pass exists to remove.
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr LoadLibraryW(string lpLibFileName);
+    // documented CWE-427 sink this pass exists to remove. LoadLibraryW itself lives in NativeMethods.
 
     private static readonly string[] NativeLibraries = new[]
     {
@@ -419,7 +418,7 @@ public static class NativePayloadBootstrapper
     /// </summary>
     public static IReadOnlyList<string> LoadAll(string directory, Func<string, IntPtr>? loadLibrary = null)
     {
-        loadLibrary ??= LoadLibraryW;
+        loadLibrary ??= NativeMethods.LoadLibraryW;
 
         var loaded = new List<FileStream>();
         var loadedPaths = new List<string>();

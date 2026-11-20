@@ -138,7 +138,9 @@ public sealed class SettingsStore
                 Directory.CreateDirectory(dir);
             }
 
-            File.WriteAllText(
+            // Temp file in the same directory, flush, then Replace (or Move when this is the first
+            // save). A crash mid-write must not leave a half-truncated settings.json (ADR-0006).
+            AtomicFile.WriteAllText(
                 Path,
                 JsonSerializer.Serialize(settings, SettingsJsonContext.Default.OperatorSettings));
             return true;
@@ -210,7 +212,9 @@ public sealed class SettingsStore
 
         if (!string.IsNullOrWhiteSpace(settings.FilenamePrefix))
         {
-            config.FilenamePrefix = settings.FilenamePrefix!;
+            // A bad stem falls back to the default rather than reaching the ffmpeg command line.
+            // The arm sanitises again at use time; this is the load-time half.
+            config.FilenamePrefix = RecordingFileNames.SanitizePrefix(settings.FilenamePrefix);
         }
 
         if (settings.InputLossThresholdSeconds is { } loss && loss > 0)

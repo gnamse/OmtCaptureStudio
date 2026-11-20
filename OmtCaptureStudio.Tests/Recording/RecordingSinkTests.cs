@@ -1762,6 +1762,40 @@ partial class Program
             Console.WriteLine(" [SKIP] FfmpegProcessHost.cs not reachable from the test binary — structural check skipped.");
         }
 
+        // --- ArgumentList: the output path is one token, not a quoted break-out in a single string. ---
+        var argConfig = new RecordingConfig
+        {
+            ContainerFormat = OutputContainerFormat.MP4,
+            EncoderChoice = VideoEncoderChoice.CpuX264,
+            Quality = QualityPreset.High,
+            OutputDirectory = @"C:\takes"
+        };
+        var argFormat = new StreamFormat { Width = 1920, Height = 1080, FrameRate = 59.94, SampleRate = 48000, Channels = 2 };
+        string trickyPath = @"C:\takes\Show Name\OMT_Capture_2026-01-02_03-04-05.mp4";
+        string[] argv = FfmpegArguments.BuildArgumentList(argConfig, argFormat, trickyPath, "omt_video_abcd", "omt_audio_abcd", VideoEncoderChoice.CpuX264);
+        Expect(argv.Length > 8, "The ffmpeg vector must be a token list, not one string.");
+        Expect(argv[0] == "-nostdin" && argv[1] == "-y", "The vector must still start with -nostdin -y.");
+        Expect(argv[^1] == trickyPath, $"The output path must be a single unquoted argument; got '{argv[^1]}'.");
+        Expect(!argv[^1].Contains('"'), "ArgumentList must not add quotes around the output path.");
+        int videoPipe = Array.IndexOf(argv, @"\\.\pipe\omt_video_abcd");
+        int audioPipe = Array.IndexOf(argv, @"\\.\pipe\omt_audio_abcd");
+        Expect(videoPipe > 0 && argv[videoPipe - 1] == "-i", "The video pipe must be the argument to its own -i.");
+        Expect(audioPipe > videoPipe && argv[audioPipe - 1] == "-i", "The audio pipe must be the argument to its own -i.");
+        Expect(argv.Contains("-movflags") && argv.Contains("+frag_keyframe+empty_moov"),
+            "MP4 must still request fragmented moov.");
+        Expect(argv.Contains("59.94"), "Frame rate must stay invariant-culture, not a locale comma.");
+        string[] noAudio = FfmpegArguments.BuildArgumentList(argConfig, argFormat, trickyPath, "omt_video_abcd", null, VideoEncoderChoice.CpuX264);
+        Expect(noAudio.Contains("-an") && !noAudio.Contains("-c:a"), "A video-only take must pass -an and no audio codec.");
+
+        string? hostPathArgs = FindRepoSource(Path.Combine("OmtCaptureStudio", "Services", "Sinks", "FfmpegProcessHost.cs"));
+        if (hostPathArgs != null)
+        {
+            string hostArgs = File.ReadAllText(hostPathArgs);
+            Expect(hostArgs.Contains("ArgumentList.Add"), "The host must launch ffmpeg through ArgumentList.");
+            Expect(!hostArgs.Contains("Arguments = args") && !hostArgs.Contains("Arguments = "),
+                "The host must not build a single Arguments string.");
+        }
+
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine($" -> Encoder×quality matrix: {cells} argv cells asserted; quality→CRF 16/20/24/28; ProRes quality-independent; PCM only for MOV+ProRes; detector called only for AutoHardware; host no longer owns the table!");
         Console.ResetColor();

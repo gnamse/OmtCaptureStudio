@@ -35,6 +35,36 @@ partial class Program
         public void Dispose() { if (_pin.IsAllocated) _pin.Free(); }
     }
 
+    /// <summary>
+    /// Yields a fixed number of frames, then goes idle. <see cref="HealthyWhenIdle"/> distinguishes a
+    /// static desktop (duplication alive, timeout) from a lost session.
+    /// </summary>
+    sealed class ScriptedFrameSource : IFrameSource
+    {
+        private readonly GCHandle _pin;
+        private int _remaining;
+        public ScriptedFrameSource(int yields, bool healthyWhenIdle)
+        {
+            Width = 64; Height = 64;
+            _remaining = yields;
+            HealthyWhenIdle = healthyWhenIdle;
+            _pin = GCHandle.Alloc(new byte[Width * Height * 4], GCHandleType.Pinned);
+        }
+        public bool HealthyWhenIdle { get; set; }
+        public int Width { get; }
+        public int Height { get; }
+        public int Stride => Width * 4;
+        public IntPtr BufferPtr => _pin.AddrOfPinnedObject();
+        public bool IsCaptureSessionHealthy => _remaining > 0 || HealthyWhenIdle;
+        public bool TryCaptureFrame()
+        {
+            if (_remaining <= 0) return false;
+            _remaining--;
+            return true;
+        }
+        public void Dispose() { if (_pin.IsAllocated) _pin.Free(); }
+    }
+
     /// <summary>Counts audio pulls: proves the send loop skipped audio while no frame had arrived.</summary>
     sealed class CountingAudioSource : IHostAudioSource
     {
@@ -58,6 +88,26 @@ partial class Program
     static void TestBroadcastCaptureStall()
     {
         Console.WriteLine("\n[Step 0.702] Verifying a capture provider that never yields is REPORTED, not silent (DIAG-BROADCAST)...");
+
+        // HRESULT classification first: it does not need a GPU or OMT, and the send-loop cases below do.
+        Expect(DxgiFrameAcquire.Classify(DxgiFrameAcquire.Ok) == DxgiAcquireKind.Success, "S_OK is success.");
+        Expect(DxgiFrameAcquire.Classify(DxgiFrameAcquire.WaitTimeout) == DxgiAcquireKind.Timeout,
+            "DXGI_ERROR_WAIT_TIMEOUT is a static desktop, not a lost session.");
+        Expect(DxgiFrameAcquire.Classify(DxgiFrameAcquire.AccessLost) == DxgiAcquireKind.AccessLost,
+            "DXGI_ERROR_ACCESS_LOST must be classified as access-lost.");
+        Expect(DxgiFrameAcquire.Classify(DxgiFrameAcquire.DeviceRemoved) == DxgiAcquireKind.DeviceLost,
+            "DXGI_ERROR_DEVICE_REMOVED must be classified as device-lost.");
+        Expect(DxgiFrameAcquire.Classify(DxgiFrameAcquire.DeviceReset) == DxgiAcquireKind.DeviceLost,
+            "DXGI_ERROR_DEVICE_RESET must be classified as device-lost.");
+        Expect(!DxgiFrameAcquire.NeedsDuplicationReset(DxgiAcquireKind.Timeout),
+            "A timeout must not recreate the duplication.");
+        Expect(DxgiFrameAcquire.NeedsDuplicationReset(DxgiAcquireKind.AccessLost),
+            "Access-lost must recreate the duplication.");
+        Expect(DxgiFrameAcquire.NeedsDuplicationReset(DxgiAcquireKind.DeviceLost),
+            "Device-lost must recreate the duplication (and the device).");
+        Expect(DxgiFrameAcquire.Classify(unchecked((int)0x887A0001)) == DxgiAcquireKind.OtherFailure,
+            "An unexpected DXGI failure must not be mistaken for a timeout.");
+        Console.WriteLine(" -> DXGI acquire classification: timeout is not a reset; access-lost and device-lost are.");
 
         var capturer = new StallingFrameSource();
         var audio = new CountingAudioSource();
@@ -143,6 +193,52 @@ partial class Program
         }
         goodCapturer.Dispose();
         Expect(falseReports == 0, $"A provider that DOES yield must never trip the stall report; it fired {falseReports} time(s).");
+
+        // ---- POST-FRAME: a session that dies AFTER frames arrived must alarm, even though a buffer exists.
+        var lost = new ScriptedFrameSource(yields: 3, healthyWhenIdle: false);
+        var lostAudio = new CountingAudioSource();
+        var lostMessages = new List<string>();
+        var lostFired = new ManualResetEventSlim(false);
+        using (var lostGen = new OmtDesktopCaptureGenerator(lost, sourceName: "OMT_TEST_LOST", fps: 30,
+                                                            audioSource: lostAudio, firstFrameTimeoutMs: 5_000,
+                                                            captureStallTimeoutMs: 350))
+        {
+            lostGen.CaptureStalled += m => { lock (lostMessages) lostMessages.Add(m); lostFired.Set(); };
+            lostGen.Start();
+            bool lostOk = lostFired.Wait(TimeSpan.FromSeconds(8));
+            lostGen.Stop();
+            Expect(lostOk, "A session that goes unhealthy after frames arrived must raise the stall alarm.");
+        }
+        lost.Dispose();
+        lock (lostMessages)
+        {
+            Expect(lostMessages.Count == 1, $"A post-frame stall must be reported once per outage; got {lostMessages.Count}.");
+            string lm = lostMessages[0];
+            Expect(lm.Contains("stalled") && lm.Contains("unhealthy"),
+                $"The post-frame message must say the session is stalled and unhealthy; got '{lm}'.");
+            Expect(lm.Contains(nameof(ScriptedFrameSource)), $"The post-frame message must name the provider; got '{lm}'.");
+            Expect(!lm.Contains("NO audio is being sent"),
+                "After frames have arrived the send loop still ships audio; the message must not claim otherwise.");
+        }
+        Expect(lostAudio.FillCalls > 0,
+            $"Audio must keep flowing on the frozen picture; FillPlanarAudio was called {lostAudio.FillCalls} time(s).");
+
+        // ---- NEGATIVE: a static desktop (idle, but the session stays healthy) must NOT alarm.
+        var still = new ScriptedFrameSource(yields: 2, healthyWhenIdle: true);
+        int stillReports = 0;
+        using (var stillGen = new OmtDesktopCaptureGenerator(still, sourceName: "OMT_TEST_STILL", fps: 30,
+                                                             audioSource: new CountingAudioSource(),
+                                                             firstFrameTimeoutMs: 5_000,
+                                                             captureStallTimeoutMs: 300))
+        {
+            stillGen.CaptureStalled += _ => Interlocked.Increment(ref stillReports);
+            stillGen.Start();
+            Thread.Sleep(900);
+            stillGen.Stop();
+        }
+        still.Dispose();
+        Expect(stillReports == 0,
+            $"A healthy timeout (static desktop) must not raise a stall; it fired {stillReports} time(s).");
 
         Console.WriteLine($" -> stall reported once with a message naming the provider, the advertised source and the audio consequence;");
         Console.WriteLine($"    audio never sent (0 pulls); a never-yielding provider trips it, and the detector is armed before the window!");

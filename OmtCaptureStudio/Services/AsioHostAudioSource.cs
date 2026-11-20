@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using OmtCaptureStudio.Interop;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services.Audio;
 
@@ -278,7 +279,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
     {
         // Only uninitialize when *we* were the one to bring up this apartment; if the runtime had
         // already done it at thread start, CoInitializeEx returns S_FALSE and we must not balance it.
-        int coHr = CoInitializeEx(IntPtr.Zero, CoInitApartmentThreaded);
+        int coHr = NativeMethods.CoInitializeEx(IntPtr.Zero, CoInitApartmentThreaded);
         bool shouldUninit = coHr == 0;
 
         IntPtr pAsio = IntPtr.Zero;
@@ -303,7 +304,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
             // apartment: from an MTA, COM hands back a cross-apartment proxy whose vtable lives in
             // combase.dll, which is why this whole lifecycle runs on a dedicated STA thread.
             IntPtr pUnknown = IntPtr.Zero;
-            int hr = CoCreateInstance(&clsid, IntPtr.Zero, ClsCtxInprocServer, &riid, &pUnknown);
+            int hr = NativeMethods.CoCreateInstance(&clsid, IntPtr.Zero, ClsCtxInprocServer, &riid, &pUnknown);
             if (hr < 0 || pUnknown == IntPtr.Zero)
             {
                 SetError($"CoCreateInstance failed for ASIO driver '{_option.Driver.DisplayName}' (0x{hr:X8}). " +
@@ -351,7 +352,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
         {
             _isRunning = false;
             try { ShutdownDriver(pAsio); } catch { }
-            if (shouldUninit) CoUninitialize();
+            if (shouldUninit) NativeMethods.CoUninitialize();
         }
     }
 
@@ -1085,7 +1086,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
             IntPtr slot = (IntPtr)vtbl[i];
             if (slot == IntPtr.Zero) return false;
 
-            if (VirtualQuery(slot, &mbi, (nuint)sizeof(MemoryBasicInformation)) == 0) return false;
+            if (NativeMethods.VirtualQuery(slot, &mbi, (nuint)sizeof(MemoryBasicInformation)) == 0) return false;
             bool committed = mbi.State == MemCommit;
             bool image = mbi.Type == MemImage;
             bool executable = (mbi.Protect & 0xF0) != 0; // PAGE_EXECUTE / _READ / _READWRITE / _WRITECOPY
@@ -1110,8 +1111,6 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
         public uint Type;
     }
 
-    [DllImport("kernel32.dll", ExactSpelling = true)]
-    private static extern nuint VirtualQuery(IntPtr lpAddress, MemoryBasicInformation* lpBuffer, nuint dwLength);
 
     private static int QueryInterface(IntPtr p, Guid* riid, IntPtr* ppv)
     {
@@ -1231,14 +1230,6 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
         return fn(p);
     }
 
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern int CoInitializeEx(IntPtr pvReserved, int dwCoInit);
-
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern void CoUninitialize();
-
-    [DllImport("ole32.dll", ExactSpelling = true)]
-    private static extern int CoCreateInstance(Guid* rclsid, IntPtr pUnkOuter, uint dwClsContext, Guid* riid, IntPtr* ppv);
 
     // ============================================================================================
     // Unmanaged structs — hand-rolled, sequential, matching the ASIO SDK layout on Win64

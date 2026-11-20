@@ -5,6 +5,7 @@ using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
 
+using OmtCaptureStudio.Interop;
 using OmtCaptureStudio.Services.Forensics;
 namespace OmtCaptureStudio.Services;
 
@@ -15,19 +16,28 @@ namespace OmtCaptureStudio.Services;
 /// </summary>
 public sealed class DesktopFrameCapturer : IFrameSource
 {
+    /// <summary>How long to wait before retrying a failed duplication recreate, so a locked session cannot spin DuplicateOutput at frame rate.</summary>
+    private const int RecoveryBackoffMs = 500;
+
+    /// <summary>Recovery is logged at most this often. The attempt itself still runs on the backoff above.</summary>
+    private const int RecoveryLogIntervalMs = 5_000;
+
     private readonly int _monitorIndex;
-    private readonly int _left;
-    private readonly int _top;
-    private readonly ID3D11Device _device;
+    private int _left;
+    private int _top;
+    private ID3D11Device? _device;
     private ID3D11Texture2D? _staging;
     private IDXGIOutputDuplication? _duplication;
     private byte[] _buffer = Array.Empty<byte>();
     private GCHandle _bufferHandle;
     private bool _disposed;
     private bool _hasFrame;
+    private bool _sessionHealthy = true;
+    private long _nextRecoveryTicks;
+    private long _lastRecoveryLogTicks;
 
-    public int Width { get; }
-    public int Height { get; }
+    public int Width { get; private set; }
+    public int Height { get; private set; }
     public int Stride => Width * 4;
     public IntPtr BufferPtr => _bufferHandle.IsAllocated ? _bufferHandle.AddrOfPinnedObject() : IntPtr.Zero;
 
@@ -39,238 +49,388 @@ public sealed class DesktopFrameCapturer : IFrameSource
     /// </summary>
     public bool IsUsingFallbackCapture => _duplication == null;
 
+    /// <inheritdoc />
+    public bool IsCaptureSessionHealthy => _sessionHealthy;
+
     public DesktopFrameCapturer(int monitorIndex = 0)
     {
         _monitorIndex = monitorIndex;
 
-        // Hardware device with BGRA support is required for Desktop Duplication.
-        _device = D3D11.D3D11CreateDevice(
-            DriverType.Hardware,
-            DeviceCreationFlags.BgraSupport,
-            new[] { FeatureLevel.Level_11_0 });
-
         try
         {
-            using IDXGIDevice dxgiDevice = _device.QueryInterface<IDXGIDevice>();
-            using IDXGIAdapter adapter = dxgiDevice.GetAdapter();
-            var enumResult = adapter.EnumOutputs((uint)_monitorIndex, out IDXGIOutput output);
-            if (enumResult.Failure)
+            _device = CreateDevice();
+            BoundsRead bounds = TryReadBounds(out int left, out int top, out int width, out int height);
+            if (bounds == BoundsRead.Missing)
             {
                 throw new InvalidOperationException($"Desktop capture: monitor index {_monitorIndex} not found.");
             }
 
-            using (output)
+            if (bounds == BoundsRead.Invalid)
             {
-                var bounds = output.Description.DesktopCoordinates;
-                _left = bounds.Left;
-                _top = bounds.Top;
-                Width = bounds.Right - bounds.Left;
-                Height = bounds.Bottom - bounds.Top;
-                if (Width <= 0 || Height <= 0)
-                {
-                    throw new InvalidOperationException("Desktop capture: invalid monitor bounds.");
-                }
-
-                using IDXGIOutput1 output1 = output.QueryInterface<IDXGIOutput1>();
-                try
-                {
-                    _duplication = output1.DuplicateOutput(_device);
-                }
-                catch (SharpGenException ex)
-                {
-                    AppLogger.LogInfo($"DXGI Desktop Duplication unavailable (HRESULT 0x{ex.HResult:X8}): falling back to GDI capture.");
-                    _duplication = null;
-                }
-                catch (Exception ex)
-                {
-                    AppLogger.LogInfo($"DXGI Desktop Duplication unavailable ({ex.Message}): falling back to GDI capture.");
-                    _duplication = null;
-                }
+                throw new InvalidOperationException("Desktop capture: invalid monitor bounds.");
             }
 
-            if (_duplication != null)
-            {
-                // Staging texture for CPU readback in the exact desktop format.
-                _staging = _device.CreateTexture2D(new Texture2DDescription
-                {
-                    Width = (uint)Width,
-                    Height = (uint)Height,
-                    MipLevels = 1,
-                    ArraySize = 1,
-                    Format = Format.B8G8R8A8_UNorm,
-                    SampleDescription = new SampleDescription(1, 0),
-                    Usage = ResourceUsage.Staging,
-                    BindFlags = BindFlags.None,
-                    CPUAccessFlags = CpuAccessFlags.Read,
-                    MiscFlags = ResourceOptionFlags.None
-                });
-            }
+            _left = left;
+            _top = top;
+            Width = width;
+            Height = height;
+            EnsureBuffer();
 
-            _buffer = new byte[Width * Height * 4];
-            _bufferHandle = GCHandle.Alloc(_buffer, GCHandleType.Pinned);
+            // Initial open keeps the historical log text so a field report that greps for it still matches.
+            try
+            {
+                OpenDuplication();
+                if (_duplication != null)
+                {
+                    EnsureStaging();
+                }
+            }
+            catch (SharpGenException ex)
+            {
+                AppLogger.LogInfo($"DXGI Desktop Duplication unavailable (HRESULT 0x{ex.HResult:X8}): falling back to GDI capture.");
+                _duplication = null;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.LogInfo($"DXGI Desktop Duplication unavailable ({ex.Message}): falling back to GDI capture.");
+                _duplication = null;
+            }
         }
         catch
         {
-            _staging?.Dispose();
-            _duplication?.Dispose();
-            _device.Dispose();
+            DisposeResources();
             throw;
         }
     }
 
     /// <summary>
     /// Copies the latest desktop frame into the pinned buffer. Returns false when no
-    /// newer frame is available within the timeout (or the session was lost). Before the
-    /// first Desktop Duplication frame arrives, a static desktop is seeded with a GDI
-    /// grab so the broadcaster can start streaming immediately.
+    /// newer frame is available within the timeout. A lost duplication (resolution change,
+    /// UAC secure desktop, lock screen, fullscreen mode switch) is recreated; it is not
+    /// treated as a static-desktop timeout. Before the first Desktop Duplication frame
+    /// arrives, a static desktop is seeded with a GDI grab so the broadcaster can start
+    /// streaming immediately.
     /// </summary>
     public unsafe bool TryCaptureFrame()
     {
         if (_disposed) return false;
 
-        if (_duplication != null && _staging != null)
+        DxgiRead read = ReadOrRecover();
+        if (read == DxgiRead.Frame)
+        {
+            _hasFrame = true;
+            _sessionHealthy = true;
+            return true;
+        }
+
+        // Healthy timeout with a frame already in the buffer: the desktop is unchanged.
+        // Do not spend a GDI blit, and do not report the session lost.
+        if (read == DxgiRead.Timeout && _hasFrame)
+        {
+            _sessionHealthy = true;
+            return false;
+        }
+
+        if (CaptureViaGdi())
+        {
+            _hasFrame = true;
+            _sessionHealthy = true;
+            return true;
+        }
+
+        // GDI could not seed or fill in. A live duplication that merely timed out is still
+        // healthy (static desktop). Anything else means the session is down.
+        _sessionHealthy = read == DxgiRead.Timeout;
+        return false;
+    }
+
+    private enum DxgiRead
+    {
+        None,
+        Frame,
+        Timeout
+    }
+
+    private unsafe DxgiRead ReadOrRecover()
+    {
+        if (_device == null) return DxgiRead.None;
+
+        if (_duplication == null || _staging == null)
+        {
+            if (!TryRecover(DxgiAcquireKind.AccessLost)) return DxgiRead.None;
+        }
+
+        if (ReadOnce(out DxgiAcquireKind kind)) return DxgiRead.Frame;
+        if (kind == DxgiAcquireKind.Timeout) return DxgiRead.Timeout;
+        if (!DxgiFrameAcquire.NeedsDuplicationReset(kind)) return DxgiRead.None;
+
+        if (!TryRecover(kind)) return DxgiRead.None;
+        if (ReadOnce(out DxgiAcquireKind after)) return DxgiRead.Frame;
+        if (after == DxgiAcquireKind.Timeout) return DxgiRead.Timeout;
+        return DxgiRead.None;
+    }
+
+    private unsafe bool ReadOnce(out DxgiAcquireKind kind)
+    {
+        kind = DxgiAcquireKind.OtherFailure;
+        if (_duplication == null || _staging == null || _device == null) return false;
+
+        try
         {
             var result = _duplication.AcquireNextFrame(50, out _, out IDXGIResource resource);
-            if (!result.Failure && resource != null)
+            kind = DxgiFrameAcquire.Classify(result.Code);
+            if (kind != DxgiAcquireKind.Success || resource == null) return false;
+
+            using (resource)
             {
-                using (resource)
+                try
                 {
+                    using ID3D11Texture2D desktopImage = resource.QueryInterface<ID3D11Texture2D>();
+                    _device.ImmediateContext.CopyResource(_staging, desktopImage);
+
+                    var mapped = _device.ImmediateContext.Map(_staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
                     try
                     {
-                        using ID3D11Texture2D desktopImage = resource.QueryInterface<ID3D11Texture2D>();
-                        _device.ImmediateContext.CopyResource(_staging, desktopImage);
-
-                        var mapped = _device.ImmediateContext.Map(_staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
-                        try
+                        byte* src = (byte*)mapped.DataPointer;
+                        byte* dst = (byte*)BufferPtr;
+                        int rowBytes = Width * 4;
+                        for (int y = 0; y < Height; y++)
                         {
-                            byte* src = (byte*)mapped.DataPointer;
-                            byte* dst = (byte*)BufferPtr;
-                            int rowBytes = Width * 4;
-                            for (int y = 0; y < Height; y++)
-                            {
-                                Buffer.MemoryCopy(src, dst, rowBytes, rowBytes);
-                                src += mapped.RowPitch;
-                                dst += rowBytes;
-                            }
-                        }
-                        finally
-                        {
-                            _device.ImmediateContext.Unmap(_staging, 0);
+                            Buffer.MemoryCopy(src, dst, rowBytes, rowBytes);
+                            src += mapped.RowPitch;
+                            dst += rowBytes;
                         }
                     }
                     finally
                     {
-                        _duplication.ReleaseFrame();
+                        _device.ImmediateContext.Unmap(_staging, 0);
                     }
                 }
-                _hasFrame = true;
-                return true;
+                finally
+                {
+                    _duplication.ReleaseFrame();
+                }
             }
 
-            // No new frame: WAIT_TIMEOUT (desktop unchanged) or ACCESS_LOST (session dead).
-            if (_hasFrame) return false; // buffer still holds the latest frame
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // A lost session can surface as an exception rather than an HRESULT. Drop the
+            // duplication so the next pass recreates it instead of calling into a dead object.
+            kind = DxgiAcquireKind.AccessLost;
+            LogRecovery($"DXGI AcquireNextFrame failed ({ex.Message}); the duplication will be recreated.");
+            try { _duplication?.Dispose(); } catch { }
+            _duplication = null;
+            return false;
+        }
+    }
+
+    private bool TryRecover(DxgiAcquireKind kind)
+    {
+        long now = Environment.TickCount64;
+        if (now < _nextRecoveryTicks) return false;
+        _nextRecoveryTicks = now + RecoveryBackoffMs;
+
+        try
+        {
+            if (kind == DxgiAcquireKind.DeviceLost || _device == null)
+            {
+                if (!TryRecreateDevice()) return false;
+            }
+            else
+            {
+                try { _duplication?.Dispose(); } catch { }
+                _duplication = null;
+            }
+
+            if (TryReadBounds(out int left, out int top, out int width, out int height) != BoundsRead.Ok)
+            {
+                LogRecovery("DXGI output could not be re-enumerated after the capture session was lost.");
+                return false;
+            }
+
+            if (width != Width || height != Height || _buffer.Length != width * height * 4)
+            {
+                _left = left;
+                _top = top;
+                Width = width;
+                Height = height;
+                EnsureBuffer();
+                try { _staging?.Dispose(); } catch { }
+                _staging = null;
+            }
+            else
+            {
+                _left = left;
+                _top = top;
+            }
+
+            OpenDuplication();
+            if (_duplication == null) return false;
+            EnsureStaging();
+            LogRecovery("DXGI desktop duplication recreated after the capture session was lost.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            try { _duplication?.Dispose(); } catch { }
+            _duplication = null;
+            LogRecovery($"DXGI duplication recovery failed ({ex.Message}).");
+            return false;
+        }
+    }
+
+    private bool TryRecreateDevice()
+    {
+        try
+        {
+            try { _staging?.Dispose(); } catch { }
+            _staging = null;
+            try { _duplication?.Dispose(); } catch { }
+            _duplication = null;
+            try { _device?.Dispose(); } catch { }
+            _device = null;
+            _device = CreateDevice();
+            return _device != null;
+        }
+        catch (Exception ex)
+        {
+            _device = null;
+            LogRecovery($"DXGI device recreate failed ({ex.Message}).");
+            return false;
+        }
+    }
+
+    private enum BoundsRead
+    {
+        Ok,
+        Missing,
+        Invalid
+    }
+
+    private BoundsRead TryReadBounds(out int left, out int top, out int width, out int height)
+    {
+        left = 0;
+        top = 0;
+        width = 0;
+        height = 0;
+        if (_device == null) return BoundsRead.Missing;
+
+        using IDXGIDevice dxgiDevice = _device.QueryInterface<IDXGIDevice>();
+        using IDXGIAdapter adapter = dxgiDevice.GetAdapter();
+        var enumResult = adapter.EnumOutputs((uint)_monitorIndex, out IDXGIOutput output);
+        if (enumResult.Failure || output == null) return BoundsRead.Missing;
+
+        using (output)
+        {
+            var bounds = output.Description.DesktopCoordinates;
+            left = bounds.Left;
+            top = bounds.Top;
+            width = bounds.Right - bounds.Left;
+            height = bounds.Bottom - bounds.Top;
+            if (width <= 0 || height <= 0 || width > 16384 || height > 16384) return BoundsRead.Invalid;
+            return BoundsRead.Ok;
+        }
+    }
+
+    private void OpenDuplication()
+    {
+        try { _duplication?.Dispose(); } catch { }
+        _duplication = null;
+        if (_device == null) return;
+
+        using IDXGIDevice dxgiDevice = _device.QueryInterface<IDXGIDevice>();
+        using IDXGIAdapter adapter = dxgiDevice.GetAdapter();
+        var enumResult = adapter.EnumOutputs((uint)_monitorIndex, out IDXGIOutput output);
+        if (enumResult.Failure || output == null)
+        {
+            throw new InvalidOperationException($"Desktop capture: monitor index {_monitorIndex} not found.");
         }
 
-        // Fallback: static desktop or DXGI Desktop Duplication unavailable in the current session.
-        _hasFrame = CaptureViaGdi();
-        return _hasFrame;
+        using (output)
+        {
+            using IDXGIOutput1 output1 = output.QueryInterface<IDXGIOutput1>();
+            _duplication = output1.DuplicateOutput(_device);
+        }
     }
 
-    // GDI fallback used only to seed the first frame on a static desktop (Desktop
-    // Duplication is change-driven and yields nothing until the screen changes).
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr GetDC(IntPtr hWnd);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern bool BitBlt(IntPtr hdcDest, int x, int y, int w, int h, IntPtr hdcSrc, int x1, int y1, uint rop);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int w, int h);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern bool DeleteDC(IntPtr hdc);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern bool DeleteObject(IntPtr h);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern int GetDIBits(IntPtr hdc, IntPtr hbm, uint start, uint lines, IntPtr bits, ref BITMAPINFO bmi, uint usage);
-
-    private const uint SrcCopy = 0x00CC0020;
-    private const uint CaptureBlt = 0x40000000;
-    private const uint DibRgbColors = 0;
-    private const uint BiRgb = 0;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BitmapInfoHeader
+    private void EnsureBuffer()
     {
-        public uint Size;
-        public int Width;
-        public int Height;
-        public ushort Planes;
-        public ushort BitCount;
-        public uint Compression;
-        public uint SizeImage;
-        public int XPelsPerMeter;
-        public int YPelsPerMeter;
-        public uint ClrUsed;
-        public uint ClrImportant;
+        int bytes = checked(Width * Height * 4);
+        if (_buffer.Length == bytes && _bufferHandle.IsAllocated) return;
+        if (_bufferHandle.IsAllocated) _bufferHandle.Free();
+        _buffer = new byte[bytes];
+        _bufferHandle = GCHandle.Alloc(_buffer, GCHandleType.Pinned);
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BITMAPINFO
+    private void EnsureStaging()
     {
-        public BitmapInfoHeader Header;
-        public uint Colors;
+        if (_device == null || _staging != null) return;
+
+        _staging = _device.CreateTexture2D(new Texture2DDescription
+        {
+            Width = (uint)Width,
+            Height = (uint)Height,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = Format.B8G8R8A8_UNorm,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Staging,
+            BindFlags = BindFlags.None,
+            CPUAccessFlags = CpuAccessFlags.Read,
+            MiscFlags = ResourceOptionFlags.None
+        });
+    }
+
+    private static ID3D11Device CreateDevice()
+        => D3D11.D3D11CreateDevice(
+            DriverType.Hardware,
+            DeviceCreationFlags.BgraSupport,
+            new[] { FeatureLevel.Level_11_0 });
+
+    private void LogRecovery(string message)
+    {
+        long now = Environment.TickCount64;
+        if (now - _lastRecoveryLogTicks < RecoveryLogIntervalMs) return;
+        _lastRecoveryLogTicks = now;
+        AppLogger.LogInfo(message);
     }
 
     private unsafe bool CaptureViaGdi()
     {
-        IntPtr hdcScreen = IntPtr.Zero, hdcMem = IntPtr.Zero, hbm = IntPtr.Zero, old = IntPtr.Zero;
-        try
+        if (Width <= 0 || Height <= 0 || BufferPtr == IntPtr.Zero) return false;
+        if (!GdiSurface.TryCreate(Width, Height, out GdiSurface surface)) return false;
+
+        using (surface)
         {
-            hdcScreen = GetDC(IntPtr.Zero);
-            if (hdcScreen == IntPtr.Zero) return false;
+            if (!NativeMethods.BitBlt(
+                    surface.MemoryHandle, 0, 0, Width, Height,
+                    surface.ScreenHandle, _left, _top,
+                    NativeMethods.SrcCopy | NativeMethods.CaptureBlt))
+            {
+                return false;
+            }
 
-            hdcMem = CreateCompatibleDC(hdcScreen);
-            hbm = CreateCompatibleBitmap(hdcScreen, Width, Height);
-            if (hdcMem == IntPtr.Zero || hbm == IntPtr.Zero) return false;
-
-            old = SelectObject(hdcMem, hbm);
-            if (!BitBlt(hdcMem, 0, 0, Width, Height, hdcScreen, _left, _top, SrcCopy | CaptureBlt)) return false;
-
-            var bmi = new BITMAPINFO();
-            bmi.Header.Size = (uint)sizeof(BitmapInfoHeader);
+            var bmi = new NativeMethods.BitmapInfo();
+            bmi.Header.Size = (uint)sizeof(NativeMethods.BitmapInfoHeader);
             bmi.Header.Width = Width;
             bmi.Header.Height = -Height; // negative => top-down
             bmi.Header.Planes = 1;
             bmi.Header.BitCount = 32;
-            bmi.Header.Compression = BiRgb;
+            bmi.Header.Compression = NativeMethods.BiRgb;
 
-            if (GetDIBits(hdcMem, hbm, 0, (uint)Height, BufferPtr, ref bmi, DibRgbColors) == 0)
+            if (NativeMethods.GetDIBits(
+                    surface.MemoryHandle, surface.BitmapHandle, 0, (uint)Height,
+                    BufferPtr, ref bmi, NativeMethods.DibRgbColors) == 0)
+            {
                 return false;
+            }
 
             // GDI 32bpp DIBs are BGRX; make alpha opaque for OMT BGRA.
             byte* p = (byte*)BufferPtr;
             for (int i = 3; i < Width * Height * 4; i += 4) p[i] = 0xFF;
-
             return true;
-        }
-        finally
-        {
-            if (old != IntPtr.Zero && hdcMem != IntPtr.Zero) SelectObject(hdcMem, old);
-            if (hbm != IntPtr.Zero) DeleteObject(hbm);
-            if (hdcMem != IntPtr.Zero) DeleteDC(hdcMem);
-            if (hdcScreen != IntPtr.Zero) ReleaseDC(IntPtr.Zero, hdcScreen);
         }
     }
 
@@ -278,9 +438,17 @@ public sealed class DesktopFrameCapturer : IFrameSource
     {
         if (_disposed) return;
         _disposed = true;
+        DisposeResources();
+    }
+
+    private void DisposeResources()
+    {
         if (_bufferHandle.IsAllocated) _bufferHandle.Free();
-        _staging?.Dispose();
-        _duplication?.Dispose();
-        _device.Dispose();
+        try { _staging?.Dispose(); } catch { }
+        try { _duplication?.Dispose(); } catch { }
+        try { _device?.Dispose(); } catch { }
+        _staging = null;
+        _duplication = null;
+        _device = null;
     }
 }

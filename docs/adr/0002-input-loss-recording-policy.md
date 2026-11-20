@@ -29,9 +29,12 @@ transient 5-second outage ends the session until the operator notices.
    to stop writing the frozen last frame — and the grace period governs *resume-vs-stop*,
    not container lifetime: frames return within grace → resume recording into a new
    sequential segment (`…_partNN` suffix); they do not → the take ends at that final
-   segment. (Clarified 2026-10-15 during implementation review; the implementation
-   finalizes synchronously on the health-tick thread, consistent with the existing
-   Disconnect → StopRecording path — offloading is a recorded follow-up, not a defect.)
+   segment. The UI health timer does not run that finalize on the UI thread:
+   `InputHealthPoll` hops it to the thread pool (the same shape as a manual
+   `DisarmAsync`) and drops a later tick while one finalize is still in flight, so a
+   ffmpeg stop that waits out its budget cannot freeze the shell or start a second stop.
+   `CheckInputHealth()` stays synchronous for the headless suite, which asserts the
+   segment is finalized before the call returns.
 4. **Alarm surface:** banner + log. No audible alarm in this pass.
 
 ## Consequences

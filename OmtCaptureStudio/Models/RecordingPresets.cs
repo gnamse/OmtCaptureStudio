@@ -125,7 +125,7 @@ public static class RecordingPresets
 
         if (!string.IsNullOrWhiteSpace(preset.FilenamePrefix))
         {
-            config.FilenamePrefix = preset.FilenamePrefix;
+            config.FilenamePrefix = RecordingFileNames.SanitizePrefix(preset.FilenamePrefix);
         }
 
         if (!string.IsNullOrWhiteSpace(preset.BackupOutputDirectory))
