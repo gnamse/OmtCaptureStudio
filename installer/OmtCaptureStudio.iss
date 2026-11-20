@@ -3,7 +3,7 @@
 ; Targets Windows 10/11 x64 (Native AOT)
 
 #ifndef MyAppVersion
-#define MyAppVersion "1.0.0.25"
+#define MyAppVersion "1.0.0.26"
 #endif
 
 #define MyAppName "OMT Capture Studio"
