@@ -57,7 +57,7 @@ public partial class MainWindowViewModel
         await SetDesktopCaptureActiveAsync(!IsBroadcasting);
     }
 
-    public async Task SetDesktopCaptureActiveAsync(bool active)
+    public Task SetDesktopCaptureActiveAsync(bool active)
     {
         try
         {
@@ -142,6 +142,8 @@ public partial class MainWindowViewModel
             _broadcastState.StopBroadcasting();
             StatusText = $"Host capture error: {ex.Message}";
         }
+
+        return Task.CompletedTask;
     }
 
     private void PopulateBroadcastNetworks()
