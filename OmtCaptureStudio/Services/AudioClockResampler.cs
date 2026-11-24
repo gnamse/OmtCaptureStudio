@@ -1,35 +1,27 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
+using OmtCaptureStudio.Services.Forensics;
 
 namespace OmtCaptureStudio.Services;
 
 /// <summary>
-/// Locks the recording's audio stream to the video frame clock by resampling the
-/// interleaved 32-bit float PCM so that, on average, exactly
-/// <c>sampleRate / frameRate</c> audio frames are written per video frame.
-///
-/// Desktop/network capture sources deliver a variable true frame rate (vMix
-/// "Maximum Frame Rate 30" typically yields ~29.2 fps) while their audio runs on
-/// an independent clock (e.g. a virtual audio cable). FFmpeg is fed raw video and
-/// raw audio over named pipes and stamps both at the *nominal* rates we declare
-/// (<c>-r</c> / <c>-ar</c>), so any gap between the true and nominal rates makes
-/// the two tracks drift apart over a long take — the audible "skipping" a player
-/// produces when it periodically re-synchronizes.
+/// Keeps recorded audio on the wall clock. Output length tracks elapsed time at the
+/// stream sample rate; a slow or fast video frame count is not allowed to pitch-shift
+/// the mix (ADR-0014). A small PLL still corrects a real clock skew between the audio
+/// samples and the wall clock.
 ///
 /// Design: a streaming polyphase windowed-sinc (Blackman-Harris, 96 taps, 64 phases)
-/// resampler driven by a rate-PLL. The PLL measures the true clock ratio from
-/// *cumulative* video-frame and audio-frame counts and smooths it with an EMA; the
-/// cumulative ratio converges exactly to <c>trueFps / nominalFps</c> with no
-/// window-boundary quantization bias (a per-window count is biased down by up to one
-/// video frame per window, and an instantaneous cumulative-gap P-controller settles on
-/// a constant ~1.7% ratio offset — both rejected). The windowed-sinc kernel is
-/// band-limited with ~-92 dB stopband attenuation, so near-Nyquist content (cymbals,
-/// sibilance) passes with negligible rolloff — transparent for music, unlike linear
-/// interpolation which attenuates 19 kHz by ~4.7 dB. At ratio exactly 1.0 the phase-0
-/// tap is a unit impulse, so in-sync streams pass through bit-exact.
+/// resampler driven by that PLL. The measurement is <c>elapsedWall * sampleRate /
+/// samplesReceived</c>, smoothed with an EMA. The windowed-sinc kernel is band-limited
+/// with ~-92 dB stopband attenuation, so near-Nyquist content passes with negligible
+/// rolloff. At ratio exactly 1.0 the phase-0 tap is a unit impulse, so in-sync streams
+/// pass through bit-exact.
 ///
-/// The resample ratio is clamped to [0.9, 1.1] as a hard safety band: the true drift
-/// is ~2.6% (well inside) and a wild measurement can never pitch audio beyond 10%.
+/// The resample ratio is clamped to [0.9, 1.1] as a hard safety band: a wild
+/// measurement can never pitch audio beyond 10%. If the ratio stays on that clamp for
+/// more than <see cref="ClampWarnSeconds"/>, the take logs it once and the stop
+/// summary reports how long the clamp was held.
 ///
 /// Threading: confined to the media/source thread (video and audio callbacks are
 /// raised on the same thread). Headless-constructible and allocation-light — it
@@ -41,7 +33,10 @@ public sealed class AudioClockResampler
     private const double MinRatio = 0.9;
     private const double MaxRatio = 1.1;
     private const double RatioSmoothing = 0.1;     // EMA weight toward the cumulative estimate
-    private const double MeasureStartSeconds = 1.0; // start PLL only after ~1s of audio
+    private const double MeasureStartSeconds = 1.0; // start PLL only after ~1s of audio and wall time
+
+    /// <summary>A clamp that stays pinned this long is a warning, not a quiet pitch shift.</summary>
+    public const double ClampWarnSeconds = 3.0;
 
     private const int HalfWidth = 48;   // filter half-width in samples
     private const int TapCount = HalfWidth * 2; // 96 taps
@@ -55,11 +50,18 @@ public sealed class AudioClockResampler
     private int _channels = 2;
     private int _sampleRate = 48000;
 
-    // Rate-PLL state (cumulative video frames vs cumulative audio input frames).
+    // Rate-PLL state. The reference is the wall clock, not the video frame count.
     private long _videoFrames;
     private long _audioInFrames;
     private double _ratio = 1.0;
     private volatile bool _ratioClamped;
+    private Func<long> _clock = static () => Stopwatch.GetTimestamp();
+    private long _frequency = Stopwatch.Frequency;
+    private long _clockOrigin;
+    private long _clampPinStart;
+    private long _lastClampSample;
+    private long _clampPinnedTotalTicks;
+    private int _clampWarned;
 
     // Streaming resampler state. `_fifo` holds interleaved input frames — the
     // HalfWidth-1 frames of FIR history plus the not-yet-consumed tail, oldest first.
@@ -87,19 +89,49 @@ public sealed class AudioClockResampler
     /// </summary>
     public bool IsRatioClamped => _ratioClamped;
 
+    /// <summary>Seconds the safety clamp has been held during this take.</summary>
+    public double ClampPinnedSeconds
+    {
+        get
+        {
+            long ticks = Interlocked.Read(ref _clampPinnedTotalTicks);
+            long frequency = _frequency;
+            return frequency > 0 ? ticks / (double)frequency : 0;
+        }
+    }
+
+    /// <summary>True once the clamp has stayed pinned for <see cref="ClampWarnSeconds"/>.</summary>
+    public bool ClampWarningRaised => Volatile.Read(ref _clampWarned) != 0;
+
     public long VideoFramesSeen => Interlocked.Read(ref _videoFrames);
 
     /// <summary>
-    /// Re-arms the resampler for a new recording session, using the (measured) true
-    /// frame rate that FFmpeg will stamp video with, and the stream's sample rate/channels.
+    /// Re-arms the resampler for a new recording session. <paramref name="frameRate"/> is the
+    /// announced output rate (kept for callers that still read <see cref="SamplesPerFrame"/>);
+    /// it does not drive the resample ratio.
     /// </summary>
     public void Reset(int sampleRate, double frameRate, int channels)
+        => Reset(sampleRate, frameRate, channels, null, 0);
+
+    /// <summary>
+    /// Re-arms the resampler. <paramref name="mediaClock"/> and <paramref name="mediaFrequency"/>
+    /// are the same clock the video conformer uses, so a test can advance both without sleeping.
+    /// A null clock reads <see cref="Stopwatch"/>.
+    /// </summary>
+    public void Reset(int sampleRate, double frameRate, int channels, Func<long>? mediaClock, long mediaFrequency)
     {
         lock (_processLock)
         {
             _sampleRate = sampleRate > 0 ? sampleRate : 48000;
             _channels = channels > 0 ? channels : 2;
             SamplesPerFrame = _sampleRate / (frameRate > 0 ? frameRate : 30.0);
+            _clock = mediaClock ?? (static () => Stopwatch.GetTimestamp());
+            _frequency = mediaFrequency > 0 ? mediaFrequency : Stopwatch.Frequency;
+            _clockOrigin = _clock();
+            _clampPinStart = 0;
+            _lastClampSample = 0;
+            Interlocked.Exchange(ref _clampPinnedTotalTicks, 0);
+            Volatile.Write(ref _clampWarned, 0);
             Interlocked.Exchange(ref _videoFrames, 0);
             _audioInFrames = 0;
             _ratio = 1.0;
@@ -118,7 +150,7 @@ public sealed class AudioClockResampler
         }
     }
 
-    /// <summary>Report one video frame received (keeps the running clock in step).</summary>
+    /// <summary>Counts a written video picture. Telemetry only; it does not move the resample ratio.</summary>
     public void OnVideoFrame()
     {
         Interlocked.Increment(ref _videoFrames);
@@ -147,28 +179,34 @@ public sealed class AudioClockResampler
                 return _outBytes;
             }
 
-            // 1. Re-estimate the true clock ratio from cumulative counts and smooth it.
-            //    Converges exactly to trueFps/nominalFps once enough audio has flowed.
+            // 1. Re-estimate the ratio from wall time versus samples received. A video frame
+            //    count is intentionally not in this formula: slaving audio to it is what pinned
+            //    a field take at the 1.1 clamp and slowed the mix.
             _audioInFrames += inFrames;
-            long videoFrames = Interlocked.Read(ref _videoFrames);
-            if (_audioInFrames >= (long)(_sampleRate * MeasureStartSeconds) && videoFrames > 0)
+            long now = _clock();
+            double elapsed = _frequency > 0 ? (now - _clockOrigin) / (double)_frequency : 0;
+            if (_audioInFrames >= (long)(_sampleRate * MeasureStartSeconds) && elapsed >= MeasureStartSeconds)
             {
-                double measured = (videoFrames * SamplesPerFrame) / _audioInFrames;
+                double measured = (elapsed * _sampleRate) / _audioInFrames;
                 _ratio += (measured - _ratio) * RatioSmoothing;
+                bool pinned;
                 if (_ratio < MinRatio)
                 {
                     _ratio = MinRatio;
-                    _ratioClamped = true;
+                    pinned = true;
                 }
                 else if (_ratio > MaxRatio)
                 {
                     _ratio = MaxRatio;
-                    _ratioClamped = true;
+                    pinned = true;
                 }
                 else
                 {
-                    _ratioClamped = false;
+                    pinned = false;
                 }
+
+                _ratioClamped = pinned;
+                NoteClamp(now, pinned);
             }
 
             // 2. Append the incoming chunk to the FIFO.
@@ -246,6 +284,34 @@ public sealed class AudioClockResampler
                 Buffer.BlockCopy(_out, 0, _outBytes, 0, outCount);
             }
             return _outBytes;
+        }
+    }
+
+    private void NoteClamp(long now, bool pinned)
+    {
+        if (!pinned)
+        {
+            _clampPinStart = 0;
+            _lastClampSample = 0;
+            return;
+        }
+
+        if (_clampPinStart == 0) _clampPinStart = now;
+        if (_lastClampSample != 0 && now > _lastClampSample)
+        {
+            Interlocked.Add(ref _clampPinnedTotalTicks, now - _lastClampSample);
+        }
+
+        _lastClampSample = now;
+        long continuous = now - _clampPinStart;
+        if (Volatile.Read(ref _clampWarned) == 0
+            && _frequency > 0
+            && continuous >= (long)(_frequency * ClampWarnSeconds))
+        {
+            Volatile.Write(ref _clampWarned, 1);
+            AppLogger.LogError(
+                $"Recording audio resample ratio is pinned at {_ratio:F3} for {ClampWarnSeconds:F0}s. " +
+                "The safety clamp is holding the pitch; recorded audio length will not match wall time.");
         }
     }
 

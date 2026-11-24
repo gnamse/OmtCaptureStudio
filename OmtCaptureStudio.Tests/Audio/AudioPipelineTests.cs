@@ -17,96 +17,89 @@ namespace OmtCaptureStudio.Tests;
 partial class Program
 {
     /// <summary>
-    /// Exercises the audio/video clock-lock resampler directly, headless.
+    /// Exercises the wall-clock resampler directly, headless, with an injected clock.
     ///
-    /// The invariant that keeps A/V locked is: output audio frames ==
-    /// videoFrames * (sampleRate / frameRate). Both cases assert the resampler tracks
-    /// that target (within the un-flushed final-chunk tail) and that its ratio
-    /// converges to trueFps / nominalFps.
-    ///
-    /// Case A (drift): source reports 30 fps but delivers ~29.226 fps (the vMix defect).
-    /// Case B (lockstep): video and audio clocks already agree.
+    /// Audio length follows elapsed wall time, not the video frame count. A sender that
+    /// delivers video at 29.226 fps while audio arrives in real time must stay near ratio
+    /// 1.0. A wall clock that runs far ahead of the samples pins the safety clamp and,
+    /// once that pin lasts a few seconds, raises the warning.
     /// </summary>
     static void TestAudioClockResampler()
     {
-        Console.WriteLine("\n[Step 0.6] Verifying AudioClockResampler (drift correction + passthrough)...");
-        // --- Case A: 30 fps nominal, ~29.226 fps true delivery (vMix defect) ---
+        Console.WriteLine("\n[Step 0.6] Verifying AudioClockResampler (wall-clock reference + clamp warning)...");
+        // --- Case A: video arrives slow, audio arrives in real time. Do not pitch-shift. ---
         {
             const int sampleRate = 48000, channels = 2;
             const double nominalFps = 30.0, trueFps = 29.226;
-            const double seconds = 30.0;
-            var (ratio, inputFrames, outputFrames, videoFrames) =
-                SimulateResampler(sampleRate, nominalFps, trueFps, channels, seconds);
+            const double seconds = 8.0;
+            var (ratio, inputFrames, outputFrames, videoFrames, warned) =
+                SimulateResampler(sampleRate, nominalFps, trueFps, channels, seconds, clockScale: 1.0);
 
-            double expectedRatio = trueFps / nominalFps; // 0.9742
-            double target = videoFrames * (sampleRate / nominalFps); // what keeps A/V locked
+            Console.WriteLine($" -> Real-time audio, video at {trueFps} fps: ratio {ratio:F4}, " +
+                              $"out {outputFrames} vs in {inputFrames} (video frames {videoFrames}, warned {warned})");
 
-            Console.WriteLine($" -> Drift case: video at {trueFps} fps vs nominal {nominalFps}; " +
-                              $"ratio {ratio:F4} (expected {expectedRatio:F4}), " +
-                              $"out {outputFrames} vs target {target:F0} (diff {outputFrames - target:F0} frames)");
-
-            if (Math.Abs(ratio - expectedRatio) > 0.003)
+            if (Math.Abs(ratio - 1.0) > 0.01)
             {
                 throw new Exception(
-                    $"AudioClockResampler drift test failed: converged ratio {ratio:F4} vs expected {expectedRatio:F4}");
+                    $"Audio must not follow the slow video clock. Ratio {ratio:F4} should stay near 1.0.");
             }
-            // Must track the video clock closely; the last ~1 chunk (≤ ~2k frames) is
-            // legitimately un-flushed at the recording edge.
-            if (Math.Abs(outputFrames - target) > 2000)
+            if (Math.Abs(outputFrames - inputFrames) > 2000)
             {
                 throw new Exception(
-                    $"AudioClockResampler drift test failed: output {outputFrames} vs A/V-lock target {target:F0}");
+                    $"Real-time audio length {outputFrames} drifted from the samples received {inputFrames}.");
+            }
+            if (warned)
+            {
+                throw new Exception("A 1.0 wall/audio clock must not raise the clamp warning.");
             }
         }
 
-        // --- Case B: clocks already agree -> ratio 1.0, output tracks video clock ---
+        // --- Case B: clocks already agree -> ratio 1.0, output tracks the samples. ---
         {
             const int sampleRate = 48000, channels = 2;
             const double fps = 60.0;
-            const double seconds = 20.0;
-            var (ratio, inputFrames, outputFrames, videoFrames) =
-                SimulateResampler(sampleRate, fps, fps, channels, seconds);
+            const double seconds = 6.0;
+            var (ratio, inputFrames, outputFrames, _, _) =
+                SimulateResampler(sampleRate, fps, fps, channels, seconds, clockScale: 1.0);
 
-            double target = videoFrames * (sampleRate / fps);
-
-            Console.WriteLine($" -> Lockstep case: ratio {ratio:F4}, " +
-                              $"out {outputFrames} vs target {target:F0} (diff {outputFrames - target:F0} frames)");
+            Console.WriteLine($" -> Lockstep case: ratio {ratio:F4}, out {outputFrames} vs in {inputFrames}");
 
             if (Math.Abs(ratio - 1.0) > 0.001)
             {
                 throw new Exception($"AudioClockResampler lockstep test failed: ratio {ratio:F4} != 1.0");
             }
-            if (Math.Abs(outputFrames - target) > 2000)
+            if (Math.Abs(outputFrames - inputFrames) > 2000)
             {
                 throw new Exception(
-                    $"AudioClockResampler lockstep test failed: output {outputFrames} vs A/V-lock target {target:F0}");
+                    $"AudioClockResampler lockstep test failed: output {outputFrames} vs input {inputFrames}");
             }
         }
 
-        // --- Case C: near-Nyquist amplitude preserved (music transparency) ---
+        // --- Case C: near-Nyquist amplitude preserved while a small skew is corrected. ---
         {
             const int sampleRate = 48000, channels = 1;
-            const double nominalFps = 30.0, trueFps = 29.226; // drift ratio ~0.974
+            const double nominalFps = 30.0;
             const double freq = 19000.0, amp = 0.5;
+            const long frequency = 10_000_000;
+            long now = 0;
 
             var resampler = new AudioClockResampler();
-            resampler.Reset(sampleRate, nominalFps, channels);
+            resampler.Reset(sampleRate, nominalFps, channels, () => now, frequency);
 
             const int chunkFrames = 1024;
             const double seconds = 5.0;
             int totalChunks = (int)(seconds * sampleRate / chunkFrames);
 
             var collected = new List<float>(totalChunks * chunkFrames);
-            double videoClock = 0.0, phase = 0.0;
+            double phase = 0.0;
             var chunk = new byte[chunkFrames * 4];
+            // Wall clock runs 1% slow: a small correction, inside the clamp, so the sinc
+            // path is actually exercised (ratio 1.0 would be a unit impulse).
+            const double clockScale = 0.99;
 
             for (int i = 0; i < totalChunks; i++)
             {
-                videoClock += (double)chunkFrames / sampleRate * trueFps;
-                while (resampler.VideoFramesSeen < (long)videoClock)
-                {
-                    resampler.OnVideoFrame();
-                }
+                now += (long)(chunkFrames / (double)sampleRate * frequency * clockScale);
 
                 for (int f = 0; f < chunkFrames; f++)
                 {
@@ -140,6 +133,10 @@ partial class Program
 
             Console.WriteLine($" -> Quality case: {freq / 1000.0:F0} kHz sine resampled at ratio {resampler.Ratio:F4}; " +
                               $"gain {gainDb:F3} dB (windowed-sinc ≈ 0 dB, linear would be ≈ -4.7 dB)");
+            if (resampler.Ratio > 0.995)
+            {
+                throw new Exception($"The 1% slow clock should have moved the ratio below 0.995; it is {resampler.Ratio:F4}.");
+            }
 
             // Windowed-sinc keeps near-Nyquist content to ~unity; a linear kernel would
             // land ~-4.7 dB. Allow a comfortable margin above that.
@@ -150,8 +147,25 @@ partial class Program
             }
         }
 
+        // --- Case D: wall clock far ahead of the samples. The clamp pins, then warns. ---
+        {
+            const int sampleRate = 48000, channels = 2;
+            var (ratio, _, _, _, warned) =
+                SimulateResampler(sampleRate, 30.0, 30.0, channels, seconds: 6.0, clockScale: 1.25);
+
+            Console.WriteLine($" -> Clamp case: ratio {ratio:F4}, warning raised {warned}.");
+            if (Math.Abs(ratio - 1.1) > 0.001)
+            {
+                throw new Exception($"A 25% fast wall clock must pin the ratio at 1.1; got {ratio:F4}.");
+            }
+            if (!warned)
+            {
+                throw new Exception("A clamp held for more than a few seconds must raise the warning.");
+            }
+        }
+
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine(" -> AudioClockResampler drift correction and lockstep verified!");
+        Console.WriteLine(" -> AudioClockResampler wall-clock reference, small correction, and clamp warning verified!");
         Console.ResetColor();
     }
 
@@ -523,27 +537,30 @@ partial class Program
         => 2.0 * Math.PI * (f0 * t + (f1 - f0) / 2.0 * t * t);
 
     /// <summary>
-    /// Feeds ~<paramref name="seconds"/> of audio in 1024-frame chunks, advancing the
-    /// video clock at <paramref name="trueFps"/> between chunks, and returns the
-    /// resampler's converged ratio plus total input/output frame counts and video frames.
+    /// Feeds ~<paramref name="seconds"/> of audio in 1024-frame chunks. The injected wall
+    /// clock advances by <paramref name="clockScale"/> times the audio duration of each
+    /// chunk (1.0 is real time). Video frames are still counted at <paramref name="trueFps"/>
+    /// so a regression that slaves the ratio to them fails the real-time case.
     /// </summary>
-    static (double ratio, long inputFrames, long outputFrames, long videoFrames) SimulateResampler(
-        int sampleRate, double nominalFps, double trueFps, int channels, double seconds)
+    static (double ratio, long inputFrames, long outputFrames, long videoFrames, bool warned) SimulateResampler(
+        int sampleRate, double nominalFps, double trueFps, int channels, double seconds, double clockScale)
     {
+        const long frequency = 10_000_000;
+        long now = 0;
         var resampler = new AudioClockResampler();
-        resampler.Reset(sampleRate, nominalFps, channels);
+        resampler.Reset(sampleRate, nominalFps, channels, () => now, frequency);
 
         const int chunkFrames = 1024;
         var chunk = new byte[chunkFrames * channels * 4];
         int totalChunks = (int)(seconds * sampleRate / chunkFrames);
 
         long inputFrames = 0, outputFrames = 0;
-        double videoClock = 0.0; // fractional video frames elapsed
+        double videoClock = 0.0;
 
         for (int i = 0; i < totalChunks; i++)
         {
-            // Advance the video clock by this audio chunk's wall-clock duration.
             double audioSeconds = (double)chunkFrames / sampleRate;
+            now += (long)(audioSeconds * frequency * clockScale);
             videoClock += audioSeconds * trueFps;
             while (resampler.VideoFramesSeen < (long)videoClock)
             {
@@ -555,7 +572,7 @@ partial class Program
             outputFrames += outBytes / (channels * 4);
         }
 
-        return (resampler.Ratio, inputFrames, outputFrames, resampler.VideoFramesSeen);
+        return (resampler.Ratio, inputFrames, outputFrames, resampler.VideoFramesSeen, resampler.ClampWarningRaised);
     }
 
 }

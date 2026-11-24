@@ -302,7 +302,7 @@ public sealed class RecordingArm : IDisposable
                 _heldLength = 0;
                 Interlocked.Exchange(ref _videoDuplicates, 0);
                 Interlocked.Exchange(ref _videoPaceDrops, 0);
-                _avClock.Reset(format.SampleRate, outputRate.FramesPerSecond, format.Channels);
+                _avClock.Reset(format.SampleRate, outputRate.FramesPerSecond, format.Channels, _mediaNow, _mediaFrequency);
 
                 // ---- Step 2: storage preflight (policy lives in the guard) -------------------------
                 // In-memory sinks (NullRecordingSink) never write bytes to the candidate path, so the
@@ -462,13 +462,13 @@ public sealed class RecordingArm : IDisposable
                 Reason: reason,
                 VideoFramesDuplicated: videoDuplicates,
                 PaceFramesDropped: paceDrops,
-                AudioClampSeconds: 0);
+                AudioClampSeconds: _avClock.ClampPinnedSeconds);
 
             summary = stopSummary;
 
             AppLogger.LogInfo(
                 $"Recording disarmed ({reason}): {path}, {fileSize} bytes, media {stopSummary.MediaDuration.TotalSeconds:F2}s, " +
-                $"dups {videoDuplicates}, pace-drops {paceDrops}, " +
+                $"dups {videoDuplicates}, pace-drops {paceDrops}, audio clamp {_avClock.ClampPinnedSeconds:F1}s, " +
                 $"drained {drainedAfterMs} ms{(finalizeError == null ? string.Empty : $", FINALIZE FAILED: {finalizeError}")}, " +
                 RecordingHealth.WallClockNote(stopSummary));
 
@@ -851,8 +851,8 @@ public sealed class RecordingArm : IDisposable
     }
 
     /// <summary>
-    /// One video frame at the recording clock: advances the A/V drift estimate. Call once per frame
-    /// that was actually written, under the same gate as the write itself.
+    /// Counts one written video picture. The resample ratio follows the wall clock, not this count
+    /// (ADR-0014); the counter remains for telemetry.
     /// </summary>
     public void OnVideoFrame()
     {
