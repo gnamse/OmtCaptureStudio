@@ -235,6 +235,72 @@ partial class Program
         Console.ResetColor();
 
         TestRecordingFrameConform();
+        TestAudioSendByElapsedTime();
+    }
+
+    /// <summary>
+    /// ADR-0014: audio owed by one sender pass is every sample up to the emitted frame, so a
+    /// skip-ahead still carries the audio for the pictures it did not draw. Injected counts only.
+    /// </summary>
+    static void TestAudioSendByElapsedTime()
+    {
+        Console.WriteLine("\n[Step 0.705c] Verifying audio-by-elapsed-time sender math...");
+
+        RationalFrameRate thirty = RationalFrameRate.FromInteger(30);
+        Expect(AudioSendSchedule.SamplesDue(thirty, 48000, emittedFrameIndexInclusive: 0, samplesAlreadySent: 0) == 1600,
+            "The first 30 fps frame owes 1600 samples at 48 kHz.");
+
+        long sent = 0;
+        for (long frame = 0; frame < 30; frame++)
+        {
+            int due = AudioSendSchedule.SamplesDue(thirty, 48000, frame, sent);
+            Expect(due == 1600, $"Frame {frame} on time must owe exactly 1600 samples, got {due}.");
+            sent += due;
+        }
+
+        Expect(sent == 48000, $"Thirty frames must be exactly one second of audio. Got {sent}.");
+
+        // The pacer emitted frame 4, then the next pass jumped to frame 10.
+        long afterFour = thirty.SamplesUntil(5, 48000);
+        int skipped = AudioSendSchedule.SamplesDue(thirty, 48000, emittedFrameIndexInclusive: 10, samplesAlreadySent: afterFour);
+        int expectedSpan = 0;
+        for (long frame = 5; frame <= 10; frame++)
+        {
+            expectedSpan += thirty.SamplesForFrame(frame, 48000);
+        }
+
+        Expect(skipped == expectedSpan,
+            $"A skip from frame 5 through 10 must owe those frames' samples ({expectedSpan}), got {skipped}.");
+        Expect(skipped > thirty.SamplesForFrame(10, 48000),
+            "A skip must send more than the single frame that was drawn.");
+
+        RationalFrameRate ntsc = RationalFrameRate.Ntsc5994;
+        long ntscSent = 0;
+        for (long frame = 0; frame < 60000; frame++)
+        {
+            int due = AudioSendSchedule.SamplesDue(ntsc, 48000, frame, ntscSent);
+            if (due != ntsc.SamplesForFrame(frame, 48000))
+            {
+                throw new Exception($"NTSC frame {frame} owed {due}, expected {ntsc.SamplesForFrame(frame, 48000)}.");
+            }
+
+            ntscSent += due;
+        }
+
+        Expect(ntscSent == 48000L * 1001,
+            $"Sending one NTSC frame at a time must still total 48000*1001 samples. Got {ntscSent}.");
+
+        // One jump across the whole NTSC second-and-a-bit owes the same total.
+        int jumped = AudioSendSchedule.SamplesDue(ntsc, 48000, emittedFrameIndexInclusive: 59999, samplesAlreadySent: 0);
+        Expect(jumped == 48000 * 1001,
+            $"A single pass that lands on frame 59999 owes the whole NTSC span. Got {jumped}.");
+
+        Expect(AudioSendSchedule.SamplesDue(thirty, 48000, 3, samplesAlreadySent: thirty.SamplesUntil(4, 48000)) == 0,
+            "Nothing is owed when the samples for that frame were already sent.");
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> Sender audio follows elapsed schedule time, including frames the pacer skipped.");
+        Console.ResetColor();
     }
 
     /// <summary>

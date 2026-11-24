@@ -1,4 +1,5 @@
 using System;
+using OmtCaptureStudio.Services.Forensics;
 
 namespace OmtCaptureStudio.Services.Audio;
 
@@ -7,7 +8,8 @@ namespace OmtCaptureStudio.Services.Audio;
 /// <para>
 /// It owns the whole policy that used to be copy-pasted into <c>AsioHostAudioSource</c> and
 /// <c>WasapiEndpointCapture</c>: capacity, the accumulated-latency cap, the drop-to-half-window
-/// overflow rule, the underrun-to-silence rule, and the lock.
+/// overflow rule, the underrun-to-silence rule, and the lock. The default cap is one second
+/// (ADR-0014); the 120 ms cap discarded programme audio when the consumer was briefly late.
 /// </para>
 /// <para>
 /// <b>Rate-agnostic by design.</b> The two adapters put DIFFERENT things in it — the ASIO path
@@ -23,17 +25,22 @@ namespace OmtCaptureStudio.Services.Audio;
 /// </summary>
 public sealed class StereoCaptureRing
 {
-    /// <summary>Default capacity: 1.0 s at 48 kHz.</summary>
-    public const int DefaultCapacitySamples = 48_000;
+    /// <summary>Default capacity: 2.0 s at 48 kHz, so a slow send loop can catch up.</summary>
+    public const int DefaultCapacitySamples = 48_000 * 2;
 
-    /// <summary>Default accumulated-latency cap: 120 ms at 48 kHz.</summary>
-    public const int DefaultMaxLatencySamples = 48_000 * 120 / 1000;
+    /// <summary>
+    /// Default backlog cap: 1.0 s at 48 kHz. A 120 ms cap trimmed real programme audio whenever
+    /// the send loop ran behind a frame or two (ADR-0014). Trim only past this, and log it.
+    /// </summary>
+    public const int DefaultMaxLatencySamples = 48_000;
 
     private readonly float[] _left;
     private readonly float[] _right;
     private int _readIndex;
     private int _writeIndex;
     private int _availableSamples;
+    private long _trimmedSamples;
+    private long _lastTrimLogMs;
 
     public StereoCaptureRing(
         int capacitySamples = DefaultCapacitySamples,
@@ -137,12 +144,21 @@ public sealed class StereoCaptureRing
             _readIndex = (_readIndex + 1) % CapacitySamples;
         }
 
-        // Bound accumulated latency so audio never drifts behind video over long sessions.
+        // Only a genuine backlog is trimmed. A send loop that is a frame or two late must be
+        // able to drain the samples it already captured.
         if (_availableSamples > MaxLatencySamples)
         {
             int drop = _availableSamples - (MaxLatencySamples / 2);
             _readIndex = (_readIndex + drop) % CapacitySamples;
             _availableSamples -= drop;
+            _trimmedSamples += drop;
+            long now = Environment.TickCount64;
+            if (now - _lastTrimLogMs >= 1000)
+            {
+                _lastTrimLogMs = now;
+                AppLogger.LogError(
+                    $"Host audio ring trimmed {_trimmedSamples} samples; the backlog exceeded {MaxLatencySamples} frames.");
+            }
         }
     }
 

@@ -180,7 +180,7 @@ partial class Program
 
         // --- Defaults and argument guards. ---
         var defaults = new StereoCaptureRing();
-        if (defaults.CapacitySamples != 48_000 || defaults.MaxLatencySamples != 5_760)
+        if (defaults.CapacitySamples != 96_000 || defaults.MaxLatencySamples != 48_000)
         {
             throw new Exception($"Ring defaults mismatch: capacity={defaults.CapacitySamples}, maxLatency={defaults.MaxLatencySamples}");
         }
