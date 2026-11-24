@@ -451,6 +451,8 @@ partial class Program
             Expect(logged.Count > 0,
                 "A failed write must be LOGGED, so the field problem is diagnosable.");
 
+            TestRecordingAudioSettingsMigration(root);
+
             // ---- 6. THE VIEWMODEL APPLIES RESTORED VALUES, AND WRITES ONLY ON CHANGE. ---------------
             using (var seam = BuildHeadlessSession())
             {
@@ -498,6 +500,120 @@ partial class Program
         Console.WriteLine(" -> Settings persist across a relaunch: round trip exact, a corrupt file is quarantined " +
                           "with its evidence kept, a vanished drive costs only that field, a failed write is " +
                           "logged not thrown, and restoring is silent while a real change writes immediately!");
+    }
+
+    /// <summary>
+    /// ADR-0014 / ADR-0006 version 4: a file that never mentions the recording audio route stays on
+    /// OMT source audio and a 0 ms offset. A stored host input and offset survive a reload, and an
+    /// absurd offset is clamped. The host-feed pull is an injected clock, not a sleep.
+    /// </summary>
+    static void TestRecordingAudioSettingsMigration(string root)
+    {
+        Console.WriteLine("\n[Step 0.692b] Verifying recording audio route migration, offset, and host-feed pull...");
+
+        string legacyPath = Path.Combine(root, "v3.json");
+        File.WriteAllText(legacyPath, """
+            {
+              "Version": 3,
+              "ContainerFormat": "MP4",
+              "Quality": "High"
+            }
+            """);
+        RecordingConfig legacy = SettingsStore.ToConfig(new SettingsStore(legacyPath).Load());
+        Expect(legacy.AudioRoute == RecordingAudioRoute.OmtSource,
+            "A version 3 file must keep OMT source audio.");
+        Expect(legacy.AudioVideoOffsetMilliseconds == 0, "A version 3 file must keep a 0 ms offset.");
+
+        var host = new RecordingConfig
+        {
+            OutputDirectory = root,
+            AudioRoute = RecordingAudioRoute.HostInput,
+            HostAudioMode = HostAudioCaptureMode.Microphone.ToString(),
+            HostAudioDeviceId = "mic-1",
+            HostAudioAsioChannel = 2,
+            AudioVideoOffsetMilliseconds = -250
+        };
+        string hostPath = Path.Combine(root, "host.json");
+        var hostStore = new SettingsStore(hostPath);
+        Expect(hostStore.Save(SettingsStore.FromConfig(host, "Custom")), "Saving a host recording route must succeed.");
+        string saved = File.ReadAllText(hostPath);
+        Expect(saved.Contains("\"HostInput\"", StringComparison.Ordinal), "The route must persist as its name.");
+        RecordingConfig round = SettingsStore.ToConfig(new SettingsStore(hostPath).Load());
+        Expect(round.AudioRoute == RecordingAudioRoute.HostInput, "The host route must reload.");
+        Expect(round.HostAudioMode == "Microphone", $"The host mode must reload. Got {round.HostAudioMode}.");
+        Expect(round.HostAudioDeviceId == "mic-1", "The device id must reload.");
+        Expect(round.HostAudioAsioChannel == 2, "The ASIO channel must reload.");
+        Expect(round.AudioVideoOffsetMilliseconds == -250, "The offset must reload.");
+
+        RecordingConfig wild = SettingsStore.ToConfig(new OperatorSettings { AudioVideoOffsetMilliseconds = 9_999_999 });
+        Expect(wild.AudioVideoOffsetMilliseconds == AudioOffset.MaxMilliseconds,
+            "An absurd offset must clamp rather than shift by hours.");
+        Expect(SettingsStore.ToConfig(new OperatorSettings { RecordingAudioRoute = "HostInput" }).AudioRoute
+               == RecordingAudioRoute.OmtSource,
+            "A host route with no mode must fall back to OMT rather than guess a device.");
+
+        Expect(AudioOffset.FramesFor(100, 48000) == 4800, "100 ms at 48 kHz is 4800 frames.");
+        Expect(AudioOffset.FramesFor(-20, 48000) == -960, "A negative offset advances audio.");
+        AudioOffsetStep delay = AudioOffset.Step(remainingFrames: 100, availableFrames: 40);
+        Expect(delay.SilenceFrames == 100 && delay.KeepFrames == 40 && delay.Remaining == 0,
+            "A positive offset emits the silence debt and keeps the samples.");
+        AudioOffsetStep advance = AudioOffset.Step(remainingFrames: -30, availableFrames: 10);
+        Expect(advance.SkipFrames == 10 && advance.KeepFrames == 0 && advance.Remaining == -20,
+            "A negative offset drops samples until the debt is paid.");
+        AudioOffsetStep done = AudioOffset.Step(advance.Remaining, 25);
+        Expect(done.SkipFrames == 20 && done.KeepFrames == 5 && done.Remaining == 0,
+            "The remainder of a negative offset is paid on the next chunk.");
+
+        const long frequency = 10_000_000;
+        long now = 1_000;
+        int pulls = 0;
+        int samples = 0;
+        float firstLeft = 0;
+        float firstRight = 0;
+        var feed = new RecordingHostAudioFeed(
+            new ScriptedPlanarSource(),
+            (buffer, count) =>
+            {
+                pulls++;
+                samples += count / 8;
+                firstLeft = BitConverter.ToSingle(buffer, 0);
+                firstRight = BitConverter.ToSingle(buffer, 4);
+            },
+            () => now,
+            frequency);
+        Expect(feed.PullDue(now) == 0, "The first pull anchors the clock and sends nothing.");
+        now += frequency / 2;
+        int got = feed.PullDue(now);
+        Expect(got == 24000, $"Half a second at 48 kHz is 24000 samples. Got {got}.");
+        Expect(pulls == 1 && samples == 24000, "The callback must see the samples that were due.");
+        Expect(firstLeft == 0.25f && firstRight == -0.5f,
+            $"Interleaved audio must be left then right. Got {firstLeft}, {firstRight}.");
+        Expect(feed.PullDue(now) == 0, "The same timestamp must not send the samples again.");
+        feed.Dispose();
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> Recording audio route migrates, the offset math holds, and the host feed pulls by the clock.");
+        Console.ResetColor();
+    }
+
+    private sealed class ScriptedPlanarSource : IHostAudioSource
+    {
+        public int SampleRate => 48000;
+        public int Channels => 2;
+        public bool IsHardwareActive => true;
+        public int DeviceSampleRate => 48000;
+        public bool IsResamplingRequired => false;
+        public string? RateNegotiationNote => null;
+        public int InputLatencyFrames => 0;
+        public string? LastError => null;
+
+        public void FillPlanarAudio(Span<float> planarDestination, int samplesPerChannel)
+        {
+            for (int i = 0; i < samplesPerChannel; i++) planarDestination[i] = 0.25f;
+            for (int i = 0; i < samplesPerChannel; i++) planarDestination[samplesPerChannel + i] = -0.5f;
+        }
+
+        public void Dispose() { }
     }
 
 }

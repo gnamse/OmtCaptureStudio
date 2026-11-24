@@ -16,7 +16,7 @@ namespace OmtCaptureStudio.Services;
 /// <summary>
 /// Broadcasts a host capture target (a monitor or a window — any <see cref="IFrameSource"/>)
 /// and a host audio source (<see cref="IHostAudioSource"/>) over OMT by sending each captured
-/// video frame and lockstep 48 kHz stereo <c>FPA1</c> audio frame through <see cref="OMTSend"/>.
+/// video frame and the 48 kHz stereo <c>FPA1</c> audio that elapsed since the previous send.
 /// </summary>
 public sealed class OmtDesktopCaptureGenerator : IDisposable
 {

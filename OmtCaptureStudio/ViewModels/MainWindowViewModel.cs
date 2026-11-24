@@ -550,6 +550,18 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private SinkEngine _selectedSinkEngine = SinkEngine.Ffmpeg;
 
+    [ObservableProperty]
+    private IReadOnlyList<RecordingAudioChoice> _recordingAudioChoices = new[] { RecordingAudioChoice.Omt };
+
+    [ObservableProperty]
+    private RecordingAudioChoice _selectedRecordingAudioChoice = RecordingAudioChoice.Omt;
+
+    /// <summary>Text of the A/V offset box. Parsed into <see cref="RecordingConfig.AudioVideoOffsetMilliseconds"/>.</summary>
+    [ObservableProperty]
+    private string _audioVideoOffsetText = "0";
+
+    private int _audioVideoOffsetMilliseconds;
+
     public IReadOnlyList<QualityPreset> QualityPresets { get; } = Enum.GetValues<QualityPreset>();
 
     [ObservableProperty]
@@ -728,6 +740,9 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
             SelectedEncoderChoice = _operatorDefaults.EncoderChoice;
             SelectedQualityPreset = _operatorDefaults.Quality;
             SelectedSinkEngine = _operatorDefaults.SinkEngine;
+            _audioVideoOffsetMilliseconds = _operatorDefaults.AudioVideoOffsetMilliseconds;
+            AudioVideoOffsetText = _operatorDefaults.AudioVideoOffsetMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            RebuildRecordingAudioChoices();
             OutputDirectory = _operatorDefaults.OutputDirectory;
             BackupOutputDirectory = _operatorDefaults.BackupOutputDirectory ?? string.Empty;
 
@@ -767,6 +782,21 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
         config.EncoderChoice = SelectedEncoderChoice;
         config.Quality = SelectedQualityPreset;
         config.SinkEngine = SelectedSinkEngine;
+        config.AudioVideoOffsetMilliseconds = _audioVideoOffsetMilliseconds;
+        if (SelectedRecordingAudioChoice is { Route: RecordingAudioRoute.HostInput, Host: { } host })
+        {
+            config.AudioRoute = RecordingAudioRoute.HostInput;
+            config.HostAudioMode = host.Mode.ToString();
+            config.HostAudioDeviceId = host.DeviceId;
+            config.HostAudioAsioChannel = host.AsioFirstInputChannelIndex;
+        }
+        else
+        {
+            config.AudioRoute = RecordingAudioRoute.OmtSource;
+            config.HostAudioMode = null;
+            config.HostAudioDeviceId = null;
+            config.HostAudioAsioChannel = 0;
+        }
         config.OutputDirectory = OutputDirectory?.Trim() ?? string.Empty;
         config.BackupOutputDirectory = string.IsNullOrWhiteSpace(BackupOutputDirectory)
             ? null
@@ -1469,6 +1499,18 @@ public partial class MainWindowViewModel : ObservableObject, IDisposable
     partial void OnSelectedSinkEngineChanged(SinkEngine value)
     {
         PersistSettings();   // NET-026: the switch must survive a restart, so it persists immediately.
+    }
+
+    partial void OnSelectedRecordingAudioChoiceChanged(RecordingAudioChoice value) => PersistSettings();
+
+    partial void OnAudioVideoOffsetTextChanged(string value)
+    {
+        if (int.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int ms))
+        {
+            _audioVideoOffsetMilliseconds = Math.Clamp(ms, -AudioOffset.MaxMilliseconds, AudioOffset.MaxMilliseconds);
+        }
+
+        PersistSettings();
     }
 
     partial void OnSelectedEncoderChoiceChanged(VideoEncoderChoice value)

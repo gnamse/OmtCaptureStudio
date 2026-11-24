@@ -30,6 +30,19 @@ public enum SinkEngine
     MediaFoundation
 }
 
+/// <summary>
+/// Which audio is written into a take (ADR-0014). OMT source audio is the default and the
+/// behaviour of every settings file that does not mention the field.
+/// </summary>
+public enum RecordingAudioRoute
+{
+    /// <summary>The audio that arrives with the connected OMT (or synthetic) source.</summary>
+    OmtSource,
+
+    /// <summary>A local WASAPI or ASIO input, the same devices the broadcast sender already uses.</summary>
+    HostInput
+}
+
 public enum QualityPreset
 {
     Ultra,
@@ -57,6 +70,25 @@ public class RecordingConfig
     /// Display name of the media source, stamped into the sidecar. Not an operator setting.
     /// </summary>
     public string? SourceName { get; set; }
+
+    /// <summary>Recorded audio. Absent settings stay on <see cref="RecordingAudioRoute.OmtSource"/>.</summary>
+    public RecordingAudioRoute AudioRoute { get; set; } = RecordingAudioRoute.OmtSource;
+
+    /// <summary><see cref="HostAudioCaptureMode"/> name when <see cref="AudioRoute"/> is a host input.</summary>
+    public string? HostAudioMode { get; set; }
+
+    /// <summary>WASAPI endpoint id, or the ASIO driver CLSID string. Null is the mode's default device.</summary>
+    public string? HostAudioDeviceId { get; set; }
+
+    /// <summary>First ASIO input channel of the stereo pair. Ignored for WASAPI.</summary>
+    public int HostAudioAsioChannel { get; set; }
+
+    /// <summary>
+    /// Milliseconds to shift recorded audio. Positive delays audio (picture leads). Negative
+    /// advances it. Applied by sample shift, which is the same effect as ffmpeg <c>-itsoffset</c>
+    /// on the audio input and works for every sink.
+    /// </summary>
+    public int AudioVideoOffsetMilliseconds { get; set; }
 
     /// <summary>
     /// Input-loss watchdog window (ADR-0002): wall-clock seconds with no video frame while recording
@@ -161,6 +193,12 @@ public class RecordingConfig
         OutputDirectory = OutputDirectory,
         FilenamePrefix = FilenamePrefix,
         SourceName = SourceName,
+        AudioRoute = AudioRoute,
+        HostAudioMode = HostAudioMode,
+        HostAudioDeviceId = HostAudioDeviceId,
+        HostAudioAsioChannel = HostAudioAsioChannel,
+        AudioVideoOffsetMilliseconds = AudioVideoOffsetMilliseconds,
+        SinkEngine = SinkEngine,
         InputLossThresholdSeconds = InputLossThresholdSeconds,
         InputRecoveryGraceSeconds = InputRecoveryGraceSeconds,
         SegmentRolloverMinutes = SegmentRolloverMinutes,

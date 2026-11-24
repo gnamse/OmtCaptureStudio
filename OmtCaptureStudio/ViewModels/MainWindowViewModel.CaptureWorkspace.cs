@@ -121,6 +121,7 @@ public partial class MainWindowViewModel
         InsertAsioOptions(options);
 
         CaptureAudioOptions = options;
+        RebuildRecordingAudioChoices();
 
         if (previous != null)
         {
@@ -290,6 +291,29 @@ public partial class MainWindowViewModel
     /// driver's reported input latency. Those are published by the driver's own worker thread during
     /// startup, so reading them straight after construction would always return zeros.
     /// </summary>
+    private void RebuildRecordingAudioChoices()
+    {
+        var choices = new List<RecordingAudioChoice> { RecordingAudioChoice.Omt };
+        foreach (HostAudioCaptureOption option in CaptureAudioOptions ?? Array.Empty<HostAudioCaptureOption>())
+        {
+            choices.Add(new RecordingAudioChoice(option.DisplayName, RecordingAudioRoute.HostInput, option));
+        }
+
+        RecordingAudioChoice? wanted = SelectedRecordingAudioChoice;
+        if (_operatorDefaults.AudioRoute == RecordingAudioRoute.HostInput
+            && wanted?.Route != RecordingAudioRoute.HostInput)
+        {
+            wanted = choices.Find(choice =>
+                choice.Host != null
+                && string.Equals(choice.Host.Mode.ToString(), _operatorDefaults.HostAudioMode, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(choice.Host.DeviceId ?? string.Empty, _operatorDefaults.HostAudioDeviceId ?? string.Empty, StringComparison.OrdinalIgnoreCase)
+                && choice.Host.AsioFirstInputChannelIndex == _operatorDefaults.HostAudioAsioChannel);
+        }
+
+        RecordingAudioChoices = choices;
+        SelectedRecordingAudioChoice = choices.Find(choice => choice.SameAs(wanted)) ?? choices[0];
+    }
+
     private static IHostAudioSource CreateCaptureAudioSource(HostAudioCaptureOption option)
     {
         IHostAudioSource source = HostAudioSourceFactory.Create(option);

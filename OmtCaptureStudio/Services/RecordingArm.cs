@@ -113,6 +113,8 @@ public sealed class RecordingArm : IDisposable
     private long _firstAudioUtcTicks;
     private DateTime _firstVideoLocal;
     private long _armUtcTicks;
+    private int _audioOffsetFrames;
+    private byte[]? _silence;
 
     public RecordingArm(
         IRecordingSink sink,
@@ -325,6 +327,8 @@ public sealed class RecordingArm : IDisposable
                 _firstAudioUtcTicks = 0;
                 _firstVideoLocal = default;
                 _armUtcTicks = _utcNowTicks();
+                int rateForOffset = format.SampleRate > 0 ? format.SampleRate : 48000;
+                _audioOffsetFrames = AudioOffset.FramesFor(config.AudioVideoOffsetMilliseconds, rateForOffset);
                 _paceStarted = false;
                 _paceOrigin = 0;
                 _pacedWritten = 0;
@@ -996,9 +1000,37 @@ public sealed class RecordingArm : IDisposable
         if (_disposed != 0 || !_isRecording || buffer == null || count <= 0) return;
 
         byte[] outBuf = _avClock.Process(buffer, count, out int outCount);
-        if (outCount > 0)
+        int channels = _recordChannels > 0 ? _recordChannels : 2;
+        int frameBytes = channels * 4;
+        int outFrames = frameBytes > 0 ? outCount / frameBytes : 0;
+        AudioOffsetStep shift = AudioOffset.Step(_audioOffsetFrames, outFrames);
+        _audioOffsetFrames = shift.Remaining;
+        if (shift.SilenceFrames > 0)
         {
-            WriteAudioData(outBuf, 0, outCount);
+            WriteSilence(shift.SilenceFrames, channels);
+        }
+
+        if (shift.KeepFrames > 0)
+        {
+            WriteAudioData(outBuf, shift.SkipFrames * frameBytes, shift.KeepFrames * frameBytes);
+        }
+    }
+
+    private void WriteSilence(int frames, int channels)
+    {
+        int frameBytes = channels * 4;
+        const int chunkFrames = 4096;
+        if (_silence == null || _silence.Length < chunkFrames * frameBytes)
+        {
+            _silence = new byte[chunkFrames * frameBytes];
+        }
+
+        int left = frames;
+        while (left > 0 && _isRecording)
+        {
+            int n = Math.Min(left, chunkFrames);
+            WriteAudioData(_silence, 0, n * frameBytes);
+            left -= n;
         }
     }
 

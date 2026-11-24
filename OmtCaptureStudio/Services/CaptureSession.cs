@@ -30,6 +30,9 @@ public class CaptureSession : IDisposable
     // forwards the health tick. The take state, boundary evaluation, outage boundary, reconnect
     // backoff loop and grace expiry all moved with the supervisor.
     private readonly TakeSupervisor _supervisor;
+    private readonly Func<RecordingConfig, IHostAudioSource?> _hostAudioFactory;
+    private RecordingHostAudioFeed? _hostFeed;
+    private bool _recordOmtAudio = true;
 
     private readonly Action<AudioLevelData> _onLevelsCalculated;
     private readonly Action<byte[], int> _onAudioInterleavedAvailable;
@@ -160,11 +163,13 @@ public class CaptureSession : IDisposable
         AudioEngine audio,
         StreamRecorderService recorder,
         bool ownsDependencies = false,
-        Func<long>? healthClock = null)
+        Func<long>? healthClock = null,
+        Func<RecordingConfig, IHostAudioSource?>? hostAudioFactory = null)
     {
         _audio = audio ?? throw new ArgumentNullException(nameof(audio));
         _recorder = recorder ?? throw new ArgumentNullException(nameof(recorder));
         _ownsDependencies = ownsDependencies;
+        _hostAudioFactory = hostAudioFactory ?? CreateHostRecordingSource;
 
         // Injected clock so the headless suite can drive input-loss timing directly (no real sleeps).
         _clock = healthClock ?? (static () => Environment.TickCount64);
@@ -178,8 +183,8 @@ public class CaptureSession : IDisposable
         _onLevelsCalculated = levels => AudioLevelsUpdated?.Invoke(levels);
         _onAudioInterleavedAvailable = (buffer, count) =>
         {
-            // The arm applies the A/V clock and writes the converted bytes under its own gate, so the
-            // clock and the transport can never disagree about whether a take is live (ADR-0005).
+            // Host-input takes do not record the OMT mix. The arm still owns the gate and the offset.
+            if (!_recordOmtAudio) return;
             _recorder.ProcessAndWriteAudio(buffer, count);
         };
         _onRecordingStarted = path => RecordingStarted?.Invoke(path);
@@ -333,6 +338,7 @@ public class CaptureSession : IDisposable
     /// </summary>
     public void Disconnect()
     {
+        StopHostFeed();
         // A caller-initiated disconnect ends the take — this is not an outage to recover from.
         _supervisor.EndTake();
 
@@ -369,6 +375,7 @@ public class CaptureSession : IDisposable
     /// </summary>
     public async Task DisconnectAsync()
     {
+        StopHostFeed();
         if (_recorder.IsRecording)
         {
             await _recorder.StopRecordingAsync();
@@ -427,7 +434,23 @@ public class CaptureSession : IDisposable
             config.SourceName = _currentSource?.Name ?? _currentSource?.Address;
         }
 
+        bool recordHost = config.AudioRoute == RecordingAudioRoute.HostInput;
+        if (recordHost && (effectiveFormat.SampleRate <= 0 || effectiveFormat.Channels <= 0))
+        {
+            effectiveFormat = effectiveFormat with { SampleRate = 48000, Channels = 2 };
+        }
+
+        // Set before the gate opens so an OMT audio callback cannot sneak into a host-input take.
+        _recordOmtAudio = !recordHost;
         bool started = _recorder.StartRecording(config, effectiveFormat);
+        if (started && recordHost)
+        {
+            StartHostFeed(config);
+        }
+        else if (!started)
+        {
+            _recordOmtAudio = true;
+        }
         if (started)
         {
             _supervisor.BeginTake(config, effectiveFormat);
@@ -441,6 +464,8 @@ public class CaptureSession : IDisposable
     /// </summary>
     public void StopRecording()
     {
+        StopHostFeed();
+        _recordOmtAudio = true;
         _supervisor.EndTake();
         _recorder.StopRecording();
     }
@@ -450,8 +475,57 @@ public class CaptureSession : IDisposable
     /// </summary>
     public Task StopRecordingAsync()
     {
+        StopHostFeed();
+        _recordOmtAudio = true;
         _supervisor.EndTake();
         return _recorder.StopRecordingAsync();
+    }
+
+    private void StartHostFeed(RecordingConfig config)
+    {
+        StopHostFeed();
+        try
+        {
+            IHostAudioSource? source = _hostAudioFactory(config);
+            if (source == null)
+            {
+                throw new InvalidOperationException("No host audio input is selected.");
+            }
+
+            _hostFeed = new RecordingHostAudioFeed(source, (buffer, count) => _recorder.ProcessAndWriteAudio(buffer, count));
+            _hostFeed.Start();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Recording host audio failed: {ex.Message}", ex);
+            RecordingError?.Invoke($"Recording audio input failed ({ex.Message}). The take continues without that input.");
+            _recordOmtAudio = false;
+        }
+    }
+
+    private void StopHostFeed()
+    {
+        RecordingHostAudioFeed? feed = Interlocked.Exchange(ref _hostFeed, null);
+        feed?.Dispose();
+    }
+
+    private static IHostAudioSource? CreateHostRecordingSource(RecordingConfig config)
+    {
+        if (!Enum.TryParse<HostAudioCaptureMode>(config.HostAudioMode, ignoreCase: true, out HostAudioCaptureMode mode))
+        {
+            return null;
+        }
+
+        Guid? clsid = mode == HostAudioCaptureMode.Asio && Guid.TryParse(config.HostAudioDeviceId, out Guid parsed)
+            ? parsed
+            : null;
+        var option = new HostAudioCaptureOption(
+            mode,
+            config.HostAudioMode ?? mode.ToString(),
+            config.HostAudioDeviceId,
+            clsid,
+            config.HostAudioAsioChannel);
+        return HostAudioSourceFactory.Create(option);
     }
 
     /// <summary>
