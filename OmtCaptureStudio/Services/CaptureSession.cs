@@ -284,11 +284,14 @@ public class CaptureSession : IDisposable
         {
             if (CurrentFormat.Width != width || CurrentFormat.Height != height || Math.Abs(CurrentFormat.FrameRate - fps) > 0.05)
             {
+                RationalFrameRate announced = RationalFrameRate.FromDouble(fps);
                 CurrentFormat = CurrentFormat with
                 {
                     Width = width,
                     Height = height,
-                    FrameRate = fps
+                    FrameRate = announced.IsValid ? announced.FramesPerSecond : fps,
+                    FrameRateNumerator = announced.Numerator,
+                    FrameRateDenominator = announced.Denominator
                 };
                 FormatChanged?.Invoke(CurrentFormat);
             }
@@ -297,11 +300,12 @@ public class CaptureSession : IDisposable
         // 1. Notify preview consumers (GUI renderer) immediately with highest priority
         VideoFrameAvailable?.Invoke(pData, length, width, height, stride, fps, timestamp);
 
-        // 2. Forward to recorder if active
+        // 2. Forward to the recorder. The arm conforms to the announced rate (ADR-0014): a slow
+        //    arrival is duplicated, an early one is dropped, and the measured-since-Connect meter
+        //    is not the file's frame rate.
         if (_recorder.IsRecording)
         {
-            _recorder.OnRecordingVideoFrame();
-            _recorder.WriteVideoFrame(pData, length);
+            _recorder.WriteConformedVideoFrame(pData, length);
         }
     }
 
@@ -398,29 +402,23 @@ public class CaptureSession : IDisposable
             return false;
         }
 
-        // Stamp video at the measured TRUE delivery rate, not the source-reported
-        // nominal maximum (vMix's "30" actually delivers ~29.2 fps). Stamping at the
-        // nominal rate is what makes the video track play fast and drift from the
-        // audio. Fall back to the reported rate only if no reliable measurement yet.
-        double effectiveFps = _fpsMeter.HasReliableEstimate ? _fpsMeter.Fps : fmt.FrameRate;
-        if (effectiveFps <= 1.0) effectiveFps = fmt.FrameRate;
-
-        RationalFrameRate stamped = _fpsMeter.HasReliableEstimate
-            ? _fpsMeter.MeasuredRational
-            : fmt.FrameRateRational;
-        if (!stamped.IsValid) stamped = RationalFrameRate.FromDouble(effectiveFps);
-        double stampedFps = stamped.IsValid ? stamped.FramesPerSecond : effectiveFps;
+        // The file rate is the stream's announced ratio (30/1, 30000/1001, …). The meter's
+        // average since Connect is a diagnostic only — freezing it into -r is what made a take
+        // run short of wall time (ADR-0014). The arm duplicates or drops so the written count
+        // tracks that announced rate against the wall clock.
+        RationalFrameRate stamped = fmt.FrameRateRational;
+        if (!stamped.IsValid) stamped = RationalFrameRate.FromInteger(30);
 
         AppLogger.LogInfo(
-            $"Recording A/V clock: reported {fmt.FrameRate:F2} fps, measured {_fpsMeter.Fps:F2} fps, " +
-            $"stamping video at {stampedFps:F4} fps ({stamped}).");
+            $"Recording video at {stamped} ({stamped.FramesPerSecond:F4} fps). " +
+            $"Measured input since connect is {_fpsMeter.Fps:F2} fps and is not the file rate.");
 
         // The arm order — reset the A/V clock, then initialize the sink, then flip the gate — is now
         // enforced inside RecordingArm.Arm (ADR-0005) rather than being an ordering convention that
         // lived here as a comment. The clock reset happens before the gate can flip, by construction.
         var effectiveFormat = fmt with
         {
-            FrameRate = stampedFps,
+            FrameRate = stamped.FramesPerSecond,
             FrameRateNumerator = stamped.Numerator,
             FrameRateDenominator = stamped.Denominator
         };

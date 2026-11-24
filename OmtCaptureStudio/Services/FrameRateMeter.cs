@@ -10,10 +10,10 @@ namespace OmtCaptureStudio.Services;
 /// with a Stopwatch on the media thread.
 ///
 /// The source-reported "FrameRate" is a nominal maximum (vMix "Maximum Frame Rate 30"
-/// actually delivers ~29.2 fps). If FFmpeg is stamped with that nominal rate while the
-/// source delivers a different true rate, the video track drifts against the audio and
-/// players periodically re-sync ("skipping"). This meter feeds the true rate to FFmpeg's
-/// <c>-r</c> and to the audio resampler's reference, so neither stream is pitch-shifted.
+/// actually delivers ~29.2 fps). That measurement is a diagnostic — the sidecar and the
+/// arm log — and is NOT the file's output rate. Stamping <c>-r</c> with the average since
+/// Connect freezes a short-term count into a CFR timeline and the file runs short of wall
+/// time (ADR-0014). The recorder conforms pictures to the announced ratio instead.
 ///
 /// Cross-thread contract: <see cref="OnVideoFrame"/> runs on the media thread, while
 /// <see cref="Fps"/>/<see cref="HasReliableEstimate"/> may be read on the UI thread at

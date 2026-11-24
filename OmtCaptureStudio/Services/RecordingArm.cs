@@ -48,6 +48,11 @@ public sealed class RecordingArm : IDisposable
     /// </summary>
     private readonly Func<long> _utcNowTicks;
 
+    /// <summary>Media clock for the CFR conformer. Tests inject one; production reads <see cref="Stopwatch"/>.</summary>
+    private readonly Func<long> _mediaNow;
+
+    private readonly long _mediaFrequency;
+
     /// <summary>The A/V recording clock. It lives here because the arm must reset it before the gate flips.</summary>
     private readonly AudioClockResampler _avClock = new();
 
@@ -83,11 +88,28 @@ public sealed class RecordingArm : IDisposable
     private int _recordSampleRate;
     private int _recordChannels;
 
-    public RecordingArm(IRecordingSink sink, bool ownsSink = false, Func<long>? utcNowTicks = null)
+    // CFR conform state (ADR-0014). The output rate is the announced ratio, not a measurement.
+    private RationalFrameRate _outputRate;
+    private long _paceOrigin;
+    private bool _paceStarted;
+    private long _pacedWritten;
+    private long _videoDuplicates;
+    private long _videoPaceDrops;
+    private byte[]? _heldFrame;
+    private int _heldLength;
+
+    public RecordingArm(
+        IRecordingSink sink,
+        bool ownsSink = false,
+        Func<long>? utcNowTicks = null,
+        Func<long>? mediaTimestamp = null,
+        long mediaFrequency = 0)
     {
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
         _ownsSink = ownsSink;
         _utcNowTicks = utcNowTicks ?? (static () => DateTime.UtcNow.Ticks);
+        _mediaNow = mediaTimestamp ?? (static () => Stopwatch.GetTimestamp());
+        _mediaFrequency = mediaFrequency > 0 ? mediaFrequency : Stopwatch.Frequency;
         _sink.SinkError += OnSinkError;
     }
 
@@ -148,6 +170,12 @@ public sealed class RecordingArm : IDisposable
 
     /// <summary>True when the drift ratio is pinned against its 0.9/1.1 safety clamp.</summary>
     public bool AvDriftClamped => _avClock.IsRatioClamped;
+
+    /// <summary>Pictures repeated so the file stays on the announced rate (ADR-0014).</summary>
+    public long VideoFramesDuplicated => Interlocked.Read(ref _videoDuplicates);
+
+    /// <summary>Arrivals dropped because the current output slot was already filled.</summary>
+    public long PaceFramesDropped => Interlocked.Read(ref _videoPaceDrops);
 
     /// <summary>
     /// Video track duration so far: frames written / stamped frame rate. Contains no dead air, which
@@ -265,7 +293,16 @@ public sealed class RecordingArm : IDisposable
                 // Deliberately FIRST, and therefore strictly before the sink is live and before the
                 // gate flips. The media thread only touches the clock while IsRecording is true, so
                 // this is race-free and published to the media threads by the gate write below.
-                _avClock.Reset(format.SampleRate, format.FrameRate, format.Channels);
+                RationalFrameRate outputRate = format.FrameRateRational;
+                if (!outputRate.IsValid) outputRate = RationalFrameRate.FromInteger(30);
+                _outputRate = outputRate;
+                _paceStarted = false;
+                _paceOrigin = 0;
+                _pacedWritten = 0;
+                _heldLength = 0;
+                Interlocked.Exchange(ref _videoDuplicates, 0);
+                Interlocked.Exchange(ref _videoPaceDrops, 0);
+                _avClock.Reset(format.SampleRate, outputRate.FramesPerSecond, format.Channels);
 
                 // ---- Step 2: storage preflight (policy lives in the guard) -------------------------
                 // In-memory sinks (NullRecordingSink) never write bytes to the candidate path, so the
@@ -291,7 +328,13 @@ public sealed class RecordingArm : IDisposable
                 }
 
                 // ---- Step 3: initialize the sink ---------------------------------------------------
-                if (!_sink.Initialize(config, format, candidatePath))
+                var sinkFormat = format with
+                {
+                    FrameRate = outputRate.FramesPerSecond,
+                    FrameRateNumerator = outputRate.Numerator,
+                    FrameRateDenominator = outputRate.Denominator
+                };
+                if (!_sink.Initialize(config, sinkFormat, candidatePath))
                 {
                     AppLogger.LogError("Failed to initialize recording sink.");
                     RecordingError?.Invoke("Failed to initialize recording sink.");
@@ -303,7 +346,7 @@ public sealed class RecordingArm : IDisposable
                 // advance the segment sequence).
                 _takeBasePath = takeBasePath;
                 _segmentIndex = segmentIndex;
-                _recordFrameRate = format.FrameRate;
+                _recordFrameRate = outputRate.FramesPerSecond;
                 _recordSampleRate = format.SampleRate;
                 _recordChannels = format.Channels;
                 _recordStartTimestamp = Stopwatch.GetTimestamp();
@@ -376,6 +419,8 @@ public sealed class RecordingArm : IDisposable
             string diagnosticTail = Snapshot(() => _sink.DiagnosticTail, string.Empty);
             long videoDrops = SnapshotLong(() => _sink.VideoFramesDropped, 0);
             long audioDrops = SnapshotLong(() => _sink.AudioChunksDropped, 0);
+            long videoDuplicates = Interlocked.Read(ref _videoDuplicates);
+            long paceDrops = Interlocked.Read(ref _videoPaceDrops);
             int segmentIndex = _segmentIndex;
 
             // 4. Finalize. Best-effort: this may be called because the transport already died, so a
@@ -414,12 +459,16 @@ public sealed class RecordingArm : IDisposable
                 SegmentIndex: segmentIndex,
                 EncoderName: encoderName,
                 DiagnosticTail: diagnosticTail,
-                Reason: reason);
+                Reason: reason,
+                VideoFramesDuplicated: videoDuplicates,
+                PaceFramesDropped: paceDrops,
+                AudioClampSeconds: 0);
 
             summary = stopSummary;
 
             AppLogger.LogInfo(
                 $"Recording disarmed ({reason}): {path}, {fileSize} bytes, media {stopSummary.MediaDuration.TotalSeconds:F2}s, " +
+                $"dups {videoDuplicates}, pace-drops {paceDrops}, " +
                 $"drained {drainedAfterMs} ms{(finalizeError == null ? string.Empty : $", FINALIZE FAILED: {finalizeError}")}, " +
                 RecordingHealth.WallClockNote(stopSummary));
 
@@ -682,6 +731,90 @@ public sealed class RecordingArm : IDisposable
     // ============================================================================================
     // Hot path
     // ============================================================================================
+
+    /// <summary>
+    /// Conform one arrival onto the announced output rate and write the pictures that are due.
+    /// An early arrival is dropped. Slots that passed since the previous picture are filled by
+    /// repeating the last one, then the new picture is written. Does not run on a timer and does
+    /// not fill a silent hole at stop (ADR-0002).
+    /// </summary>
+    public void WriteConformedVideoFrame(IntPtr pData, int dataLength)
+    {
+        if (_disposed != 0 || !_isRecording || pData == IntPtr.Zero || dataLength <= 0) return;
+
+        long now = _mediaNow();
+        if (!_paceStarted)
+        {
+            _paceOrigin = now;
+            _paceStarted = true;
+        }
+
+        long due = RecordingFrameConform.DueIndex(_paceOrigin, now, _outputRate, _mediaFrequency);
+        RecordingConformDecision decision = RecordingFrameConform.Decide(_pacedWritten, due, frameArrived: true);
+        ApplyConform(decision, pData, dataLength, haveFresh: true);
+    }
+
+    private void ApplyConform(RecordingConformDecision decision, IntPtr fresh, int length, bool haveFresh)
+    {
+        if (decision.DropCount > 0)
+        {
+            Interlocked.Add(ref _videoPaceDrops, decision.DropCount);
+        }
+
+        if (decision.EmitCount <= 0 || _disposed != 0 || !_isRecording) return;
+
+        int duplicates = decision.DuplicateCount;
+        if (duplicates > 0 && _heldLength > 0 && _heldFrame != null)
+        {
+            unsafe
+            {
+                fixed (byte* pinned = _heldFrame)
+                {
+                    var previous = (IntPtr)pinned;
+                    for (int i = 0; i < duplicates; i++)
+                    {
+                        WriteVideoFrame(previous, _heldLength);
+                        _avClock.OnVideoFrame();
+                    }
+                }
+            }
+
+            Interlocked.Add(ref _videoDuplicates, duplicates);
+        }
+
+        int freshCount = decision.EmitCount - duplicates;
+        if (haveFresh && freshCount > 0)
+        {
+            for (int i = 0; i < freshCount; i++)
+            {
+                WriteVideoFrame(fresh, length);
+                _avClock.OnVideoFrame();
+            }
+
+            RememberFrame(fresh, length);
+        }
+
+        _pacedWritten += decision.EmitCount;
+    }
+
+    private void RememberFrame(IntPtr source, int length)
+    {
+        if (length <= 0) return;
+        if (_heldFrame == null || _heldFrame.Length < length)
+        {
+            _heldFrame = new byte[length];
+        }
+
+        unsafe
+        {
+            fixed (byte* destination = _heldFrame)
+            {
+                Buffer.MemoryCopy((void*)source, destination, length, length);
+            }
+        }
+
+        _heldLength = length;
+    }
 
     /// <summary>Writes a decoded BGRA video frame to the transport, under the gate.</summary>
     public void WriteVideoFrame(IntPtr pData, int dataLength)

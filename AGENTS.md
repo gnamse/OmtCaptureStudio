@@ -42,7 +42,8 @@ operator sequence: **`docs/RELEASE_CHECKLIST.md`**. Do not invent missing ADRs â
 the numbered series has gaps by design for now:
 
 - Present: `docs/adr/0001`, `0002`, `0003`, `0005`, `0006`, `0010`, `0011`, **`0012`**
-  (recording engine stays FFmpeg; MF gated; PA16 refuse)
+ (recording engine stays FFmpeg; MF gated; PA16 refuse), **`0013`**, **`0014`**
+ (record on the wall clock; do not stamp the measured-at-arm fps)
 - Missing / not authored yet: **0004**, **0007**, **0008**, **0009** (leave vacant
   until a real decision needs that slot; do not stub speculative ADRs)
 - Recording: production remains `RecordingSinkSelector` â†’ `FfmpegPipeSink`. The MF

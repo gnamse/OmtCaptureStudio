@@ -138,6 +138,12 @@ public class StreamRecorderService : ITakeRecorder, IDisposable
 
     public void WriteVideoFrame(IntPtr pData, int dataLength) => _arm.WriteVideoFrame(pData, dataLength);
 
+    /// <summary>
+    /// Conform one arrival to the announced output rate (ADR-0014). Forwarded; the decision lives
+    /// in the arm.
+    /// </summary>
+    public void WriteConformedVideoFrame(IntPtr pData, int dataLength) => _arm.WriteConformedVideoFrame(pData, dataLength);
+
     public void WriteAudioData(byte[] interleavedBytes)
     {
         if (interleavedBytes != null)
