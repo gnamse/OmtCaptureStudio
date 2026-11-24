@@ -68,4 +68,14 @@ public static class RecordingFileNames
         string ext = string.IsNullOrEmpty(extension) ? ".mp4" : extension;
         return $"{SanitizePrefix(prefix)}_{timestamp:yyyy-MM-dd_HH-mm-ss}{ext}";
     }
+
+    /// <summary>
+    /// The name used while the encoder has the file open. The arm renames it to
+    /// <see cref="TakeFileName"/> once the first picture's time is known and the process has exited.
+    /// </summary>
+    public static string PendingTakeFileName(string? prefix, string extension)
+    {
+        string ext = string.IsNullOrEmpty(extension) ? ".mp4" : extension;
+        return $"{SanitizePrefix(prefix)}_pending_{Guid.NewGuid():N}{ext}";
+    }
 }

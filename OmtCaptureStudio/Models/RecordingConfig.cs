@@ -54,6 +54,11 @@ public class RecordingConfig
     public string FilenamePrefix { get; set; } = "OMT_Capture";
 
     /// <summary>
+    /// Display name of the media source, stamped into the sidecar. Not an operator setting.
+    /// </summary>
+    public string? SourceName { get; set; }
+
+    /// <summary>
     /// Input-loss watchdog window (ADR-0002): wall-clock seconds with no video frame while recording
     /// before the take is treated as interrupted. Operator-configurable; default 5 s. Applied per take
     /// when recording starts.
@@ -155,6 +160,7 @@ public class RecordingConfig
         Quality = Quality,
         OutputDirectory = OutputDirectory,
         FilenamePrefix = FilenamePrefix,
+        SourceName = SourceName,
         InputLossThresholdSeconds = InputLossThresholdSeconds,
         InputRecoveryGraceSeconds = InputRecoveryGraceSeconds,
         SegmentRolloverMinutes = SegmentRolloverMinutes,

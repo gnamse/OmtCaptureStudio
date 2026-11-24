@@ -119,7 +119,8 @@ public class FfmpegProcessHost : IDisposable
             _outputPath ?? string.Empty,
             videoPipeName,
             hasAudio ? audioPipeName : null,
-            ResolvedEncoder);
+            ResolvedEncoder,
+            DateTime.UtcNow);
 
         // R25 (SEC-04b): this used to fall back to the BARE NAME "ffmpeg", which Windows resolves through
         // the current directory and PATH - the textbook uncontrolled-search-path sink (CWE-427). Any

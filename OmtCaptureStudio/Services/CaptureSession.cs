@@ -422,6 +422,11 @@ public class CaptureSession : IDisposable
             FrameRateNumerator = stamped.Numerator,
             FrameRateDenominator = stamped.Denominator
         };
+        if (string.IsNullOrWhiteSpace(config.SourceName))
+        {
+            config.SourceName = _currentSource?.Name ?? _currentSource?.Address;
+        }
+
         bool started = _recorder.StartRecording(config, effectiveFormat);
         if (started)
         {
