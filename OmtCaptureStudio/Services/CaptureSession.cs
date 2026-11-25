@@ -30,6 +30,9 @@ public class CaptureSession : IDisposable
     // forwards the health tick. The take state, boundary evaluation, outage boundary, reconnect
     // backoff loop and grace expiry all moved with the supervisor.
     private readonly TakeSupervisor _supervisor;
+    private readonly Func<RecordingConfig, IHostAudioSource?> _hostAudioFactory;
+    private RecordingHostAudioFeed? _hostFeed;
+    private bool _recordOmtAudio = true;
 
     private readonly Action<AudioLevelData> _onLevelsCalculated;
     private readonly Action<byte[], int> _onAudioInterleavedAvailable;
@@ -160,11 +163,13 @@ public class CaptureSession : IDisposable
         AudioEngine audio,
         StreamRecorderService recorder,
         bool ownsDependencies = false,
-        Func<long>? healthClock = null)
+        Func<long>? healthClock = null,
+        Func<RecordingConfig, IHostAudioSource?>? hostAudioFactory = null)
     {
         _audio = audio ?? throw new ArgumentNullException(nameof(audio));
         _recorder = recorder ?? throw new ArgumentNullException(nameof(recorder));
         _ownsDependencies = ownsDependencies;
+        _hostAudioFactory = hostAudioFactory ?? CreateHostRecordingSource;
 
         // Injected clock so the headless suite can drive input-loss timing directly (no real sleeps).
         _clock = healthClock ?? (static () => Environment.TickCount64);
@@ -178,8 +183,8 @@ public class CaptureSession : IDisposable
         _onLevelsCalculated = levels => AudioLevelsUpdated?.Invoke(levels);
         _onAudioInterleavedAvailable = (buffer, count) =>
         {
-            // The arm applies the A/V clock and writes the converted bytes under its own gate, so the
-            // clock and the transport can never disagree about whether a take is live (ADR-0005).
+            // Host-input takes do not record the OMT mix. The arm still owns the gate and the offset.
+            if (!_recordOmtAudio) return;
             _recorder.ProcessAndWriteAudio(buffer, count);
         };
         _onRecordingStarted = path => RecordingStarted?.Invoke(path);
@@ -284,11 +289,14 @@ public class CaptureSession : IDisposable
         {
             if (CurrentFormat.Width != width || CurrentFormat.Height != height || Math.Abs(CurrentFormat.FrameRate - fps) > 0.05)
             {
+                RationalFrameRate announced = RationalFrameRate.FromDouble(fps);
                 CurrentFormat = CurrentFormat with
                 {
                     Width = width,
                     Height = height,
-                    FrameRate = fps
+                    FrameRate = announced.IsValid ? announced.FramesPerSecond : fps,
+                    FrameRateNumerator = announced.Numerator,
+                    FrameRateDenominator = announced.Denominator
                 };
                 FormatChanged?.Invoke(CurrentFormat);
             }
@@ -297,11 +305,12 @@ public class CaptureSession : IDisposable
         // 1. Notify preview consumers (GUI renderer) immediately with highest priority
         VideoFrameAvailable?.Invoke(pData, length, width, height, stride, fps, timestamp);
 
-        // 2. Forward to recorder if active
+        // 2. Forward to the recorder. The arm conforms to the announced rate (ADR-0014): a slow
+        //    arrival is duplicated, an early one is dropped, and the measured-since-Connect meter
+        //    is not the file's frame rate.
         if (_recorder.IsRecording)
         {
-            _recorder.OnRecordingVideoFrame();
-            _recorder.WriteVideoFrame(pData, length);
+            _recorder.WriteConformedVideoFrame(pData, length);
         }
     }
 
@@ -329,6 +338,7 @@ public class CaptureSession : IDisposable
     /// </summary>
     public void Disconnect()
     {
+        StopHostFeed();
         // A caller-initiated disconnect ends the take — this is not an outage to recover from.
         _supervisor.EndTake();
 
@@ -365,6 +375,7 @@ public class CaptureSession : IDisposable
     /// </summary>
     public async Task DisconnectAsync()
     {
+        StopHostFeed();
         if (_recorder.IsRecording)
         {
             await _recorder.StopRecordingAsync();
@@ -398,33 +409,48 @@ public class CaptureSession : IDisposable
             return false;
         }
 
-        // Stamp video at the measured TRUE delivery rate, not the source-reported
-        // nominal maximum (vMix's "30" actually delivers ~29.2 fps). Stamping at the
-        // nominal rate is what makes the video track play fast and drift from the
-        // audio. Fall back to the reported rate only if no reliable measurement yet.
-        double effectiveFps = _fpsMeter.HasReliableEstimate ? _fpsMeter.Fps : fmt.FrameRate;
-        if (effectiveFps <= 1.0) effectiveFps = fmt.FrameRate;
-
-        RationalFrameRate stamped = _fpsMeter.HasReliableEstimate
-            ? _fpsMeter.MeasuredRational
-            : fmt.FrameRateRational;
-        if (!stamped.IsValid) stamped = RationalFrameRate.FromDouble(effectiveFps);
-        double stampedFps = stamped.IsValid ? stamped.FramesPerSecond : effectiveFps;
+        // The file rate is the stream's announced ratio (30/1, 30000/1001, …). The meter's
+        // average since Connect is a diagnostic only — freezing it into -r is what made a take
+        // run short of wall time (ADR-0014). The arm duplicates or drops so the written count
+        // tracks that announced rate against the wall clock.
+        RationalFrameRate stamped = fmt.FrameRateRational;
+        if (!stamped.IsValid) stamped = RationalFrameRate.FromInteger(30);
 
         AppLogger.LogInfo(
-            $"Recording A/V clock: reported {fmt.FrameRate:F2} fps, measured {_fpsMeter.Fps:F2} fps, " +
-            $"stamping video at {stampedFps:F4} fps ({stamped}).");
+            $"Recording video at {stamped} ({stamped.FramesPerSecond:F4} fps). " +
+            $"Measured input since connect is {_fpsMeter.Fps:F2} fps and is not the file rate.");
 
         // The arm order — reset the A/V clock, then initialize the sink, then flip the gate — is now
         // enforced inside RecordingArm.Arm (ADR-0005) rather than being an ordering convention that
         // lived here as a comment. The clock reset happens before the gate can flip, by construction.
         var effectiveFormat = fmt with
         {
-            FrameRate = stampedFps,
+            FrameRate = stamped.FramesPerSecond,
             FrameRateNumerator = stamped.Numerator,
             FrameRateDenominator = stamped.Denominator
         };
+        if (string.IsNullOrWhiteSpace(config.SourceName))
+        {
+            config.SourceName = _currentSource?.Name ?? _currentSource?.Address;
+        }
+
+        bool recordHost = config.AudioRoute == RecordingAudioRoute.HostInput;
+        if (recordHost && (effectiveFormat.SampleRate <= 0 || effectiveFormat.Channels <= 0))
+        {
+            effectiveFormat = effectiveFormat with { SampleRate = 48000, Channels = 2 };
+        }
+
+        // Set before the gate opens so an OMT audio callback cannot sneak into a host-input take.
+        _recordOmtAudio = !recordHost;
         bool started = _recorder.StartRecording(config, effectiveFormat);
+        if (started && recordHost)
+        {
+            StartHostFeed(config);
+        }
+        else if (!started)
+        {
+            _recordOmtAudio = true;
+        }
         if (started)
         {
             _supervisor.BeginTake(config, effectiveFormat);
@@ -438,6 +464,8 @@ public class CaptureSession : IDisposable
     /// </summary>
     public void StopRecording()
     {
+        StopHostFeed();
+        _recordOmtAudio = true;
         _supervisor.EndTake();
         _recorder.StopRecording();
     }
@@ -447,8 +475,57 @@ public class CaptureSession : IDisposable
     /// </summary>
     public Task StopRecordingAsync()
     {
+        StopHostFeed();
+        _recordOmtAudio = true;
         _supervisor.EndTake();
         return _recorder.StopRecordingAsync();
+    }
+
+    private void StartHostFeed(RecordingConfig config)
+    {
+        StopHostFeed();
+        try
+        {
+            IHostAudioSource? source = _hostAudioFactory(config);
+            if (source == null)
+            {
+                throw new InvalidOperationException("No host audio input is selected.");
+            }
+
+            _hostFeed = new RecordingHostAudioFeed(source, (buffer, count) => _recorder.ProcessAndWriteAudio(buffer, count));
+            _hostFeed.Start();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.LogError($"Recording host audio failed: {ex.Message}", ex);
+            RecordingError?.Invoke($"Recording audio input failed ({ex.Message}). The take continues without that input.");
+            _recordOmtAudio = false;
+        }
+    }
+
+    private void StopHostFeed()
+    {
+        RecordingHostAudioFeed? feed = Interlocked.Exchange(ref _hostFeed, null);
+        feed?.Dispose();
+    }
+
+    private static IHostAudioSource? CreateHostRecordingSource(RecordingConfig config)
+    {
+        if (!Enum.TryParse<HostAudioCaptureMode>(config.HostAudioMode, ignoreCase: true, out HostAudioCaptureMode mode))
+        {
+            return null;
+        }
+
+        Guid? clsid = mode == HostAudioCaptureMode.Asio && Guid.TryParse(config.HostAudioDeviceId, out Guid parsed)
+            ? parsed
+            : null;
+        var option = new HostAudioCaptureOption(
+            mode,
+            config.HostAudioMode ?? mode.ToString(),
+            config.HostAudioDeviceId,
+            clsid,
+            config.HostAudioAsioChannel);
+        return HostAudioSourceFactory.Create(option);
     }
 
     /// <summary>

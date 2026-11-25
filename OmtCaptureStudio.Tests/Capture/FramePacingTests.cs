@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using OmtCaptureStudio.Models;
 using OmtCaptureStudio.Services;
 using OmtCaptureStudio.Services.Sinks;
@@ -231,6 +232,211 @@ partial class Program
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine(" -> Rational rates, absolute deadlines, skip-ahead, sample distribution, and settings migration verified!");
+        Console.ResetColor();
+
+        TestRecordingFrameConform();
+        TestAudioSendByElapsedTime();
+    }
+
+    /// <summary>
+    /// ADR-0014: audio owed by one sender pass is every sample up to the emitted frame, so a
+    /// skip-ahead still carries the audio for the pictures it did not draw. Injected counts only.
+    /// </summary>
+    static void TestAudioSendByElapsedTime()
+    {
+        Console.WriteLine("\n[Step 0.705c] Verifying audio-by-elapsed-time sender math...");
+
+        RationalFrameRate thirty = RationalFrameRate.FromInteger(30);
+        Expect(AudioSendSchedule.SamplesDue(thirty, 48000, emittedFrameIndexInclusive: 0, samplesAlreadySent: 0) == 1600,
+            "The first 30 fps frame owes 1600 samples at 48 kHz.");
+
+        long sent = 0;
+        for (long frame = 0; frame < 30; frame++)
+        {
+            int due = AudioSendSchedule.SamplesDue(thirty, 48000, frame, sent);
+            Expect(due == 1600, $"Frame {frame} on time must owe exactly 1600 samples, got {due}.");
+            sent += due;
+        }
+
+        Expect(sent == 48000, $"Thirty frames must be exactly one second of audio. Got {sent}.");
+
+        // The pacer emitted frame 4, then the next pass jumped to frame 10.
+        long afterFour = thirty.SamplesUntil(5, 48000);
+        int skipped = AudioSendSchedule.SamplesDue(thirty, 48000, emittedFrameIndexInclusive: 10, samplesAlreadySent: afterFour);
+        int expectedSpan = 0;
+        for (long frame = 5; frame <= 10; frame++)
+        {
+            expectedSpan += thirty.SamplesForFrame(frame, 48000);
+        }
+
+        Expect(skipped == expectedSpan,
+            $"A skip from frame 5 through 10 must owe those frames' samples ({expectedSpan}), got {skipped}.");
+        Expect(skipped > thirty.SamplesForFrame(10, 48000),
+            "A skip must send more than the single frame that was drawn.");
+
+        RationalFrameRate ntsc = RationalFrameRate.Ntsc5994;
+        long ntscSent = 0;
+        for (long frame = 0; frame < 60000; frame++)
+        {
+            int due = AudioSendSchedule.SamplesDue(ntsc, 48000, frame, ntscSent);
+            if (due != ntsc.SamplesForFrame(frame, 48000))
+            {
+                throw new Exception($"NTSC frame {frame} owed {due}, expected {ntsc.SamplesForFrame(frame, 48000)}.");
+            }
+
+            ntscSent += due;
+        }
+
+        Expect(ntscSent == 48000L * 1001,
+            $"Sending one NTSC frame at a time must still total 48000*1001 samples. Got {ntscSent}.");
+
+        // One jump across the whole NTSC second-and-a-bit owes the same total.
+        int jumped = AudioSendSchedule.SamplesDue(ntsc, 48000, emittedFrameIndexInclusive: 59999, samplesAlreadySent: 0);
+        Expect(jumped == 48000 * 1001,
+            $"A single pass that lands on frame 59999 owes the whole NTSC span. Got {jumped}.");
+
+        Expect(AudioSendSchedule.SamplesDue(thirty, 48000, 3, samplesAlreadySent: thirty.SamplesUntil(4, 48000)) == 0,
+            "Nothing is owed when the samples for that frame were already sent.");
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> Sender audio follows elapsed schedule time, including frames the pacer skipped.");
+        Console.ResetColor();
+    }
+
+    /// <summary>
+    /// ADR-0014: the recorder's duplicate/drop decision, driven by an injected clock. No sleeps.
+    /// A 24.5 fps arrival stream into a 30/1 file must finish within one frame of wall time.
+    /// </summary>
+    static void TestRecordingFrameConform()
+    {
+        Console.WriteLine("\n[Step 0.705b] Verifying recording CFR conform (duplicate / drop, no sleeps)...");
+
+        const long frequency = 10_000_000;
+        RationalFrameRate thirty = RationalFrameRate.FromInteger(30);
+
+        RecordingConformDecision first = RecordingFrameConform.Decide(0, dueIndex: 0, frameArrived: true);
+        Expect(first.EmitCount == 1 && first.DuplicateCount == 0 && first.DropCount == 0,
+            $"The opening picture is one emit and not a duplicate. Got emit {first.EmitCount} dup {first.DuplicateCount} drop {first.DropCount}.");
+
+        long early = FrameSchedule.Deadline(0, 1, thirty, frequency) - 1;
+        Expect(RecordingFrameConform.DueIndex(0, early, thirty, frequency) == 0,
+            "A timestamp before the next deadline is still slot 0.");
+        RecordingConformDecision dropped = RecordingFrameConform.Decide(1, dueIndex: 0, frameArrived: true);
+        Expect(dropped.EmitCount == 0 && dropped.DropCount == 1,
+            "An arrival before the next slot is a drop, not a second picture.");
+
+        long atOne = FrameSchedule.Deadline(0, 1, thirty, frequency);
+        Expect(RecordingFrameConform.DueIndex(0, atOne, thirty, frequency) == 1, "IndexAt(Deadline(1)) is 1.");
+        RecordingConformDecision onTime = RecordingFrameConform.Decide(1, dueIndex: 1, frameArrived: true);
+        Expect(onTime.EmitCount == 1 && onTime.DuplicateCount == 0 && onTime.DropCount == 0,
+            "The picture that lands on the next deadline is written once.");
+
+        RecordingConformDecision behind = RecordingFrameConform.Decide(2, dueIndex: 10, frameArrived: true);
+        Expect(behind.EmitCount == 9 && behind.DuplicateCount == 8 && behind.DropCount == 0,
+            $"Eight missed slots are duplicates and the new picture fills the current one. Got emit {behind.EmitCount} dup {behind.DuplicateCount}.");
+
+        RecordingConformDecision quiet = RecordingFrameConform.Decide(2, dueIndex: 10, frameArrived: false);
+        Expect(quiet.EmitCount == 9 && quiet.DuplicateCount == 9,
+            "A catch-up with no new picture is entirely duplicates.");
+        Expect(RecordingFrameConform.Decide(0, dueIndex: 4, frameArrived: false).EmitCount == 0,
+            "There is nothing to repeat before the first picture.");
+
+        // 10 seconds of a 24.5 fps sender into a 30/1 file. Fully caught up at each arrival,
+        // the written count stays within one frame of elapsed * rate.
+        long written = 0;
+        long drops = 0;
+        long dups = 0;
+        long origin = 1_000_000;
+        double inputFps = 24.5;
+        int arrivals = (int)(10 * inputFps);
+        for (int n = 0; n < arrivals; n++)
+        {
+            long now = origin + (long)(n * frequency / inputFps);
+            long due = RecordingFrameConform.DueIndex(origin, now, thirty, frequency);
+            RecordingConformDecision step = RecordingFrameConform.Decide(written, due, frameArrived: true);
+            written += step.EmitCount;
+            dups += step.DuplicateCount;
+            drops += step.DropCount;
+            double elapsed = (now - origin) / (double)frequency;
+            double target = elapsed * thirty.FramesPerSecond;
+            if (Math.Abs(written - (target + 1)) > 1.0)
+            {
+                throw new Exception(
+                    $"At arrival {n} ({elapsed:F3}s) written {written} is more than one frame from wall*rate+1 ({target + 1:F2}).");
+            }
+        }
+
+        Expect(dups > 0, "A 24.5 fps sender into 30/1 must duplicate, or the file runs short.");
+        Expect(drops == 0, "A slower-than-rate sender must not drop pictures.");
+        long end = origin + (long)((arrivals - 1) * frequency / inputFps);
+        double endElapsed = (end - origin) / (double)frequency;
+        double endTarget = endElapsed * 30.0 + 1.0;
+        Expect(Math.Abs(written - endTarget) <= 1.0,
+            $"After 10s of 24.5 fps, written {written} must be within one frame of {endTarget:F2}.");
+        Console.WriteLine($" -> 24.5 into 30/1 over {endElapsed:F2}s: written {written}, dups {dups}, drops {drops}.");
+
+        // Faster than the file rate: extras are drops, and the file does not run long.
+        written = 0;
+        drops = 0;
+        for (int n = 0; n < 600; n++)
+        {
+            long now = origin + (long)(n * frequency / 60.0);
+            long due = RecordingFrameConform.DueIndex(origin, now, thirty, frequency);
+            RecordingConformDecision step = RecordingFrameConform.Decide(written, due, frameArrived: true);
+            written += step.EmitCount;
+            drops += step.DropCount;
+        }
+
+        Expect(drops > 200, $"A 60 fps sender into 30/1 must drop about half the arrivals; dropped {drops}.");
+        double fastElapsed = 599 * (1.0 / 60.0);
+        Expect(Math.Abs(written - (fastElapsed * 30.0 + 1.0)) <= 1.0,
+            $"A fast sender must not make the file longer than wall time. Written {written}.");
+
+        // The arm applies the same decision. Two arrivals in one slot: one write. A late jump: duplicates.
+        var sink = new SignalRecordingSink();
+        long clock = 5_000_000;
+        var arm = new RecordingArm(sink, mediaTimestamp: () => clock, mediaFrequency: frequency);
+        var config = new RecordingConfig { OutputDirectory = Path.GetTempPath(), FilenamePrefix = "Conform" };
+        var format = new StreamFormat
+        {
+            Width = 16,
+            Height = 16,
+            FrameRate = 30,
+            FrameRateNumerator = 30,
+            FrameRateDenominator = 1,
+            SampleRate = 48000,
+            Channels = 2
+        };
+        if (!arm.Arm(config, format))
+        {
+            Console.WriteLine(" -> [SKIP] storage preflight refused the temp volume; the arm wiring check is skipped.");
+        }
+        else
+        {
+            var frame = Marshal.AllocHGlobal(16);
+            try
+            {
+                arm.WriteConformedVideoFrame(frame, 16);
+                arm.WriteConformedVideoFrame(frame, 16);
+                Expect(sink.VideoFramesReceived == 1, $"Two arrivals at the origin must write one picture; wrote {sink.VideoFramesReceived}.");
+                Expect(arm.PaceFramesDropped == 1, "The second arrival in the same slot is a pace drop.");
+
+                clock = FrameSchedule.Deadline(5_000_000, 8, thirty, frequency);
+                arm.WriteConformedVideoFrame(frame, 16);
+                Expect(arm.VideoFramesDuplicated >= 7,
+                    $"A jump of eight frames must duplicate the gap. Dups {arm.VideoFramesDuplicated}.");
+                Expect(sink.VideoFramesReceived == 1 + 8,
+                    $"Written pictures must be the opening frame plus eight. Got {sink.VideoFramesReceived}.");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(frame);
+                arm.Dispose();
+            }
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> Recording CFR conform: drops when early, duplicates when late, stays within one frame of wall time.");
         Console.ResetColor();
     }
 

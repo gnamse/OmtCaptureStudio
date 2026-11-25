@@ -1,6 +1,8 @@
 # ADR-0003: One stereo capture ring, and one rate-conversion policy
 
 - **Status:** **Accepted (Option A) — implemented in two slices.** Slices are recorded below.
+  Amended by ADR-0014: the default ring holds 2 s and trims only past a 1 s backlog. The 120 ms
+  cap was discarding programme audio whenever the desktop send loop ran behind.
   - **Slice 1 (complete):** `StereoCaptureRing` extraction, `HostAudioFormat` constants relocation,
     `IHostAudioSource` widening, headless ring/interface tests. Conversion placement is deliberately
     unchanged in this slice.

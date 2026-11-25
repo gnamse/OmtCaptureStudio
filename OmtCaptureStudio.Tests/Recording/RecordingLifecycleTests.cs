@@ -1063,5 +1063,141 @@ partial class Program
         Console.WriteLine(" -> RecordingArm sequencing, single finalize, bounded drain, convergence and best-effort sink-failure verified!");
         Console.ResetColor();
     }
+
+    /// <summary>
+    /// ADR-0014: the file is named from the first picture, not from arm time, and a JSON sidecar
+    /// records both clocks. The encoder is not started; the sink only creates the bytes to rename.
+    /// </summary>
+    static void TestRecordingFileIdentity()
+    {
+        Console.WriteLine("\n[Step 0.682b] Verifying first-frame file name, creation_time, and the sidecar...");
+
+        DateTime created = new DateTime(2026, 11, 24, 15, 4, 5, 6, DateTimeKind.Utc);
+        string iso = FfmpegArguments.FormatCreationTimeUtc(created);
+        Expect(iso == "2026-11-24T15:04:05.006Z", $"creation_time must be UTC ISO milliseconds. Got {iso}.");
+        string[] argv = FfmpegArguments.BuildArgumentList(
+            new RecordingConfig(),
+            new StreamFormat { Width = 16, Height = 16, FrameRate = 30, FrameRateNumerator = 30, FrameRateDenominator = 1, SampleRate = 48000, Channels = 2 },
+            "out.mp4",
+            "pipeV",
+            "pipeA",
+            VideoEncoderChoice.CpuX264,
+            created);
+        Expect(argv.Contains("creation_time=" + iso), "ffmpeg must receive -metadata creation_time as one token.");
+        Expect(argv[^1] == "out.mp4", "creation_time must not displace the output path.");
+
+        string root = Path.Combine(Path.GetTempPath(), "omt-name-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var armUtc = new DateTime(2026, 11, 24, 12, 0, 0, DateTimeKind.Utc);
+            var frameUtc = armUtc.AddSeconds(80);
+            var armLocal = new DateTime(2026, 11, 24, 12, 0, 0, DateTimeKind.Unspecified);
+            var frameLocal = armLocal.AddSeconds(80);
+            int phase = 0;
+            var sink = new TouchFileSink();
+            var arm = new RecordingArm(
+                sink,
+                utcNowTicks: () => (phase == 0 ? armUtc : frameUtc).Ticks,
+                localNow: () => phase == 0 ? armLocal : frameLocal);
+            var config = new RecordingConfig
+            {
+                OutputDirectory = root,
+                FilenamePrefix = "Show",
+                SourceName = "LV1 Desk"
+            };
+            var format = new StreamFormat
+            {
+                Width = 16,
+                Height = 16,
+                FrameRate = 30,
+                FrameRateNumerator = 30,
+                FrameRateDenominator = 1,
+                SampleRate = 48000,
+                Channels = 2
+            };
+
+            if (!arm.Arm(config, format)) throw new Exception("The naming take must arm.");
+            Expect(sink.OutputPath != null && sink.OutputPath.Contains("_pending_", StringComparison.Ordinal),
+                $"The encoder path must be a pending name, not the arm clock. Got {sink.OutputPath}.");
+            Expect(!sink.OutputPath!.Contains("12-00-00", StringComparison.Ordinal),
+                "The pending name must not bake in the arm-time clock.");
+
+            phase = 1;
+            var frame = Marshal.AllocHGlobal(16);
+            try
+            {
+                arm.WriteVideoFrame(frame, 16);
+                arm.WriteAudioData(new byte[8], 0, 8);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(frame);
+            }
+
+            if (!arm.Disarm(RecordingStopReason.Manual, out RecordingStopSummary? summary) || summary == null)
+            {
+                throw new Exception("Disarm must publish a summary for the naming take.");
+            }
+
+            string expectedName = "Show_2026-11-24_12-01-20.mp4";
+            Expect(Path.GetFileName(summary.Path) == expectedName,
+                $"The finished file must be named from the first picture ({expectedName}), got {summary.Path}.");
+            Expect(File.Exists(summary.Path), "The renamed recording must exist.");
+            Expect(!File.Exists(sink.OutputPath), "The pending name must be gone after the rename.");
+
+            string sidecarPath = summary.Path + ".json";
+            Expect(File.Exists(sidecarPath), "A JSON sidecar must sit next to the recording.");
+            string json = File.ReadAllText(sidecarPath);
+            Expect(json.Contains("2026-11-24T12:00:00.000Z", StringComparison.Ordinal), "Sidecar arm time must be the arm instant.");
+            Expect(json.Contains("2026-11-24T12:01:20.000Z", StringComparison.Ordinal), "Sidecar must record the first picture 80s later.");
+            Expect(json.Contains("\"ConfiguredRateNumerator\": 30", StringComparison.Ordinal), "Sidecar must record the configured rate.");
+            Expect(json.Contains("\"ConfiguredRateDenominator\": 1", StringComparison.Ordinal), "Sidecar denominator must be stored.");
+            Expect(json.Contains("LV1 Desk", StringComparison.Ordinal), "Sidecar must name the source.");
+            Expect(json.Contains("FirstAudioTimeUtc", StringComparison.Ordinal), "Sidecar must have a first-audio field.");
+
+            arm.Dispose();
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(" -> File name follows the first picture; creation_time is UTC ISO; the sidecar records both clocks.");
+        Console.ResetColor();
+    }
+
+    /// <summary>Creates the output file at finalize so the arm can rename a real path. No encoder.</summary>
+    private sealed class TouchFileSink : IRecordingSink
+    {
+        public string? OutputPath { get; private set; }
+        public bool RequiresDurableStorage => false;
+        public long VideoFramesDropped => 0;
+        public long AudioChunksDropped => 0;
+        public string ResolvedEncoderName => "touch";
+        public string DiagnosticTail => string.Empty;
+#pragma warning disable CS0067 // The interface requires the event; this stub never fails.
+        public event Action<string>? SinkError;
+#pragma warning restore CS0067
+
+        public bool Initialize(RecordingConfig config, StreamFormat format, string outputPath)
+        {
+            OutputPath = outputPath;
+            return true;
+        }
+
+        public void WriteVideo(IntPtr pData, int dataLength) { }
+
+        public void WriteAudio(byte[] buffer, int offset, int count) { }
+
+        public void FinalizeSink(out long totalBytesWritten)
+        {
+            File.WriteAllBytes(OutputPath ?? throw new InvalidOperationException("No path."), new byte[] { 1, 2, 3, 4 });
+            totalBytesWritten = 4;
+        }
+
+        public void Dispose() { }
+    }
 }
 

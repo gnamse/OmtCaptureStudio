@@ -28,8 +28,10 @@ public sealed class OperatorSettings
     /// <see cref="BroadcastFrameRate"/> still loads: that integer becomes numerator/1.
     /// Version 3 adds the selected monitor's adapter LUID, output index and device name. A file that
     /// only has <see cref="SelectedMonitorIndex"/> still means that output index on the default adapter.
+    /// Version 4 adds the recording audio route and the manual A/V offset. A file that does not
+    /// mention them stays on OMT source audio and a 0 ms offset.
     /// </summary>
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 
     public int Version { get; set; } = CurrentVersion;
 
@@ -120,6 +122,21 @@ public sealed class OperatorSettings
 
     /// <summary>DXGI device name of the selected monitor, for example <c>\\.\DISPLAY1</c>.</summary>
     public string? SelectedMonitorDeviceName { get; set; }
+
+    /// <summary>Recording audio route name. Absent means OMT source audio.</summary>
+    public string? RecordingAudioRoute { get; set; }
+
+    /// <summary><see cref="Models.HostAudioCaptureMode"/> name when the route is a host input.</summary>
+    public string? RecordingHostAudioMode { get; set; }
+
+    /// <summary>WASAPI endpoint id or ASIO CLSID. Null is the mode's default device.</summary>
+    public string? RecordingHostAudioDeviceId { get; set; }
+
+    /// <summary>First ASIO input channel. Absent is pair 1/2.</summary>
+    public int? RecordingHostAudioAsioChannel { get; set; }
+
+    /// <summary>Manual A/V offset in milliseconds. Absent is 0. Positive delays the recorded audio.</summary>
+    public int? AudioVideoOffsetMilliseconds { get; set; }
 }
 
 /// <summary>

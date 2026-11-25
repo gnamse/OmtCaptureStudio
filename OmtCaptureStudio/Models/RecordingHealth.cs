@@ -108,7 +108,10 @@ public sealed record RecordingStopSummary(
     int SegmentIndex,
     string EncoderName,
     string DiagnosticTail,
-    RecordingStopReason Reason = RecordingStopReason.Manual)
+    RecordingStopReason Reason = RecordingStopReason.Manual,
+    long VideoFramesDuplicated = 0,
+    long PaceFramesDropped = 0,
+    double AudioClampSeconds = 0)
 {
     public RecordingHealthSnapshot ToHealthSnapshot() => new()
     {
@@ -200,7 +203,10 @@ public static class RecordingHealth
         string parity = IsAvParityOk(s) ? "parity OK" : "PARITY MISMATCH";
 
         return $"Stop verdict ({ReasonText(summary.Reason)}): video {s.MediaDuration.TotalSeconds:F2}s vs audio {s.AudioDuration.TotalSeconds:F2}s " +
-               $"(delta {delta:F2}s, {parity}) | drops {VideoDropsText(s)} | finalize {summary.FinalizeDuration.TotalMilliseconds:F0} ms | " +
+               $"(delta {delta:F2}s, {parity}) | drops {VideoDropsText(s)} | " +
+               $"dups {summary.VideoFramesDuplicated:N0} pace-drops {summary.PaceFramesDropped:N0} | " +
+               $"audio clamp {summary.AudioClampSeconds:F1}s | " +
+               $"finalize {summary.FinalizeDuration.TotalMilliseconds:F0} ms | " +
                $"segment {summary.SegmentIndex} | {EncoderText(s)} @ {s.AchievedBitrateMbps:F1} Mbps | " +
                $"file {summary.FileSizeBytes / (1024.0 * 1024.0):F1} MB";
     }

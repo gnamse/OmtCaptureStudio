@@ -263,6 +263,21 @@ public sealed class SettingsStore
             config.ScheduledStopAfterMinutes = stopAfter;
         }
 
+        if (Enum.TryParse<RecordingAudioRoute>(settings.RecordingAudioRoute, ignoreCase: true, out var route)
+            && route == RecordingAudioRoute.HostInput
+            && Enum.TryParse<HostAudioCaptureMode>(settings.RecordingHostAudioMode, ignoreCase: true, out var hostMode))
+        {
+            config.AudioRoute = RecordingAudioRoute.HostInput;
+            config.HostAudioMode = hostMode.ToString();
+            config.HostAudioDeviceId = settings.RecordingHostAudioDeviceId;
+            config.HostAudioAsioChannel = settings.RecordingHostAudioAsioChannel ?? 0;
+        }
+
+        config.AudioVideoOffsetMilliseconds = Math.Clamp(
+            settings.AudioVideoOffsetMilliseconds ?? 0,
+            -AudioOffset.MaxMilliseconds,
+            AudioOffset.MaxMilliseconds);
+
         return config;
     }
 
@@ -303,7 +318,12 @@ public sealed class SettingsStore
             ScheduledStartDelayMinutes = config.ScheduledStartDelayMinutes,
             ScheduledStartUtc = config.ScheduledStartUtc,
             ScheduledStopUtc = config.ScheduledStopUtc,
-            ScheduledStopAfterMinutes = config.ScheduledStopAfterMinutes
+            ScheduledStopAfterMinutes = config.ScheduledStopAfterMinutes,
+            RecordingAudioRoute = config.AudioRoute.ToString(),
+            RecordingHostAudioMode = config.HostAudioMode,
+            RecordingHostAudioDeviceId = config.HostAudioDeviceId,
+            RecordingHostAudioAsioChannel = config.HostAudioAsioChannel,
+            AudioVideoOffsetMilliseconds = config.AudioVideoOffsetMilliseconds
         };
 
         if (broadcastFrameRate is { IsValid: true } rate)

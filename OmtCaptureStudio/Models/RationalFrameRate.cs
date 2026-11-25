@@ -139,6 +139,17 @@ public readonly record struct RationalFrameRate
 
     public override string ToString() => IsValid ? $"{Numerator}/{Denominator}" : "invalid";
 
+    /// <summary>
+    /// Samples belonging to frames <c>[0, frameCount)</c>. Frame 0's own count is
+    /// <see cref="SamplesForFrame"/>; this is the running total the sender uses so a skipped
+    /// frame's samples are still due.
+    /// </summary>
+    public long SamplesUntil(long frameCount, int sampleRate)
+    {
+        if (frameCount <= 0 || !IsValid || sampleRate <= 0) return 0;
+        return CumulativeSamples(frameCount, sampleRate);
+    }
+
     private long CumulativeSamples(long frameIndex, int sampleRate)
         => (long)(((Int128)frameIndex * sampleRate * Denominator) / Numerator);
 

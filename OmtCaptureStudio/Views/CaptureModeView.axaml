@@ -236,6 +236,23 @@
                                   AutomationProperties.Name="Scheduled Stop Delay"
                                   ToolTip.Tip="End the next take automatically after this long. Off lets the take run until you stop it."/>
                     </StackPanel>
+
+                    <StackPanel Margin="16,0,0,0">
+                        <TextBlock Text="REC AUDIO" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <ComboBox x:Name="CmbRecordingAudio" Width="180"
+                                  ItemsSource="{CompiledBinding RecordingAudioChoices}"
+                                  SelectedItem="{CompiledBinding SelectedRecordingAudioChoice, Mode=TwoWay}"
+                                  AutomationProperties.Name="Recording Audio Source"
+                                  ToolTip.Tip="Audio written into the file. OMT source audio is the default. A host input records that WASAPI or ASIO device instead."/>
+                    </StackPanel>
+
+                    <StackPanel Margin="16,0,0,0">
+                        <TextBlock Text="A/V OFFSET" Foreground="{DynamicResource StudioTextSecondary}" FontSize="10" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <TextBox x:Name="TxtAvOffset" Width="72" MinHeight="30" VerticalContentAlignment="Center"
+                                 Text="{CompiledBinding AudioVideoOffsetText, Mode=TwoWay}"
+                                 AutomationProperties.Name="Audio Video Offset Milliseconds"
+                                 ToolTip.Tip="Milliseconds to shift the recorded audio. Positive delays audio so the picture leads. Negative advances audio. 0 leaves it untouched."/>
+                    </StackPanel>
                 </StackPanel>
 
                 <!-- 1: Output Folder Selection -->

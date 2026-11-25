@@ -76,7 +76,8 @@ public static class FfmpegArguments
         string outputPath,
         string videoPipeName,
         string? audioPipeName,
-        VideoEncoderChoice resolvedEncoder)
+        VideoEncoderChoice resolvedEncoder,
+        DateTime? creationTimeUtc = null)
     {
         string fpsStr = FormatRate(format);
 
@@ -125,6 +126,12 @@ public static class FfmpegArguments
             args.Add("+frag_keyframe+empty_moov");
         }
 
+        if (creationTimeUtc is { } created)
+        {
+            args.Add("-metadata");
+            args.Add("creation_time=" + FormatCreationTimeUtc(created));
+        }
+
         args.Add(outputPath);
         return args.ToArray();
     }
@@ -134,6 +141,13 @@ public static class FfmpegArguments
     /// accepts and which does not round 59.94. A legacy format that only stored a double keeps the
     /// invariant-culture decimal (<c>59.94</c>, never a locale comma).
     /// </summary>
+    /// <summary>UTC ISO-8601 timestamp for ffmpeg <c>creation_time</c> (millisecond precision).</summary>
+    public static string FormatCreationTimeUtc(DateTime time)
+    {
+        DateTime utc = time.Kind == DateTimeKind.Utc ? time : time.ToUniversalTime();
+        return utc.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+    }
+
     public static string FormatRate(StreamFormat format)
     {
         if (format.FrameRateNumerator > 0 && format.FrameRateDenominator > 0)

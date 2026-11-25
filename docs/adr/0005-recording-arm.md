@@ -14,9 +14,11 @@
 
 ## Context
 
-The recording pipeline's most load-bearing invariant — *stamp video at the measured true fps and arm
-the audio resampler BEFORE the recording gate flips* — had no home. It was an emergent property of
-three pieces of state living in two classes:
+The recording pipeline's most load-bearing invariant — *reset the A/V clock BEFORE the recording
+gate flips* — had no home. (The original wording of this paragraph said to stamp the file at the
+measured true fps. That stamp is what made a field take run short of wall time; ADR-0014 replaces
+it with a fixed announced rate plus duplicate/drop. The arm-order invariant below is unchanged.)
+It was an emergent property of three pieces of state living in two classes:
 
 | Concern | Where it lived | Why that is a problem |
 |---|---|---|

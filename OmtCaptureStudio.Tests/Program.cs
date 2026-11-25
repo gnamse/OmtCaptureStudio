@@ -188,6 +188,7 @@ partial class Program
         TestConversionPlacement();
         TestRecordingStorageGuard();
         TestRecordingArm();
+        TestRecordingFileIdentity();
         TestMediaBufferPool();
         TestPipeWriterLoop();
         TestFfmpegArguments();
@@ -443,6 +444,7 @@ partial class Program
             case "0.679": TestConversionPlacement(); break;
             case "0.681": TestRecordingStorageGuard(); break;
             case "0.682": TestRecordingArm(); break;
+            case "0.682b": TestRecordingFileIdentity(); break;
             case "0.683": TestMediaBufferPool(); break;
             case "0.684": TestPipeWriterLoop(); break;
             case "0.685": TestFfmpegArguments(); break;

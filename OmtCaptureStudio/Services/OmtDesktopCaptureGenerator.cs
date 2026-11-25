@@ -16,7 +16,7 @@ namespace OmtCaptureStudio.Services;
 /// <summary>
 /// Broadcasts a host capture target (a monitor or a window — any <see cref="IFrameSource"/>)
 /// and a host audio source (<see cref="IHostAudioSource"/>) over OMT by sending each captured
-/// video frame and lockstep 48 kHz stereo <c>FPA1</c> audio frame through <see cref="OMTSend"/>.
+/// video frame and the 48 kHz stereo <c>FPA1</c> audio that elapsed since the previous send.
 /// </summary>
 public sealed class OmtDesktopCaptureGenerator : IDisposable
 {
@@ -349,14 +349,15 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
     {
         const int sampleRate = HostAudioFormat.TargetSampleRate;
         const int channels = HostAudioFormat.TargetChannels;
-        int maxSamples = Math.Max(1, _frameRate.MaxSamplesPerFrame(sampleRate));
-        int audioSamplesTotal = channels * maxSamples;
-
-        float[] audioBuffer = new float[audioSamplesTotal];
+        // One second, rented once. A late loop sends every sample that came due, in chunks of
+        // this size, instead of one video frame's worth.
+        int chunkCapacity = Math.Max(1, sampleRate);
+        float[] audioBuffer = new float[channels * chunkCapacity];
         GCHandle audioHandle = GCHandle.Alloc(audioBuffer, GCHandleType.Pinned);
         IntPtr pAudio = audioHandle.AddrOfPinnedObject();
 
         using var pacer = new FramePacer(_frameRate);
+        long audioSamplesSent = 0;
         // The pacer owns the frame clock. This watch is only the first-frame diagnostic and must not
         // be the thing the send loop sleeps on.
         Stopwatch firstFrameWatch = Stopwatch.StartNew();
@@ -370,9 +371,6 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
             while (_isRunning && ReferenceEquals(_capturer, capturer) && ReferenceEquals(_sender, sender))
             {
                 long frameIndex = pacer.WaitNext();
-                int samplesPerFrame = _frameRate.SamplesForFrame(frameIndex, sampleRate);
-                if (samplesPerFrame < 1) samplesPerFrame = 1;
-                if (samplesPerFrame > maxSamples) samplesPerFrame = maxSamples;
 
                 // Desktop Duplication only yields a frame when the screen changes, so a static
                 // desktop would otherwise starve receivers. Once one real frame is captured,
@@ -441,29 +439,39 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
                 };
                 sender.Send(vFrame);
 
-                // 2. Fill and Send Planar Audio Frame (FPA1, 48 kHz, 2ch) in lockstep with video
-                IHostAudioSource? activeAudio = Volatile.Read(ref _audioSource);
-                if (activeAudio != null)
+                // 2. Send every sample the schedule owes since the previous pass, including
+                //    pictures this loop skipped. One frame of audio per iteration is what made a
+                //    slow desktop loop transmit less than real time (ADR-0014).
+                int due = AudioSendSchedule.SamplesDue(_frameRate, sampleRate, frameIndex, audioSamplesSent);
+                int remaining = due;
+                while (remaining > 0)
                 {
-                    activeAudio.FillPlanarAudio(audioBuffer, samplesPerFrame);
-                }
-                else
-                {
-                    Array.Clear(audioBuffer, 0, audioBuffer.Length);
-                }
+                    int samples = Math.Min(remaining, chunkCapacity);
+                    IHostAudioSource? activeAudio = Volatile.Read(ref _audioSource);
+                    if (activeAudio != null)
+                    {
+                        activeAudio.FillPlanarAudio(audioBuffer, samples);
+                    }
+                    else
+                    {
+                        Array.Clear(audioBuffer, 0, channels * samples);
+                    }
 
-                OMTMediaFrame aFrame = new()
-                {
-                    Type = OMTFrameType.Audio,
-                    Codec = (int)OMTCodec.FPA1,
-                    Channels = channels,
-                    SampleRate = sampleRate,
-                    SamplesPerChannel = samplesPerFrame,
-                    Data = pAudio,
-                    DataLength = channels * samplesPerFrame * sizeof(float),
-                    Timestamp = -1
-                };
-                sender.Send(aFrame);
+                    OMTMediaFrame aFrame = new()
+                    {
+                        Type = OMTFrameType.Audio,
+                        Codec = (int)OMTCodec.FPA1,
+                        Channels = channels,
+                        SampleRate = sampleRate,
+                        SamplesPerChannel = samples,
+                        Data = pAudio,
+                        DataLength = channels * samples * sizeof(float),
+                        Timestamp = -1
+                    };
+                    sender.Send(aFrame);
+                    remaining -= samples;
+                    audioSamplesSent += samples;
+                }
             }
         }
         finally
