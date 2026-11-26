@@ -552,6 +552,16 @@ public class CaptureSession : IDisposable
 
     public void Dispose()
     {
+
+        // REVIEW-028 finding 2.3: report the hot-path swallowed-error tally ONCE, at session
+        // shutdown. The hot sites cannot log (zero-allocation per-frame contract), so this single
+        // read is the only place the count is ever surfaced. Guarded on >0 rather than a DEBUG
+        // conditional: a DEBUG-only guard compiles the line away in the SHIPPED Release build,
+        // which would make the counter unobservable exactly where it is needed.
+        if (SinkErrorCounter.Count > 0)
+        {
+            AppLogger.LogDebug($"capture/sink errors this session: {SinkErrorCounter.Count}");
+        }
         if (_disposed) return;
         _disposed = true;
 

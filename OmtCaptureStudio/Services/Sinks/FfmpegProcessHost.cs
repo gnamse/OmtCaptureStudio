@@ -1,4 +1,5 @@
 using System;
+using OmtCaptureStudio.Services.Forensics;
 using System.Buffers;
 using System.Diagnostics;
 using System.IO;
@@ -443,13 +444,13 @@ public class FfmpegProcessHost : IDisposable
 
         // Flush pipes and wait briefly before closing to ensure FFmpeg receives all data
         // Wrap in tasks with timeouts to prevent deadlocks if FFmpeg stops reading
-        try { if (_videoPipe != null) Task.Run(() => _videoPipe.Flush()).Wait(2000); } catch { }
-        try { if (_audioPipe != null) Task.Run(() => _audioPipe.Flush()).Wait(2000); } catch { }
+        try { if (_videoPipe != null) Task.Run(() => _videoPipe.Flush()).Wait(2000); } catch (Exception ex) { AppLogger.LogDebug($"[FfmpegProcessHost] {ex.Message}"); }
+        try { if (_audioPipe != null) Task.Run(() => _audioPipe.Flush()).Wait(2000); } catch (Exception ex) { AppLogger.LogDebug($"[FfmpegProcessHost] {ex.Message}"); }
         Thread.Sleep(500);
 
         // Close pipes to signal EOF to FFmpeg.
-        try { _videoPipe?.Dispose(); } catch { }
-        try { _audioPipe?.Dispose(); } catch { }
+        try { _videoPipe?.Dispose(); } catch (Exception ex) { AppLogger.LogDebug($"[FfmpegProcessHost] {ex.Message}"); }
+        try { _audioPipe?.Dispose(); } catch (Exception ex) { AppLogger.LogDebug($"[FfmpegProcessHost] {ex.Message}"); }
         _videoPipe = null;
         _audioPipe = null;
 
@@ -473,7 +474,7 @@ public class FfmpegProcessHost : IDisposable
             _ffmpegProcess.WaitForExit(finalizeBudgetMs);
             if (!_ffmpegProcess.HasExited)
             {
-                try { _ffmpegProcess.Kill(entireProcessTree: true); } catch { }
+                try { _ffmpegProcess.Kill(entireProcessTree: true); } catch (Exception ex) { AppLogger.LogDebug($"[FfmpegProcessHost] {ex.Message}"); }
                 killed = true;
             }
         }
@@ -607,8 +608,8 @@ public class FfmpegProcessHost : IDisposable
             _audioWorkerThread.Join(1000);
         }
 
-        try { _videoPipe?.Dispose(); } catch { }
-        try { _audioPipe?.Dispose(); } catch { }
+        try { _videoPipe?.Dispose(); } catch (Exception ex) { AppLogger.LogDebug($"[FfmpegProcessHost] {ex.Message}"); }
+        try { _audioPipe?.Dispose(); } catch (Exception ex) { AppLogger.LogDebug($"[FfmpegProcessHost] {ex.Message}"); }
         try
         {
             if (_ffmpegProcess != null && !_ffmpegProcess.HasExited)
@@ -616,8 +617,8 @@ public class FfmpegProcessHost : IDisposable
                 _ffmpegProcess.Kill(entireProcessTree: true);
             }
         }
-        catch { }
-        try { _ffmpegProcess?.Dispose(); } catch { }
+        catch (Exception ex) { AppLogger.LogDebug($"[FfmpegProcessHost] {ex.Message}"); }
+        try { _ffmpegProcess?.Dispose(); } catch (Exception ex) { AppLogger.LogDebug($"[FfmpegProcessHost] {ex.Message}"); }
 
         _videoPipe = null;
         _audioPipe = null;

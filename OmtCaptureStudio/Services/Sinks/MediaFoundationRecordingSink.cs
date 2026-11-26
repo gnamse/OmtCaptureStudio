@@ -621,7 +621,7 @@ internal sealed class MediaFoundationSinkHost : IDisposable
     private void DisposeWriter()
     {
         try { _writer?.Dispose(); }
-        catch { }
+        catch (Exception ex) { AppLogger.LogDebug($"[MediaFoundationRecordingSink] {ex.Message}"); }
         _writer = null;
 
         // Exactly once per successful startup: Stop() and Dispose() can both reach here.
@@ -637,7 +637,7 @@ internal sealed class MediaFoundationSinkHost : IDisposable
         var thread = _thread;
         if (thread != null)
         {
-            try { thread.Join(TimeSpan.FromSeconds(5)); } catch { }
+            try { thread.Join(TimeSpan.FromSeconds(5)); } catch (Exception ex) { AppLogger.LogDebug($"[MediaFoundationRecordingSink] {ex.Message}"); }
             _thread = null;
         }
 

@@ -1146,7 +1146,9 @@ partial class Program
             Expect(File.Exists(summary.Path), "The renamed recording must exist.");
             Expect(!File.Exists(sink.OutputPath), "The pending name must be gone after the rename.");
 
-            string sidecarPath = summary.Path + ".json";
+            string sidecarPath = RecordingSidecarFile.PathFor(summary.Path);
+            Expect(sidecarPath == summary.Path + ".json", "RecordingSidecarFile.PathFor must append .json.");
+            Expect(RecordingSidecarFile.ToIso(0) == string.Empty, "RecordingSidecarFile.ToIso(<=0) must return empty string.");
             Expect(File.Exists(sidecarPath), "A JSON sidecar must sit next to the recording.");
             string json = File.ReadAllText(sidecarPath);
             Expect(json.Contains("2026-11-24T12:00:00.000Z", StringComparison.Ordinal), "Sidecar arm time must be the arm instant.");

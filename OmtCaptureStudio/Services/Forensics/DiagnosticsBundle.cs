@@ -1,4 +1,5 @@
 using System;
+using OmtCaptureStudio.Services.Forensics;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -143,7 +144,7 @@ public static class DiagnosticsBundle
             string? parent = Directory.GetParent(s.LogDirectory)?.FullName;
             if (!string.IsNullOrEmpty(parent)) return Path.Combine(parent, BundleFolder);
         }
-        catch { }
+        catch (Exception ex) { AppLogger.LogDebug($"[DiagnosticsBundle] {ex.Message}"); }
 
         return string.IsNullOrWhiteSpace(s.LogDirectory) ? BundleFolder : s.LogDirectory;
     }
@@ -308,7 +309,7 @@ public static class DiagnosticsBundle
             }
 
             long size = 0;
-            try { size = new FileInfo(outputPath).Length; } catch { }
+            try { size = new FileInfo(outputPath).Length; } catch (Exception ex) { AppLogger.LogDebug($"[DiagnosticsBundle] {ex.Message}"); }
 
             AppLogger.LogInfo($"[DIAG] diagnostics bundle written: {outputPath} ({size} bytes, {entries.Count} entr(ies))");
             return new DiagnosticsBundleResult { Success = true, Path = outputPath, SizeBytes = size, Entries = entries };
@@ -344,7 +345,7 @@ public static class DiagnosticsBundle
             if (entryName.Length == 0) continue;
 
             long size = 0;
-            try { size = new FileInfo(path).Length; } catch { }
+            try { size = new FileInfo(path).Length; } catch (Exception ex) { AppLogger.LogDebug($"[DiagnosticsBundle] {ex.Message}"); }
 
             artifacts.Add(new DiagnosticsArtifact(path, entryName, size));
         }
@@ -430,7 +431,7 @@ public static class DiagnosticsBundle
 
     private static void TryDelete(string path)
     {
-        try { if (File.Exists(path)) File.Delete(path); } catch { }
+        try { if (File.Exists(path)) File.Delete(path); } catch (Exception ex) { AppLogger.LogDebug($"[DiagnosticsBundle] {ex.Message}"); }
     }
 
     private static string Value(string? text) => string.IsNullOrWhiteSpace(text) ? "(unknown)" : text!;

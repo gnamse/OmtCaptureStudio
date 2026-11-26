@@ -119,7 +119,7 @@ public class OmtReceiverService : IDisposable
             // dispose here so we don't leak the native handle.
             if (!threadStarted)
             {
-                try { receiver?.Dispose(); } catch { }
+                try { receiver?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtReceiverService] {swallowedEx.Message}"); }
             }
 
             ConnectionStatusChanged?.Invoke($"Connection Failed: {ex.Message}");
@@ -306,7 +306,7 @@ public class OmtReceiverService : IDisposable
         finally
         {
             // The loop owns the receiver it was handed: dispose exactly once, after last use.
-            try { receiver.Dispose(); } catch { }
+            try { receiver.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtReceiverService] {swallowedEx.Message}"); }
         }
     }
 

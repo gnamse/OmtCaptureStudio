@@ -1,4 +1,5 @@
 using System;
+using OmtCaptureStudio.Services.Forensics;
 using System.Runtime.InteropServices;
 using Vortice.Multimedia;
 using Vortice.XAudio2;
@@ -138,7 +139,7 @@ public class XAudio2Monitor : IAudioMonitor
                 _xaudio2 = null;
             }
         }
-        catch { }
+        catch (Exception ex) { AppLogger.LogDebug($"[XAudio2Monitor] {ex.Message}"); }
     }
 
     public void Dispose()
