@@ -1,4 +1,5 @@
 using System;
+using OmtCaptureStudio.Services.Forensics;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -218,7 +219,7 @@ public static unsafe class AsioInputChannelProbe
 
             if (apartmentOwned)
             {
-                try { NativeMethods.CoUninitialize(); } catch { }
+                try { NativeMethods.CoUninitialize(); } catch (Exception ex) { AppLogger.LogDebug($"[AsioInputChannelProbe] {ex.Message}"); }
             }
         }
     }

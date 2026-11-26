@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using OmtCaptureStudio.Services.Forensics;
 using System.Runtime.InteropServices;
 using libomtnet;
 using OmtCaptureStudio.Models;
@@ -70,7 +71,7 @@ public class OmtTestPatternGenerator : IDisposable
             {
                 _sender.Dispose();
             }
-            catch { }
+            catch (Exception ex) { AppLogger.LogDebug($"[OmtTestPatternGenerator] {ex.Message}"); }
             _sender = null;
         }
     }

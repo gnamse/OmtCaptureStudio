@@ -1,4 +1,5 @@
 using System;
+using OmtCaptureStudio.Services.Forensics;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -47,7 +48,7 @@ public static class AppLogger
                 Directory.CreateDirectory(LogDir);
             }
         }
-        catch { }
+        catch (Exception ex) { AppLogger.LogDebug($"[AppLogger] {ex.Message}"); }
 
         Task.Run(ProcessLogQueueAsync);
     }
@@ -91,11 +92,14 @@ public static class AppLogger
         {
             // Reader.Count is not supported by every channel implementation; fall back to a short fixed
             // grace period so the background writer still gets its chance.
-            try { Thread.Sleep(50); } catch { }
+            try { Thread.Sleep(50); } catch (Exception ex) { AppLogger.LogDebug($"[AppLogger] {ex.Message}"); }
         }
     }
 
     public static void LogInfo(string message) => Log("INFO", message);
+
+    /// <summary>Diagnostic detail (REVIEW-028 2.3): a swallowed non-fatal error, with its context token.</summary>
+    public static void LogDebug(string message) => Log("DEBUG", message);
     public static void LogError(string message) => Log("ERROR", message);
     public static void LogError(string message, Exception ex) => Log("ERROR", $"{message} | Exception: {ex}");
     

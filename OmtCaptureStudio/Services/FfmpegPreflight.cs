@@ -1,4 +1,5 @@
 using System;
+using OmtCaptureStudio.Services.Forensics;
 using System.Diagnostics;
 using System.IO;
 
@@ -181,7 +182,7 @@ public static class FfmpegPreflight
 
             if (!process.WaitForExit(VersionTimeoutMs))
             {
-                try { process.Kill(entireProcessTree: true); } catch { }
+                try { process.Kill(entireProcessTree: true); } catch (Exception ex) { AppLogger.LogDebug($"[FfmpegPreflight] {ex.Message}"); }
                 return null;
             }
 

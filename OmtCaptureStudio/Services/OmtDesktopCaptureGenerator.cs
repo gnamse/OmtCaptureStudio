@@ -128,14 +128,14 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
 
         if (_disposed)
         {
-            try { newAudioSource.Dispose(); } catch { }
+            try { newAudioSource.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
             return;
         }
 
         IHostAudioSource? previous = Interlocked.Exchange(ref _audioSource, newAudioSource);
         if (previous != null && !ReferenceEquals(previous, newAudioSource))
         {
-            try { previous.Dispose(); } catch { }
+            try { previous.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
         }
     }
 
@@ -207,9 +207,9 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
             // started, dispose here so we don't leak the native handles.
             if (!threadStarted)
             {
-                try { sender?.Dispose(); } catch { }
-                try { source.Dispose(); } catch { }
-                try { Interlocked.Exchange(ref _audioSource, null)?.Dispose(); } catch { }
+                try { sender?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
+                try { source.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
+                try { Interlocked.Exchange(ref _audioSource, null)?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
             }
 
             throw;
@@ -307,7 +307,7 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
             }
             catch
             {
-                try { blocker?.Dispose(); } catch { }
+                try { blocker?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
             }
         }
     }
@@ -328,7 +328,7 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
                 }
                 catch
                 {
-                    try { client?.Dispose(); } catch { }
+                    try { client?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
                     break;
                 }
             }
@@ -339,8 +339,8 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
     {
         foreach (Socket s in _interfaceBlockerSockets)
         {
-            try { s.Close(); } catch { }
-            try { s.Dispose(); } catch { }
+            try { s.Close(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
+            try { s.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
         }
         _interfaceBlockerSockets.Clear();
     }
@@ -478,9 +478,9 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         {
             if (audioHandle.IsAllocated) audioHandle.Free();
             // The loop owns the source, audioSource, and sender it was handed: dispose each once.
-            try { Interlocked.Exchange(ref _audioSource, null)?.Dispose(); } catch { }
-            try { capturer.Dispose(); } catch { }
-            try { sender.Dispose(); } catch { }
+            try { Interlocked.Exchange(ref _audioSource, null)?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
+            try { capturer.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
+            try { sender.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
         }
     }
 
@@ -491,8 +491,8 @@ public sealed class OmtDesktopCaptureGenerator : IDisposable
         Stop();
         if (!_started)
         {
-            try { Interlocked.Exchange(ref _audioSource, null)?.Dispose(); } catch { }
-            try { _frameSource.Dispose(); } catch { }
+            try { Interlocked.Exchange(ref _audioSource, null)?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
+            try { _frameSource.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[OmtDesktopCaptureGenerator] {swallowedEx.Message}"); }
         }
         GC.SuppressFinalize(this);
     }

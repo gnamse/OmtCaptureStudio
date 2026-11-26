@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -5,6 +6,7 @@ using System.Text;
 // One assembly application covers every DllImport in this binary. A future import of a DLL that
 // does not live in System32 must set its own DefaultDllImportSearchPaths on that method.
 [assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+[assembly: InternalsVisibleTo("OmtCaptureStudio.Tests")]
 
 namespace OmtCaptureStudio.Interop;
 

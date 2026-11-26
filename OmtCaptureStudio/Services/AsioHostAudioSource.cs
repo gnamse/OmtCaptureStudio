@@ -1,4 +1,5 @@
 using System;
+using OmtCaptureStudio.Services.Forensics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -202,7 +203,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
         // ASIO drivers are apartment-agnostic in theory but many are apartment-bound in practice
         // (and several pop up a control-panel/DCOM dialog), so pin this thread to a real STA *before*
         // it starts — after COM has initialised the thread it can never change.
-        try { _driverThread.SetApartmentState(ApartmentState.STA); } catch { }
+        try { _driverThread.SetApartmentState(ApartmentState.STA); } catch (Exception ex) { AppLogger.LogDebug($"[AsioHostAudioSource] {ex.Message}"); }
 
         _driverThread.Start();
     }
@@ -267,7 +268,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
         }
         finally
         {
-            try { _stopSignal.Dispose(); } catch { }
+            try { _stopSignal.Dispose(); } catch (Exception ex) { AppLogger.LogDebug($"[AsioHostAudioSource] {ex.Message}"); }
         }
     }
 
@@ -351,7 +352,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
         finally
         {
             _isRunning = false;
-            try { ShutdownDriver(pAsio); } catch { }
+            try { ShutdownDriver(pAsio); } catch (Exception ex) { AppLogger.LogDebug($"[AsioHostAudioSource] {ex.Message}"); }
             if (shouldUninit) NativeMethods.CoUninitialize();
         }
     }
@@ -594,7 +595,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
 
         if (pAsio != IntPtr.Zero)
         {
-            try { AsioStop(pAsio); } catch { }
+            try { AsioStop(pAsio); } catch (Exception ex) { AppLogger.LogDebug($"[AsioHostAudioSource] {ex.Message}"); }
 
             // Give any callback that is mid-flight a brief grace period to leave before the driver
             // frees the sample buffers we are reading from.
@@ -604,7 +605,7 @@ public sealed unsafe class AsioHostAudioSource : IHostAudioSource
                 Thread.Sleep(1);
             }
 
-            try { AsioDisposeBuffers(pAsio); } catch { }
+            try { AsioDisposeBuffers(pAsio); } catch (Exception ex) { AppLogger.LogDebug($"[AsioHostAudioSource] {ex.Message}"); }
         }
 
         _ring.Reset();

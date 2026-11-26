@@ -52,6 +52,21 @@ partial class Program
             return RunMediaFoundationCrashHarness(args[1]);
         }
 
+        // REVIEW-028-FIX-2b (finding 5.3, HIGH): child-process crash harnesses for AtomicFile.
+        // --atomicfile-write runs the production AtomicFile.WriteAllText in a tight loop until hard-killed.
+        // --atomicfile-write-plain is the negative control: bare File.WriteAllText (FileMode.Create
+        // truncates the destination to 0 bytes before writing the payload, so a hard kill mid-write leaves
+        // an empty or half-written file on disk).
+        if (args.Length >= 3 && args[0] == "--atomicfile-write")
+        {
+            return RunAtomicFileWriteChild(args[1], args[2], useAtomic: true);
+        }
+
+        if (args.Length >= 3 && args[0] == "--atomicfile-write-plain")
+        {
+            return RunAtomicFileWriteChild(args[1], args[2], useAtomic: false);
+        }
+
         // NET-005: run a single step by id, e.g. `--step 0.682`, for CI loops. The default suite
         // (no args) is unchanged and still runs every step in the same order.
         if (args.Length >= 2 && args[0] == "--step")
@@ -143,6 +158,51 @@ partial class Program
         }
         finally { handle.Free(); }
 
+        return 0;
+    }
+
+    /// <summary>
+    /// REVIEW-028-FIX-2b (finding 5.3, HIGH): child writer loop for the AtomicFile vs plain
+    /// File.WriteAllText process-kill harness. Expands the payload token into a deterministic ~256 KB
+    /// framed document (<c>BEGIN:&lt;token&gt;\n...body...\n:END:&lt;token&gt;</c>) so that a
+    /// non-atomic <see cref="File.WriteAllText(string,string)"/> (`FileMode.Create` truncation + buffered
+    /// write) is caught red-handed as truncated/empty when the parent hard-kills the child mid-write,
+    /// whereas <see cref="AtomicFile.WriteAllText"/> only ever exposes the complete old or complete new
+    /// document at the destination path.
+    /// </summary>
+    internal static string ExpandAtomicHarnessPayload(string token)
+    {
+        var sb = new System.Text.StringBuilder(32 * 1024 * 1024 + 256);
+        sb.Append("BEGIN:").Append(token).Append('\n');
+        string line = $"payload-row-{token}-0123456789abcdef0123456789abcdef0123456789abcdef\n";
+        while (sb.Length < 32 * 1024 * 1024)
+        {
+            sb.Append(line);
+        }
+        sb.Append(":END:").Append(token);
+        return sb.ToString();
+    }
+
+    static int RunAtomicFileWriteChild(string path, string payloadToken, bool useAtomic)
+    {
+        string fullPayload = ExpandAtomicHarnessPayload(payloadToken);
+        var utf8NoBom = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        Console.WriteLine("atomicfile-child: flowing");
+        Console.Out.Flush();
+
+        if (useAtomic)
+        {
+            AtomicFile.WriteAllText(path, fullPayload);
+        }
+        else
+        {
+            File.WriteAllText(path, fullPayload, utf8NoBom);
+        }
+
+        // Block after the single write: if the parent's Process.Kill() landed mid-write, this line is never
+        // reached; if the write completed before the kill arrived, we hold here rather than starting a
+        // back-to-back File.Replace whose internal NTFS temporary-rename window could be hit by the kill.
+        Thread.Sleep(Timeout.Infinite);
         return 0;
     }
 
@@ -350,9 +410,11 @@ partial class Program
         }
 
         Console.WriteLine("\n[Step 5] Stopping Recording & Finalizing MP4 Container via CaptureSession.StopRecording()...");
-        string? recordedFile = session.CurrentRecordingPath;
+        string? recordedFile = null;
+        session.RecordingStopped += s => recordedFile = s.Path;
         session.StopRecording();
         Thread.Sleep(500);
+        recordedFile ??= session.CurrentRecordingPath;
 
         if (string.IsNullOrEmpty(recordedFile) || !File.Exists(recordedFile))
         {

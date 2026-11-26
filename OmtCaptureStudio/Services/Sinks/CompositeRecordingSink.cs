@@ -266,7 +266,7 @@ public sealed class CompositeRecordingSink : IRecordingSink
             for (int i = 0; i < children.Length; i++)
             {
                 if (!children[i].Alive) continue;
-                try { total += children[i].Sink.VideoFramesDropped; } catch { }
+                try { total += children[i].Sink.VideoFramesDropped; } catch { SinkErrorCounter.Increment(); }
             }
 
             return total;
@@ -282,7 +282,7 @@ public sealed class CompositeRecordingSink : IRecordingSink
             for (int i = 0; i < children.Length; i++)
             {
                 if (!children[i].Alive) continue;
-                try { total += children[i].Sink.AudioChunksDropped; } catch { }
+                try { total += children[i].Sink.AudioChunksDropped; } catch { SinkErrorCounter.Increment(); }
             }
 
             return total;
@@ -298,7 +298,7 @@ public sealed class CompositeRecordingSink : IRecordingSink
             for (int i = 0; i < children.Length; i++)
             {
                 if (!children[i].Alive) continue;
-                try { return children[i].Sink.ResolvedEncoderName ?? string.Empty; } catch { }
+                try { return children[i].Sink.ResolvedEncoderName ?? string.Empty; } catch { SinkErrorCounter.Increment(); }
             }
 
             return string.Empty;
@@ -327,7 +327,7 @@ public sealed class CompositeRecordingSink : IRecordingSink
                     if (sb.Length > 0) sb.Append('\n');
                     sb.Append('[').Append(children[i].Name).Append("] ").Append(tail);
                 }
-                catch { }
+                catch { SinkErrorCounter.Increment(); }
             }
 
             return sb.Length <= 4000 ? sb.ToString() : sb.ToString(0, 4000);
@@ -388,7 +388,7 @@ public sealed class CompositeRecordingSink : IRecordingSink
             $"Composite recording sink: {reason}. The take continues on the remaining destination(s).");
 
         // Best-effort: keep the detached destination's file playable, then let it go exactly once.
-        try { child.Sink.FinalizeSink(out _); } catch { }
+        try { child.Sink.FinalizeSink(out _); } catch { SinkErrorCounter.Increment(); }
         DisposeChild(child);
 
         SinkError?.Invoke($"Recording destination '{child.Name}' was detached: {reason}");
@@ -407,7 +407,7 @@ public sealed class CompositeRecordingSink : IRecordingSink
     private void DisposeChild(ChildState child)
     {
         if (Interlocked.Exchange(ref child.Disposed, 1) != 0) return;
-        try { child.Sink.Dispose(); } catch { }
+        try { child.Sink.Dispose(); } catch { SinkErrorCounter.Increment(); }
     }
 
     /// <summary>Disposes every child EXACTLY once, whether it was detached earlier or not. Idempotent.</summary>

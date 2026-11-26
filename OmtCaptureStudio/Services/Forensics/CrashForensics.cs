@@ -1,4 +1,5 @@
 using System;
+using OmtCaptureStudio.Services.Forensics;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -559,7 +560,7 @@ public static class CrashForensics
 
     private static void TryDelete(string path)
     {
-        try { File.Delete(path); } catch { }
+        try { File.Delete(path); } catch (Exception ex) { AppLogger.LogDebug($"[CrashForensics] {ex.Message}"); }
     }
 
 }

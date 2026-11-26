@@ -29,7 +29,7 @@ public class BoundedMediaQueue<T> : IDisposable
         {
             if (_disposed || _isAddingCompleted)
             {
-                try { _onDrop(item); } catch { }
+                try { _onDrop(item); } catch { SinkErrorCounter.Increment(); }
                 Interlocked.Increment(ref _droppedCount);
                 return;
             }
@@ -37,12 +37,12 @@ public class BoundedMediaQueue<T> : IDisposable
             if (_queue.Count >= _capacity)
             {
                 var dropped = _queue.Dequeue();
-                try { _onDrop(dropped); } catch { }
+                try { _onDrop(dropped); } catch { SinkErrorCounter.Increment(); }
                 Interlocked.Increment(ref _droppedCount);
             }
 
             _queue.Enqueue(item);
-            try { _signal.Set(); } catch { }
+            try { _signal.Set(); } catch { SinkErrorCounter.Increment(); }
         }
     }
 
@@ -66,7 +66,7 @@ public class BoundedMediaQueue<T> : IDisposable
         {
             if (_disposed) return;
             _isAddingCompleted = true;
-            try { _signal.Set(); } catch { }
+            try { _signal.Set(); } catch { SinkErrorCounter.Increment(); }
         }
     }
 
@@ -111,7 +111,7 @@ public class BoundedMediaQueue<T> : IDisposable
             if (_disposed) return;
             _disposed = true;
             _isAddingCompleted = true;
-            try { _signal.Set(); } catch { }
+            try { _signal.Set(); } catch { SinkErrorCounter.Increment(); }
             while (_queue.Count > 0)
             {
                 var item = _queue.Dequeue();
@@ -119,9 +119,9 @@ public class BoundedMediaQueue<T> : IDisposable
                 {
                     _onDrop(item);
                 }
-                catch { }
+                catch { SinkErrorCounter.Increment(); }
             }
         }
-        try { _signal.Dispose(); } catch { }
+        try { _signal.Dispose(); } catch { SinkErrorCounter.Increment(); }
     }
 }

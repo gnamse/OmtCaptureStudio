@@ -325,6 +325,208 @@ partial class Program
             Expect(rt.EncoderChoice == original.EncoderChoice, "Round trip: encoder choice.");
             Expect(rt.SinkEngine == SinkEngine.MediaFoundation,
                 $"NET-026: the recording engine must survive a save/load round trip; got {rt.SinkEngine}.");
+
+            // ====================================================================================
+            // REVIEW-028 finding 5.3 (HIGH): AtomicFile was UNTESTED. It is the one write path
+            // behind settings.json (SettingsStore.cs:144), and ADR-0006's guarantee is that a
+            // settings write must NEVER truncate settings.json into an unreadable file. These
+            // assertions pin the real contract: the destination is only ever the OLD complete
+            // contents or the NEW complete contents - never a hybrid, never partial.
+            // ====================================================================================
+            string atomicDir = Path.Combine(root, "atomicfile");
+            Directory.CreateDirectory(atomicDir);
+            string atomicPath = Path.Combine(atomicDir, "settings.json");
+
+            // 1. create path (destination does not exist yet -> File.Move)
+            AtomicFile.WriteAllText(atomicPath, "v1");
+            Expect(File.ReadAllText(atomicPath) == "v1",
+                "AtomicFile must create the destination with the exact contents given.");
+
+            // 2. replace path (destination exists -> File.Replace)
+            AtomicFile.WriteAllText(atomicPath, "v2");
+            Expect(File.ReadAllText(atomicPath) == "v2",
+                "AtomicFile must REPLACE an existing destination, not append or truncate-partially.");
+
+            // 3. a leftover .tmp from an interrupted earlier write must be ignored by the next save
+            string staleTemp = atomicPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            File.WriteAllText(staleTemp, "GARBAGE-FROM-A-DEAD-WRITE");
+            AtomicFile.WriteAllText(atomicPath, "v3");
+            Expect(File.ReadAllText(atomicPath) == "v3",
+                "AtomicFile must ignore a stale sibling .tmp left by an interrupted write.");
+
+            // 4. INTERRUPTION: hold the destination so the final step of the write cannot complete.
+            //    The helper writes to a temp first, so the destination must still hold the PREVIOUS
+            //    COMPLETE content - this is the 'never a hybrid' property, and the reason the helper
+            //    exists rather than a plain File.WriteAllText.
+            bool surfacedFailure = false;
+            using (var hold = new FileStream(atomicPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                try
+                {
+                    AtomicFile.WriteAllText(atomicPath, "SHOULD-NEVER-LAND");
+                }
+                catch
+                {
+                    surfacedFailure = true;   // the helper must rethrow, not silently succeed
+                }
+            }
+
+            Expect(surfacedFailure,
+                "AtomicFile must SURFACE a failed write; swallowing it would report success for a write that did not land.");
+            Expect(File.ReadAllText(atomicPath) == "v3",
+                $"After a failed write the destination must still be the previous COMPLETE contents (never a hybrid); got '{File.ReadAllText(atomicPath)}'.");
+
+            // 5. this block leaves NO temp debris. The planted stale .tmp is removed here on purpose:
+            //    a later assertion in this step requires a save to leave no temp behind, and a test
+            //    that litters its shared sandbox would fail someone else's guard rather than its own.
+            if (File.Exists(staleTemp)) File.Delete(staleTemp);
+            string[] leftovers = Directory.GetFiles(atomicDir, "*.tmp");
+            Expect(leftovers.Length == 0,
+                $"Neither a successful nor a failed AtomicFile write may leave temp debris; found {leftovers.Length}: {string.Join(", ", leftovers)}");
+
+            // 6. REVIEW-028-FIX-2b (finding 5.3, HIGH): DISCRIMINATING child-process Process.Kill() harness.
+            //    Reuses the NET-025 child/kill pattern:
+            //    - Positive control (--atomicfile-write): 20 iterations of spawning a child writer loop,
+            //      waiting for "atomicfile-child: flowing", hard-killing via Process.Kill(entireProcessTree: true),
+            //      and asserting the destination is ALWAYS the exact complete OLD or exact complete NEW payload
+            //      (never 0-byte truncated, never partial, never a hybrid).
+            //    - Negative control (--atomicfile-write-plain): runs the SAME child/kill loop against bare
+            //      File.WriteAllText (which opens with FileMode.Create, truncating the file to 0 bytes before
+            //      writing). Proves the harness discriminates by asserting that bare File.WriteAllText
+            //      genuinely goes RED (leaves a 0-byte or partial/truncated file on disk under Process.Kill).
+            {
+                string selfExe = Environment.ProcessPath ?? string.Empty;
+                Expect(selfExe.Length > 0, "REVIEW-028-FIX-2b: could not locate test executable for child-process AtomicFile harness.");
+
+                string killDir = Path.Combine(atomicDir, "kill-harness");
+                Directory.CreateDirectory(killDir);
+                string posTarget = Path.Combine(killDir, "positive-settings.json");
+
+                string prevToken = "ITER_00";
+                string prevExpected = ExpandAtomicHarnessPayload(prevToken);
+                AtomicFile.WriteAllText(posTarget, prevExpected);
+
+                const int PositiveIterations = 20;
+                int sawOldCount = 0;
+                int sawNewCount = 0;
+
+                for (int iter = 1; iter <= PositiveIterations; iter++)
+                {
+                    string nextToken = $"ITER_{iter:D2}";
+                    string nextExpected = ExpandAtomicHarnessPayload(nextToken);
+
+                    var psi = new ProcessStartInfo(selfExe)
+                    {
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        CreateNoWindow = true
+                    };
+                    psi.ArgumentList.Add("--atomicfile-write");
+                    psi.ArgumentList.Add(posTarget);
+                    psi.ArgumentList.Add(nextToken);
+
+                    using (var child = Process.Start(psi))
+                    {
+                        Expect(child is not null, $"REVIEW-028-FIX-2b: --atomicfile-write child failed to start on iter {iter}.");
+                        string? ready = child!.StandardOutput.ReadLine();
+                        Expect(ready is not null && ready.Contains("flowing", StringComparison.Ordinal),
+                            $"REVIEW-028-FIX-2b: --atomicfile-write child never reported flowing on iter {iter} (got '{ready}').");
+
+                        // Kill immediately when "flowing" arrives so the kill lands inside the 32 MB write window.
+                        child.Kill(entireProcessTree: true);
+                        child.WaitForExit(10_000);
+                    }
+
+                    Expect(File.Exists(posTarget),
+                        $"REVIEW-028-FIX-2b (iter {iter}): destination disappeared after killing --atomicfile-write child!");
+                    string onDisk = File.ReadAllText(posTarget);
+                    bool isOld = string.Equals(onDisk, prevExpected, StringComparison.Ordinal);
+                    bool isNew = string.Equals(onDisk, nextExpected, StringComparison.Ordinal);
+                    Expect(isOld || isNew,
+                        $"REVIEW-028-FIX-2b (iter {iter}): AtomicFile destination was neither complete OLD ({prevExpected.Length} B) " +
+                        $"nor complete NEW ({nextExpected.Length} B); got {onDisk.Length} B (head='{onDisk[..Math.Min(32, onDisk.Length)]}').");
+
+                    if (isNew)
+                    {
+                        sawNewCount++;
+                        prevToken = nextToken;
+                        prevExpected = nextExpected;
+                    }
+                    else
+                    {
+                        sawOldCount++;
+                    }
+                }
+
+                // Clean up any sibling .tmp left by the hard-killed child processes before the end-of-step .tmp guard
+                foreach (string tmp in Directory.GetFiles(killDir, "*.tmp"))
+                {
+                    try { File.Delete(tmp); } catch { }
+                }
+
+                // Negative control: bare File.WriteAllText (--atomicfile-write-plain) under the exact same kill loop.
+                // Must genuinely go RED (produce a 0-byte truncated or partial/corrupt file that is neither complete OLD nor complete NEW).
+                string negTarget = Path.Combine(killDir, "negative-plain.json");
+                string negSeedToken = "PLAIN_00";
+                string negSeedExpected = ExpandAtomicHarnessPayload(negSeedToken);
+                File.WriteAllText(negTarget, negSeedExpected);
+
+                bool negativeControlCaughtCorruption = false;
+                int negDetectedIter = 0;
+                int negCorruptLen = -1;
+
+                for (int iter = 1; iter <= 20; iter++)
+                {
+                    string nextToken = $"PLAIN_{iter:D2}";
+                    string nextExpected = ExpandAtomicHarnessPayload(nextToken);
+
+                    var psi = new ProcessStartInfo(selfExe)
+                    {
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        CreateNoWindow = true
+                    };
+                    psi.ArgumentList.Add("--atomicfile-write-plain");
+                    psi.ArgumentList.Add(negTarget);
+                    psi.ArgumentList.Add(nextToken);
+
+                    using (var child = Process.Start(psi))
+                    {
+                        Expect(child is not null, "REVIEW-028-FIX-2b: --atomicfile-write-plain child failed to start.");
+                        string? ready = child!.StandardOutput.ReadLine();
+                        Expect(ready is not null && ready.Contains("flowing", StringComparison.Ordinal),
+                            "REVIEW-028-FIX-2b: --atomicfile-write-plain child never reported flowing.");
+
+                        child.Kill(entireProcessTree: true);
+                        child.WaitForExit(10_000);
+                    }
+
+                    string onDisk = File.Exists(negTarget) ? File.ReadAllText(negTarget) : string.Empty;
+                    bool isOld = string.Equals(onDisk, negSeedExpected, StringComparison.Ordinal);
+                    bool isNew = string.Equals(onDisk, nextExpected, StringComparison.Ordinal);
+                    if (!isOld && !isNew)
+                    {
+                        negativeControlCaughtCorruption = true;
+                        negDetectedIter = iter;
+                        negCorruptLen = onDisk.Length;
+                        break;
+                    }
+
+                    negSeedExpected = onDisk;
+                }
+
+                Expect(negativeControlCaughtCorruption,
+                    "REVIEW-028-FIX-2b negative control failed to go RED: --atomicfile-write-plain (bare File.WriteAllText) " +
+                    "survived 20 mid-write process kills without truncating or corrupting the destination, so the harness is not discriminating.");
+
+                try { Directory.Delete(killDir, recursive: true); } catch { }
+
+                Console.WriteLine($" -> [AtomicFile kill harness] positive control GREEN across {PositiveIterations}/20 kills " +
+                                  $"(complete OLD={sawOldCount}, complete NEW={sawNewCount}, 0 hybrids); " +
+                                  $"negative control (--atomicfile-write-plain) went RED on iter {negDetectedIter} " +
+                                  $"(truncated to {negCorruptLen:N0} B vs {prevExpected.Length:N0} B expected)!");
+            }
+
             Expect(rt.Quality == original.Quality, "Round trip: quality.");
             Expect(rt.OutputDirectory == original.OutputDirectory, "Round trip: destination.");
             Expect(rt.BackupOutputDirectory == original.BackupOutputDirectory, "Round trip: backup destination.");
@@ -588,6 +790,22 @@ partial class Program
         Expect(pulls == 1 && samples == 24000, "The callback must see the samples that were due.");
         Expect(firstLeft == 0.25f && firstRight == -0.5f,
             $"Interleaved audio must be left then right. Got {firstLeft}, {firstRight}.");
+
+        // REVIEW-028 finding 5.2 (MEDIUM): direct RecordingAudioChoice contract coverage (Omt singleton + SameAs identity).
+        var omtChoice = RecordingAudioChoice.Omt;
+        Expect(omtChoice.Route == RecordingAudioRoute.OmtSource && omtChoice.Host is null,
+            "RecordingAudioChoice.Omt must represent the OMT source audio route with no host device.");
+        Expect(omtChoice.SameAs(new RecordingAudioChoice("Any OMT label", RecordingAudioRoute.OmtSource, null)),
+            "Two OmtSource choices must match under SameAs regardless of label.");
+        var hostMicA = new RecordingAudioChoice("Mic 1", RecordingAudioRoute.HostInput,
+            new HostAudioCaptureOption(HostAudioCaptureMode.Microphone, "Mic 1", "dev-a", null, 0));
+        var hostMicAUpper = new RecordingAudioChoice("Mic 1 copy", RecordingAudioRoute.HostInput,
+            new HostAudioCaptureOption(HostAudioCaptureMode.Microphone, "Mic 1 copy", "DEV-A", null, 0));
+        var hostMicPair2 = new RecordingAudioChoice("Mic 1 ch 3/4", RecordingAudioRoute.HostInput,
+            new HostAudioCaptureOption(HostAudioCaptureMode.Microphone, "Mic 1 ch 3/4", "dev-a", null, 2));
+        Expect(hostMicA.SameAs(hostMicAUpper), "RecordingAudioChoice.SameAs must compare DeviceId case-insensitively.");
+        Expect(!hostMicA.SameAs(hostMicPair2), "RecordingAudioChoice.SameAs must distinguish ASIO input channel pairs.");
+        Expect(!hostMicA.SameAs(omtChoice) && !hostMicA.SameAs(null), "RecordingAudioChoice.SameAs must reject different routes and null.");
         Expect(feed.PullDue(now) == 0, "The same timestamp must not send the samples again.");
         feed.Dispose();
 

@@ -1,4 +1,5 @@
 using System;
+using OmtCaptureStudio.Services.Forensics;
 using System.IO;
 
 namespace OmtCaptureStudio.Services.Forensics;
@@ -101,6 +102,6 @@ public static class LogLocation
     /// <summary>Best-effort directory creation - a location failure must never become a startup failure.</summary>
     public static void TryCreateDirectory(string dir)
     {
-        try { Directory.CreateDirectory(dir); } catch { }
+        try { Directory.CreateDirectory(dir); } catch (Exception ex) { AppLogger.LogDebug($"[LogLocation] {ex.Message}"); }
     }
 }

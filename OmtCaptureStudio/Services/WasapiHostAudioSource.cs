@@ -156,8 +156,8 @@ public sealed class WasapiHostAudioSource : IHostAudioSource
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
 
-        try { _systemCapture?.Dispose(); } catch { }
-        try { _micCapture?.Dispose(); } catch { }
+        try { _systemCapture?.Dispose(); } catch (Exception ex) { AppLogger.LogDebug($"[WasapiHostAudioSource] {ex.Message}"); }
+        try { _micCapture?.Dispose(); } catch (Exception ex) { AppLogger.LogDebug($"[WasapiHostAudioSource] {ex.Message}"); }
     }
 }
 
@@ -426,7 +426,7 @@ internal sealed unsafe class WasapiEndpointCapture : IDisposable
             _isActive = false;
             if (clientStarted && pAudioClient != IntPtr.Zero)
             {
-                try { AudioClientStop(pAudioClient); } catch { }
+                try { AudioClientStop(pAudioClient); } catch (Exception ex) { AppLogger.LogDebug($"[WasapiHostAudioSource] {ex.Message}"); }
             }
             if (pMixFormat != null)
             {

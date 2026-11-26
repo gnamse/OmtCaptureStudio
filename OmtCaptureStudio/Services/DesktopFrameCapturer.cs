@@ -243,7 +243,7 @@ public sealed class DesktopFrameCapturer : IFrameSource
             // duplication so the next pass recreates it instead of calling into a dead object.
             kind = DxgiAcquireKind.AccessLost;
             LogRecovery($"DXGI AcquireNextFrame failed ({ex.Message}); the duplication will be recreated.");
-            try { _duplication?.Dispose(); } catch { }
+            try { _duplication?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[DesktopFrameCapturer] {swallowedEx.Message}"); }
             _duplication = null;
             return false;
         }
@@ -263,7 +263,7 @@ public sealed class DesktopFrameCapturer : IFrameSource
             }
             else
             {
-                try { _duplication?.Dispose(); } catch { }
+                try { _duplication?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[DesktopFrameCapturer] {swallowedEx.Message}"); }
                 _duplication = null;
             }
 
@@ -280,7 +280,7 @@ public sealed class DesktopFrameCapturer : IFrameSource
                 Width = width;
                 Height = height;
                 EnsureBuffer();
-                try { _staging?.Dispose(); } catch { }
+                try { _staging?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[DesktopFrameCapturer] {swallowedEx.Message}"); }
                 _staging = null;
             }
             else
@@ -297,7 +297,7 @@ public sealed class DesktopFrameCapturer : IFrameSource
         }
         catch (Exception ex)
         {
-            try { _duplication?.Dispose(); } catch { }
+            try { _duplication?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[DesktopFrameCapturer] {swallowedEx.Message}"); }
             _duplication = null;
             LogRecovery($"DXGI duplication recovery failed ({ex.Message}).");
             return false;
@@ -308,11 +308,11 @@ public sealed class DesktopFrameCapturer : IFrameSource
     {
         try
         {
-            try { _staging?.Dispose(); } catch { }
+            try { _staging?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[DesktopFrameCapturer] {swallowedEx.Message}"); }
             _staging = null;
-            try { _duplication?.Dispose(); } catch { }
+            try { _duplication?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[DesktopFrameCapturer] {swallowedEx.Message}"); }
             _duplication = null;
-            try { _device?.Dispose(); } catch { }
+            try { _device?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[DesktopFrameCapturer] {swallowedEx.Message}"); }
             _device = null;
             // Same adapter LUID as the output we were duplicating. A hardware-default device can
             // come back on the other GPU of a hybrid laptop and then fail to duplicate this output.
@@ -356,7 +356,7 @@ public sealed class DesktopFrameCapturer : IFrameSource
 
     private void OpenDuplication()
     {
-        try { _duplication?.Dispose(); } catch { }
+        try { _duplication?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[DesktopFrameCapturer] {swallowedEx.Message}"); }
         _duplication = null;
         if (!TryGetOutput(out IDXGIOutput? output) || output == null)
         {
@@ -467,7 +467,7 @@ public sealed class DesktopFrameCapturer : IFrameSource
                 out ID3D11Device? device);
             if (created.Failure || device == null)
             {
-                try { device?.Dispose(); } catch { }
+                try { device?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[DesktopFrameCapturer] {swallowedEx.Message}"); }
                 throw new InvalidOperationException(
                     $"Desktop capture: D3D11 device creation failed (0x{created.Code:X8}).");
             }
@@ -535,9 +535,9 @@ public sealed class DesktopFrameCapturer : IFrameSource
     private void DisposeResources()
     {
         if (_bufferHandle.IsAllocated) _bufferHandle.Free();
-        try { _staging?.Dispose(); } catch { }
-        try { _duplication?.Dispose(); } catch { }
-        try { _device?.Dispose(); } catch { }
+        try { _staging?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[DesktopFrameCapturer] {swallowedEx.Message}"); }
+        try { _duplication?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[DesktopFrameCapturer] {swallowedEx.Message}"); }
+        try { _device?.Dispose(); } catch (Exception swallowedEx) { AppLogger.LogDebug($"[DesktopFrameCapturer] {swallowedEx.Message}"); }
         _staging = null;
         _duplication = null;
         _device = null;
