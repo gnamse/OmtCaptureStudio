@@ -496,7 +496,10 @@ partial class Program
                         string? ready = child!.StandardOutput.ReadLine();
                         Expect(ready is not null && ready.Contains("flowing", StringComparison.Ordinal),
                             "REVIEW-028-FIX-2b: --atomicfile-write-plain child never reported flowing.");
-
+                        // read the first chunk, then kill: truncated + first block in flight => partial (RED)
+                        ready = child.StandardOutput.ReadLine();
+                        Expect(ready is not null && ready.Contains("chunk-", StringComparison.Ordinal),
+                            "REVIEW-028-FIX-2b: --atomicfile-write-plain child never reported a write chunk.");
                         child.Kill(entireProcessTree: true);
                         child.WaitForExit(10_000);
                     }

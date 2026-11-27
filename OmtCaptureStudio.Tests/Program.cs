@@ -196,7 +196,21 @@ partial class Program
         }
         else
         {
-            File.WriteAllText(path, fullPayload, utf8NoBom);
+            // NEGATIVE CONTROL: chunk so the parent's Process.Kill() lands mid-stream and
+            // leaves a partial/truncated destination. A single synchronous File.WriteAllText
+            // returns before the kill (child dies before any byte lands) => never RED.
+            const int ChunkBytes = 1024 * 1024;
+            int total = fullPayload.Length;
+            using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
+            var writer = new StreamWriter(fs, utf8NoBom) { AutoFlush = true };
+            for (int off = 0; off < total; off += ChunkBytes)
+            {
+                int n = Math.Min(ChunkBytes, total - off);
+                writer.Write(fullPayload.AsSpan(off, n));
+                writer.Flush();
+                Console.WriteLine($"atomicfile-child: chunk-{off}");
+                Console.Out.Flush();
+            }
         }
 
         // Block after the single write: if the parent's Process.Kill() landed mid-write, this line is never
